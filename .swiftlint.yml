@@ -1,0 +1,11 @@
+included:
+  - ios/Sources
+disabled_rules:
+  - line_length
+  - todo
+  - type_body_length
+  - file_length
+  - cyclomatic_complexity
+  - function_body_length
+identifier_name:
+  min_length: 1

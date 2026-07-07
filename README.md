@@ -1,1 +1,527 @@
-# porque-secure-storage-plugin
+# pq-secure-storage-plugin
+
+Capacitor plugin for hardware-backed post-quantum crypto and secure storage on iOS and Android.
+
+It exposes four things:
+
+- **ML-DSA signing** (FIPS 204, levels 65/87), hardware-backed.
+- **AES-256-GCM at rest** with the key held in the TEE / Keychain.
+- **ML-KEM** (FIPS 203, levels 768/1024) for receiving data encrypted to your public key.
+- **Secure storage** (`setItem`/`getItem`/...), a biometric-gated key-value store.
+
+All symmetric crypto is AES-256, which is quantum-safe. There is no RSA or ECC anywhere in the
+custody path.
+
+## Platform support
+
+| Feature | iOS | Android |
+|---|---|---|
+| ML-DSA sign | Secure Enclave (hardware) | Keystore (hardware) |
+| ML-KEM decapsulate | Secure Enclave (hardware) | software (BouncyCastle), private wrapped by a Keystore AES key (TEE) |
+| AES at rest | Keychain / CryptoKit | Keystore AES-256-GCM (TEE) |
+| Secure storage | Keychain, biometry ACL | ML-KEM-1024 envelope, biometric bound to the unwrap Cipher |
+
+iOS decapsulates ML-KEM inside the Secure Enclave; Android does not, because the Android
+Keystore exposes ML-DSA to apps but not ML-KEM (ML-KEM stays in KeyMint / attestation / TLS,
+not the app-facing API). On Android the ML-KEM private key is wrapped by an auth-required
+Keystore AES key and only unwrapped inside a `BiometricPrompt.CryptoObject`, so a hooked
+biometric callback cannot release it (defense against GHSA-vx5f-vmr6-32wf). `kemInSecureEnclave`
+reports which path a device uses.
+
+Targets iOS 26 (CryptoKit `SecureEnclave.MLDSA*` / `SecureEnclave.MLKEM*`) and Android 17
+(Keystore ML-DSA + BouncyCastle 1.78 ML-KEM). Older OS versions report `supportsPqc: false`.
+
+On the web there is no secure hardware, so the plugin falls back to a **software** backend
+(@noble) with keys kept in `localStorage`. Operations work and `supportsPqc` is `true`, but it
+is not hardware-backed or biometric-gated. Use it for development or non-critical data only.
+
+## Install
+
+```bash
+npm install pq-secure-storage-plugin
+npx cap sync
+```
+
+```ts
+import { PQSecureStorage } from 'pq-secure-storage-plugin';
+```
+
+Data fields (`data`, `signature`, `ciphertext`, `plaintext`, `publicKey`, `recipientPublicKey`)
+are base64 strings. The secure-storage `value` is an opaque string stored verbatim (serialize
+JSON/base64 yourself).
+
+### iOS setup
+
+Biometrics use Face ID, which requires a usage description or the app crashes. Add to the app's
+`Info.plist`:
+
+```xml
+<key>NSFaceIDUsageDescription</key>
+<string>Authenticate to use your secure keys</string>
+```
+
+Deployment target must be iOS 26 (the CryptoKit Secure Enclave PQC APIs).
+
+### Android setup
+
+Requires `minSdk 34` and targets Android 17 (SDK 37) for hardware ML-DSA. Add the biometric
+permission to the app's `AndroidManifest.xml`:
+
+```xml
+<uses-permission android:name="android.permission.USE_BIOMETRIC" />
+```
+
+Exclude the store's prefs from backup (see the backup section below) and set
+`android:allowBackup="false"`.
+
+## Usage
+
+### Capabilities
+
+```ts
+const caps = await PQSecureStorage.getHardwareCapabilities();
+// { supportsPqc, supportedVariants, supportedKem, kemInSecureEnclave }
+```
+
+### ML-DSA signing
+
+```ts
+await PQSecureStorage.generateKeyPair({ keyAlias: 'aid-signing', type: 'PQC_MLDSA_65' });
+const { publicKey } = await PQSecureStorage.getPublicKey({ keyAlias: 'aid-signing' });
+const { signature } = await PQSecureStorage.sign({
+  keyAlias: 'aid-signing',
+  type: 'PQC_MLDSA_65',
+  data: base64Payload,
+  description: 'Approve transfer of 10 tokens', // optional, shown in the prompt
+}); // prompts biometrics
+```
+
+Public keys are returned as raw fixed-length bytes (FIPS 203/204), same encoding on iOS and
+Android, and that is what `encryptTo`/`recipientPublicKey` expects back.
+
+### AES-256-GCM at rest
+
+Encrypts and returns the blob; the caller stores it. Not biometric-gated.
+
+```ts
+const { ciphertext } = await PQSecureStorage.encryptAtRest({ keyAlias: 'db', data: base64 });
+const { plaintext } = await PQSecureStorage.decryptAtRest({ keyAlias: 'db', data: ciphertext });
+```
+
+### ML-KEM
+
+```ts
+await PQSecureStorage.generateKemKeyPair({ keyAlias: 'inbox', type: 'PQC_MLKEM_1024' });
+const { publicKey } = await PQSecureStorage.getKemPublicKey({ keyAlias: 'inbox' });
+
+// sender side (software, no key/biometric):
+const { ciphertext } = await PQSecureStorage.encryptTo({
+  recipientPublicKey: publicKey,
+  type: 'PQC_MLKEM_1024',
+  data: base64,
+});
+
+// recipient side (decapsulates in the SEP on iOS, TEE-wrapped key on Android):
+const { plaintext } = await PQSecureStorage.decrypt({
+  keyAlias: 'inbox',
+  type: 'PQC_MLKEM_1024',
+  data: ciphertext,
+}); // prompts biometrics
+```
+
+### Secure storage
+
+Key-value store the plugin persists for you. Reads are biometric-gated; writes are silent.
+
+```ts
+await PQSecureStorage.setItem({ key: 'seed-phrase', value: seedString });
+const { value } = await PQSecureStorage.getItem({ key: 'seed-phrase' }); // prompts; null if absent
+const { exists } = await PQSecureStorage.hasItem({ key: 'seed-phrase' });
+const { keys } = await PQSecureStorage.keys();
+await PQSecureStorage.removeItem({ key: 'seed-phrase' });
+await PQSecureStorage.clear();
+```
+
+Notes:
+
+- `getItem` on a missing key resolves `{ value: null }`, it does not throw.
+- Secrets are stored `ThisDeviceOnly` and excluded from backups (see Android note below).
+- On Android the **first** `setItem` creates the store keypair and prompts biometrics once (to
+  wrap the private key in the TEE). Later writes are silent. This is inherent to combining
+  silent writes, a `CryptoObject`-bound gate, and a quantum-safe envelope.
+
+#### Android backup exclusion
+
+Backup rules live in the host app, not the library. Exclude the two prefs files in your app's
+`data_extraction_rules.xml`:
+
+```xml
+<data-extraction-rules>
+  <cloud-backup>
+    <exclude domain="sharedpref" path="pq_secure_store.xml"/>
+    <exclude domain="sharedpref" path="pq_secure_store_key.xml"/>
+  </cloud-backup>
+  <device-transfer>
+    <exclude domain="sharedpref" path="pq_secure_store.xml"/>
+    <exclude domain="sharedpref" path="pq_secure_store_key.xml"/>
+  </device-transfer>
+</data-extraction-rules>
+```
+
+The Keystore wrap key never leaves the TEE, so a leaked backup is still useless off-device; the
+exclusion is defense in depth. Also set `android:allowBackup="false"` in the host app so the
+prefs cannot be pulled/edited via `adb backup`/`restore`.
+
+## API
+
+<docgen-index>
+
+* [`getHardwareCapabilities()`](#gethardwarecapabilities)
+* [`generateKeyPair(...)`](#generatekeypair)
+* [`getPublicKey(...)`](#getpublickey)
+* [`sign(...)`](#sign)
+* [`encryptAtRest(...)`](#encryptatrest)
+* [`decryptAtRest(...)`](#decryptatrest)
+* [`generateKemKeyPair(...)`](#generatekemkeypair)
+* [`getKemPublicKey(...)`](#getkempublickey)
+* [`encryptTo(...)`](#encryptto)
+* [`decrypt(...)`](#decrypt)
+* [`setItem(...)`](#setitem)
+* [`getItem(...)`](#getitem)
+* [`removeItem(...)`](#removeitem)
+* [`hasItem(...)`](#hasitem)
+* [`keys()`](#keys)
+* [`clear()`](#clear)
+* [Interfaces](#interfaces)
+* [Type Aliases](#type-aliases)
+
+</docgen-index>
+
+<docgen-api>
+<!--Update the source file JSDoc comments and rerun docgen to update the docs below-->
+
+### getHardwareCapabilities()
+
+```typescript
+getHardwareCapabilities() => Promise<HardwareCapabilities>
+```
+
+Report what post-quantum crypto this device supports.
+
+**Returns:** <code>Promise&lt;<a href="#hardwarecapabilities">HardwareCapabilities</a>&gt;</code>
+
+--------------------
+
+
+### generateKeyPair(...)
+
+```typescript
+generateKeyPair(options: { keyAlias: string; type: KeyType; overwrite?: boolean; }) => Promise<{ publicKey: string; }>
+```
+
+Generate a hardware-backed ML-DSA signing keypair under an alias and return the raw
+public key. Rejects if the alias exists unless `overwrite` is true.
+
+| Param         | Type                                                                                          |
+| ------------- | --------------------------------------------------------------------------------------------- |
+| **`options`** | <code>{ keyAlias: string; type: <a href="#keytype">KeyType</a>; overwrite?: boolean; }</code> |
+
+**Returns:** <code>Promise&lt;{ publicKey: string; }&gt;</code>
+
+--------------------
+
+
+### getPublicKey(...)
+
+```typescript
+getPublicKey(options: { keyAlias: string; }) => Promise<{ publicKey: string; }>
+```
+
+Return the raw public key for an existing signing alias.
+
+| Param         | Type                               |
+| ------------- | ---------------------------------- |
+| **`options`** | <code>{ keyAlias: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ publicKey: string; }&gt;</code>
+
+--------------------
+
+
+### sign(...)
+
+```typescript
+sign(options: { keyAlias: string; data: string; type: KeyType; description?: string; }) => Promise<{ signature: string; }>
+```
+
+Sign data with the aliased ML-DSA key. Prompts for biometrics. `description`, if given,
+is shown in the prompt so the user sees what they authorize.
+
+| Param         | Type                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------ |
+| **`options`** | <code>{ keyAlias: string; data: string; type: <a href="#keytype">KeyType</a>; description?: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ signature: string; }&gt;</code>
+
+--------------------
+
+
+### encryptAtRest(...)
+
+```typescript
+encryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ ciphertext: string; }>
+```
+
+Encrypt data with an AES-256-GCM key held in the TEE/Keychain. Returns the blob to store.
+
+| Param         | Type                                             |
+| ------------- | ------------------------------------------------ |
+| **`options`** | <code>{ keyAlias: string; data: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ ciphertext: string; }&gt;</code>
+
+--------------------
+
+
+### decryptAtRest(...)
+
+```typescript
+decryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ plaintext: string; }>
+```
+
+Decrypt a blob produced by `encryptAtRest` under the same alias.
+
+| Param         | Type                                             |
+| ------------- | ------------------------------------------------ |
+| **`options`** | <code>{ keyAlias: string; data: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ plaintext: string; }&gt;</code>
+
+--------------------
+
+
+### generateKemKeyPair(...)
+
+```typescript
+generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boolean; }) => Promise<{ publicKey: string; }>
+```
+
+Generate an ML-KEM keypair under an alias and return the raw public key. Rejects if the
+alias exists unless `overwrite` is true.
+
+| Param         | Type                                                                                          |
+| ------------- | --------------------------------------------------------------------------------------------- |
+| **`options`** | <code>{ keyAlias: string; type: <a href="#kemtype">KemType</a>; overwrite?: boolean; }</code> |
+
+**Returns:** <code>Promise&lt;{ publicKey: string; }&gt;</code>
+
+--------------------
+
+
+### getKemPublicKey(...)
+
+```typescript
+getKemPublicKey(options: { keyAlias: string; }) => Promise<{ publicKey: string; }>
+```
+
+Return the raw ML-KEM public key for an alias. Rejects if it fails an integrity check.
+
+| Param         | Type                               |
+| ------------- | ---------------------------------- |
+| **`options`** | <code>{ keyAlias: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ publicKey: string; }&gt;</code>
+
+--------------------
+
+
+### encryptTo(...)
+
+```typescript
+encryptTo(options: { recipientPublicKey: string; type: KemType; data: string; }) => Promise<{ ciphertext: string; }>
+```
+
+Encrypt data to a recipient's raw ML-KEM public key. Pure software, no alias or biometrics.
+
+| Param         | Type                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------ |
+| **`options`** | <code>{ recipientPublicKey: string; type: <a href="#kemtype">KemType</a>; data: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ ciphertext: string; }&gt;</code>
+
+--------------------
+
+
+### decrypt(...)
+
+```typescript
+decrypt(options: { keyAlias: string; type: KemType; data: string; }) => Promise<{ plaintext: string; }>
+```
+
+Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics.
+
+| Param         | Type                                                                                   |
+| ------------- | -------------------------------------------------------------------------------------- |
+| **`options`** | <code>{ keyAlias: string; type: <a href="#kemtype">KemType</a>; data: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ plaintext: string; }&gt;</code>
+
+--------------------
+
+
+### setItem(...)
+
+```typescript
+setItem(options: { key: string; value: string; }) => Promise<void>
+```
+
+Store a secret string under a key. Silent write (Android prompts once on the very first
+write to create the store key). `value` is stored verbatim.
+
+| Param         | Type                                         |
+| ------------- | -------------------------------------------- |
+| **`options`** | <code>{ key: string; value: string; }</code> |
+
+--------------------
+
+
+### getItem(...)
+
+```typescript
+getItem(options: { key: string; }) => Promise<{ value: string | null; }>
+```
+
+Read a stored secret. Prompts for biometrics. Returns `null` if the key is absent.
+
+| Param         | Type                          |
+| ------------- | ----------------------------- |
+| **`options`** | <code>{ key: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ value: string | null; }&gt;</code>
+
+--------------------
+
+
+### removeItem(...)
+
+```typescript
+removeItem(options: { key: string; }) => Promise<void>
+```
+
+Delete a stored secret. No prompt.
+
+| Param         | Type                          |
+| ------------- | ----------------------------- |
+| **`options`** | <code>{ key: string; }</code> |
+
+--------------------
+
+
+### hasItem(...)
+
+```typescript
+hasItem(options: { key: string; }) => Promise<{ exists: boolean; }>
+```
+
+Whether a key exists in the store. No prompt.
+
+| Param         | Type                          |
+| ------------- | ----------------------------- |
+| **`options`** | <code>{ key: string; }</code> |
+
+**Returns:** <code>Promise&lt;{ exists: boolean; }&gt;</code>
+
+--------------------
+
+
+### keys()
+
+```typescript
+keys() => Promise<{ keys: string[]; }>
+```
+
+List the names of stored secrets. No prompt.
+
+**Returns:** <code>Promise&lt;{ keys: string[]; }&gt;</code>
+
+--------------------
+
+
+### clear()
+
+```typescript
+clear() => Promise<void>
+```
+
+Delete every stored secret and the store key. No prompt.
+
+--------------------
+
+
+### Interfaces
+
+
+#### HardwareCapabilities
+
+| Prop                     | Type                   | Description                                                                                                                                                    |
+| ------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`supportsPqc`**        | <code>boolean</code>   | Whether the device exposes hardware-backed post-quantum crypto.                                                                                                |
+| **`supportedVariants`**  | <code>KeyType[]</code> | ML-DSA signing variants available on this device.                                                                                                              |
+| **`supportedKem`**       | <code>KemType[]</code> | ML-KEM variants available on this device.                                                                                                                      |
+| **`kemInSecureEnclave`** | <code>boolean</code>   | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key. |
+
+
+### Type Aliases
+
+
+#### KeyType
+
+<code>"private" | "public" | "secret"</code>
+
+
+#### KemType
+
+<code>'PQC_MLKEM_768' | 'PQC_MLKEM_1024'</code>
+
+</docgen-api>
+
+## Security notes
+
+- **Recovery.** Biometric keys are bound to the current enrollment: adding or removing a
+  fingerprint/face invalidates the Keystore/Secure Enclave keys, which makes the store's private
+  key unrecoverable and every stored secret unreadable. This is deliberate (it blocks an attacker
+  who enrolls their own biometric), so the host app MUST keep an independent recovery path for
+  anything critical (e.g. an exportable mnemonic). Losing the device or re-enrolling is not
+  recoverable from the plugin alone.
+- **Public key integrity (Android).** Stored ML-KEM public keys are tagged with an HMAC keyed by
+  a non-exportable Keystore key. If the prefs are tampered, `getKemPublicKey`/`setItem` reject
+  with `E_TAMPERED` instead of encrypting to a substituted key.
+- **Enumeration.** `keys()`/`hasItem()` return which names exist without a biometric (values stay
+  gated). Destructive ops (`removeItem`/`clear`) are also ungated. The host guards its bridge.
+- **Cross-platform ML-KEM.** iOS (CryptoKit) and Android (BouncyCastle) must agree on the raw
+  shared secret. Before relying on a ciphertext produced on one platform decrypting on the other,
+  run a known-answer test against a FIPS-203 vector on a real device.
+
+## Errors
+
+Rejections carry a code: `E_MISSING_PARAMS`, `E_AUTH_FAILED` (biometric cancelled/failed),
+`E_ENCRYPT`, `E_DECRYPT`, `E_KEY_NOT_FOUND`, `E_UNSUPPORTED`, `E_ALIAS_EXISTS`, `E_NO_ACTIVITY`,
+`E_TAMPERED` (integrity check failed), `E_TYPE_MISMATCH`, `E_BAD_CIPHERTEXT`, `E_BUSY`.
+
+## Tests
+
+The TypeScript layer has a software double (`test/pq-double.ts`) that mirrors the native wire
+format, so the round-trip and framing are unit-tested off-device.
+
+```bash
+npm run build   # tsc
+npm test        # vitest
+```
+
+The native paths (Secure Enclave, Keystore, Keychain, biometrics) can only be exercised on a
+real device. Source carries `on-device-confirm` notes where an exact SDK label needs checking
+against the shipping iOS 26 / Android 17 APIs.
+
+## License
+
+MIT

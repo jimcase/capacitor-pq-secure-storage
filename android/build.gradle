@@ -1,0 +1,46 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace "com.pq.securestorage"
+
+    compileSdk 37 // Android 17 (confirm against installed SDK)
+
+    defaultConfig {
+        minSdk 34 // tracks the wallet's minSdk
+        targetSdk 37 // Android 17
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    kotlinOptions {
+        jvmTarget = "11"
+    }
+}
+
+dependencies {
+    implementation 'com.getcapacitor:capacitor-core:5.+'
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8'
+    // BiometricPrompt + CryptoObject binding for sign() -- confirm 1.1.0 vs 1.2.0-alpha on-device
+    implementation 'androidx.biometric:biometric:1.1.0'
+    // ML-KEM in software (AndroidKeyStore does not expose ML-KEM to apps, only ML-DSA). The
+    // private key is wrapped by a Keystore AES key (TEE). ML-KEM naming (org.bouncycastle.jcajce
+    // .spec.MLKEMParameterSpec, algorithm "ML-KEM") landed in BC 1.80; 1.78 only had Kyber.
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.81'
+
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+}

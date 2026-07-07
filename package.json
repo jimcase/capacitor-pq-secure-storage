@@ -1,0 +1,95 @@
+{
+  "name": "pq-secure-storage-plugin",
+  "version": "0.1.0",
+  "description": "Hardware-backed post-quantum crypto (ML-DSA, ML-KEM, AES-256) and biometric secure storage for Capacitor on iOS and Android, with a software fallback for the web.",
+  "license": "MIT",
+  "author": "J Caso",
+  "homepage": "https://github.com/jimcase/pq-secure-storage-plugin#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jimcase/pq-secure-storage-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jimcase/pq-secure-storage-plugin/issues"
+  },
+  "keywords": [
+    "capacitor",
+    "plugin",
+    "post-quantum",
+    "pqc",
+    "ml-dsa",
+    "ml-kem",
+    "dilithium",
+    "kyber",
+    "fips-204",
+    "fips-203",
+    "secure-storage",
+    "biometric",
+    "cryptography",
+    "ios",
+    "android"
+  ],
+  "main": "dist/plugin.cjs.js",
+  "module": "dist/esm/index.js",
+  "types": "dist/esm/index.d.ts",
+  "unpkg": "dist/plugin.js",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/plugin.cjs.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "ios/Sources/",
+    "android/src/",
+    "android/build.gradle",
+    "android/proguard-rules.pro",
+    "PqSecureStoragePlugin.podspec"
+  ],
+  "capacitor": {
+    "ios": {
+      "src": "ios"
+    },
+    "android": {
+      "src": "android"
+    }
+  },
+  "scripts": {
+    "clean": "rimraf ./dist",
+    "docgen": "docgen --project tsconfig.docgen.json --api PQSecureStoragePlugin --output-readme README.md --output-json dist/docs.json",
+    "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs",
+    "lint": "eslint . --ext .ts && prettier --check \"{src,test}/**/*.ts\"",
+    "fmt": "eslint . --ext .ts --fix && prettier --write \"{src,test}/**/*.ts\"",
+    "test": "vitest run",
+    "verify": "npm run build && npm run test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@capacitor/core": ">=6.0.0"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.2.0",
+    "@noble/post-quantum": "^0.6.1"
+  },
+  "devDependencies": {
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/docgen": "^0.3.1",
+    "@rollup/plugin-commonjs": "^28.0.0",
+    "@rollup/plugin-node-resolve": "^16.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.0",
+    "rimraf": "^5.0.0",
+    "rollup": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.9"
+  }
+}
