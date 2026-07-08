@@ -16,8 +16,17 @@ import type { PQSecureStoragePlugin, KeyType, KemType, HardwareCapabilities } fr
 // stops accidental value swaps.
 
 const KEM_CT_LEN: Record<KemType, number> = { PQC_MLKEM_768: 1088, PQC_MLKEM_1024: 1568 };
-const dsaOf = (t: KeyType) => (t === 'PQC_MLDSA_65' ? ml_dsa65 : ml_dsa87);
-const kemOf = (t: KemType) => (t === 'PQC_MLKEM_768' ? ml_kem768 : ml_kem1024);
+// throw on any unknown type instead of silently falling through to the second variant
+const dsaOf = (t: KeyType) => {
+    if (t === 'PQC_MLDSA_65') return ml_dsa65;
+    if (t === 'PQC_MLDSA_87') return ml_dsa87;
+    throw new Error('Unsupported key type');
+};
+const kemOf = (t: KemType) => {
+    if (t === 'PQC_MLKEM_768') return ml_kem768;
+    if (t === 'PQC_MLKEM_1024') return ml_kem1024;
+    throw new Error('Unsupported KEM type');
+};
 
 const STORE_KEY = 'pqss.storekey'; // internal store master AES key, unreachable via a caller alias
 
@@ -53,9 +62,9 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         this.store = store ?? (globalThis as unknown as { localStorage: Storage }).localStorage;
     }
 
-    // reject empty aliases and any alias inside the plugin's own namespace
+    // same charset as native; blocks the plugin's own namespace and reserved prefix
     private safeAlias(alias: string): string {
-        if (!alias || alias.startsWith('pqss.') || alias.startsWith('__pq')) {
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(alias) || alias.startsWith('__pq')) {
             throw this.unavailable('Invalid key alias');
         }
         return alias;
@@ -100,14 +109,20 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
     private getKeypair(prefix: string, alias: string): { sk: Uint8Array; pk: Uint8Array; type: string } | null {
         const raw = this.store.getItem(`${prefix}.${alias}`);
         if (!raw) return null;
-        const o = JSON.parse(raw) as { sk: string; pk: string; type: string };
-        return { sk: fromB64(o.sk), pk: fromB64(o.pk), type: o.type };
+        try {
+            const o = JSON.parse(raw) as { sk: string; pk: string; type: string };
+            return { sk: fromB64(o.sk), pk: fromB64(o.pk), type: o.type };
+        } catch {
+            throw this.unavailable('Key corrupted');
+        }
     }
 
     async getHardwareCapabilities(): Promise<HardwareCapabilities> {
         // operations are available, but in software -- not hardware-backed
         return {
             supportsPqc: true,
+            hardwareBacked: false, // localStorage, not a TEE
+            biometricGated: false,
             supportedVariants: ['PQC_MLDSA_65', 'PQC_MLDSA_87'],
             supportedKem: ['PQC_MLKEM_768', 'PQC_MLKEM_1024'],
             kemInSecureEnclave: false,
@@ -176,8 +191,9 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         const kp = this.getKeypair('pqss.kem', this.safeAlias(options.keyAlias));
         if (!kp) throw this.unavailable('Key not found');
         if (kp.type !== options.type) throw this.unavailable('Key type mismatch');
-        const buf = fromB64(options.data);
         const ctLen = KEM_CT_LEN[options.type];
+        if (ctLen === undefined) throw this.unavailable('Unsupported KEM type');
+        const buf = fromB64(options.data);
         if (buf.length <= ctLen + 12) throw this.unavailable('Malformed ciphertext');
         const sharedSecret = kemOf(options.type).decapsulate(buf.subarray(0, ctLen), kp.sk);
         const nonce = buf.subarray(ctLen, ctLen + 12);

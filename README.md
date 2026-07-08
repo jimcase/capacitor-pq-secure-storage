@@ -29,7 +29,7 @@ biometric callback cannot release it (defense against GHSA-vx5f-vmr6-32wf). `kem
 reports which path a device uses.
 
 Targets iOS 26 (CryptoKit `SecureEnclave.MLDSA*` / `SecureEnclave.MLKEM*`) and Android 17
-(Keystore ML-DSA + BouncyCastle 1.78 ML-KEM). Older OS versions report `supportsPqc: false`.
+(Keystore ML-DSA + BouncyCastle 1.81 ML-KEM). Older OS versions report `supportsPqc: false`.
 
 On the web there is no secure hardware, so the plugin falls back to a **software** backend
 (@noble) with keys kept in `localStorage`. Operations work and `supportsPqc` is `true`, but it
@@ -83,7 +83,8 @@ Exclude the store's prefs from backup (see the backup section below) and set
 
 ```ts
 const caps = await PQSecureStorage.getHardwareCapabilities();
-// { supportsPqc, supportedVariants, supportedKem, kemInSecureEnclave }
+// { supportsPqc, hardwareBacked, biometricGated, supportedVariants, supportedKem, kemInSecureEnclave }
+// gate seed-tier trust on hardwareBacked (false on web), not on supportsPqc (true on web too)
 ```
 
 ### ML-DSA signing
@@ -134,7 +135,8 @@ const { plaintext } = await PQSecureStorage.decrypt({
 
 ### Secure storage
 
-Key-value store the plugin persists for you. Reads are biometric-gated; writes are silent.
+Key-value store the plugin persists for you. Reads (`getItem`) and deletes (`removeItem`,
+`clear`) are biometric-gated; writes are silent.
 
 ```ts
 await PQSecureStorage.setItem({ key: 'seed-phrase', value: seedString });
@@ -206,12 +208,12 @@ prefs cannot be pulled/edited via `adb backup`/`restore`.
 ### getHardwareCapabilities()
 
 ```typescript
-getHardwareCapabilities() => Promise<HardwareCapabilities>
+getHardwareCapabilities() => any
 ```
 
 Report what post-quantum crypto this device supports.
 
-**Returns:** <code>Promise&lt;<a href="#hardwarecapabilities">HardwareCapabilities</a>&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -219,7 +221,7 @@ Report what post-quantum crypto this device supports.
 ### generateKeyPair(...)
 
 ```typescript
-generateKeyPair(options: { keyAlias: string; type: KeyType; overwrite?: boolean; }) => Promise<{ publicKey: string; }>
+generateKeyPair(options: { keyAlias: string; type: KeyType; overwrite?: boolean; }) => any
 ```
 
 Generate a hardware-backed ML-DSA signing keypair under an alias and return the raw
@@ -229,7 +231,7 @@ public key. Rejects if the alias exists unless `overwrite` is true.
 | ------------- | --------------------------------------------------------------------------------------------- |
 | **`options`** | <code>{ keyAlias: string; type: <a href="#keytype">KeyType</a>; overwrite?: boolean; }</code> |
 
-**Returns:** <code>Promise&lt;{ publicKey: string; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -237,7 +239,7 @@ public key. Rejects if the alias exists unless `overwrite` is true.
 ### getPublicKey(...)
 
 ```typescript
-getPublicKey(options: { keyAlias: string; }) => Promise<{ publicKey: string; }>
+getPublicKey(options: { keyAlias: string; }) => any
 ```
 
 Return the raw public key for an existing signing alias.
@@ -246,7 +248,7 @@ Return the raw public key for an existing signing alias.
 | ------------- | ---------------------------------- |
 | **`options`** | <code>{ keyAlias: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ publicKey: string; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -254,7 +256,7 @@ Return the raw public key for an existing signing alias.
 ### sign(...)
 
 ```typescript
-sign(options: { keyAlias: string; data: string; type: KeyType; description?: string; }) => Promise<{ signature: string; }>
+sign(options: { keyAlias: string; data: string; type: KeyType; description?: string; }) => any
 ```
 
 Sign data with the aliased ML-DSA key. Prompts for biometrics. `description`, if given,
@@ -264,7 +266,7 @@ is shown in the prompt so the user sees what they authorize.
 | ------------- | ------------------------------------------------------------------------------------------------------------ |
 | **`options`** | <code>{ keyAlias: string; data: string; type: <a href="#keytype">KeyType</a>; description?: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ signature: string; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -272,7 +274,7 @@ is shown in the prompt so the user sees what they authorize.
 ### encryptAtRest(...)
 
 ```typescript
-encryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ ciphertext: string; }>
+encryptAtRest(options: { keyAlias: string; data: string; }) => any
 ```
 
 Encrypt data with an AES-256-GCM key held in the TEE/Keychain. Returns the blob to store.
@@ -281,7 +283,7 @@ Encrypt data with an AES-256-GCM key held in the TEE/Keychain. Returns the blob 
 | ------------- | ------------------------------------------------ |
 | **`options`** | <code>{ keyAlias: string; data: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ ciphertext: string; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -289,7 +291,7 @@ Encrypt data with an AES-256-GCM key held in the TEE/Keychain. Returns the blob 
 ### decryptAtRest(...)
 
 ```typescript
-decryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ plaintext: string; }>
+decryptAtRest(options: { keyAlias: string; data: string; }) => any
 ```
 
 Decrypt a blob produced by `encryptAtRest` under the same alias.
@@ -298,7 +300,7 @@ Decrypt a blob produced by `encryptAtRest` under the same alias.
 | ------------- | ------------------------------------------------ |
 | **`options`** | <code>{ keyAlias: string; data: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ plaintext: string; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -306,7 +308,7 @@ Decrypt a blob produced by `encryptAtRest` under the same alias.
 ### generateKemKeyPair(...)
 
 ```typescript
-generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boolean; }) => Promise<{ publicKey: string; }>
+generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boolean; }) => any
 ```
 
 Generate an ML-KEM keypair under an alias and return the raw public key. Rejects if the
@@ -316,7 +318,7 @@ alias exists unless `overwrite` is true.
 | ------------- | --------------------------------------------------------------------------------------------- |
 | **`options`** | <code>{ keyAlias: string; type: <a href="#kemtype">KemType</a>; overwrite?: boolean; }</code> |
 
-**Returns:** <code>Promise&lt;{ publicKey: string; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -324,7 +326,7 @@ alias exists unless `overwrite` is true.
 ### getKemPublicKey(...)
 
 ```typescript
-getKemPublicKey(options: { keyAlias: string; }) => Promise<{ publicKey: string; }>
+getKemPublicKey(options: { keyAlias: string; }) => any
 ```
 
 Return the raw ML-KEM public key for an alias. Rejects if it fails an integrity check.
@@ -333,7 +335,7 @@ Return the raw ML-KEM public key for an alias. Rejects if it fails an integrity 
 | ------------- | ---------------------------------- |
 | **`options`** | <code>{ keyAlias: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ publicKey: string; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -341,7 +343,7 @@ Return the raw ML-KEM public key for an alias. Rejects if it fails an integrity 
 ### encryptTo(...)
 
 ```typescript
-encryptTo(options: { recipientPublicKey: string; type: KemType; data: string; }) => Promise<{ ciphertext: string; }>
+encryptTo(options: { recipientPublicKey: string; type: KemType; data: string; }) => any
 ```
 
 Encrypt data to a recipient's raw ML-KEM public key. Pure software, no alias or biometrics.
@@ -350,7 +352,7 @@ Encrypt data to a recipient's raw ML-KEM public key. Pure software, no alias or 
 | ------------- | ------------------------------------------------------------------------------------------------ |
 | **`options`** | <code>{ recipientPublicKey: string; type: <a href="#kemtype">KemType</a>; data: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ ciphertext: string; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -358,7 +360,7 @@ Encrypt data to a recipient's raw ML-KEM public key. Pure software, no alias or 
 ### decrypt(...)
 
 ```typescript
-decrypt(options: { keyAlias: string; type: KemType; data: string; }) => Promise<{ plaintext: string; }>
+decrypt(options: { keyAlias: string; type: KemType; data: string; }) => any
 ```
 
 Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics.
@@ -367,7 +369,7 @@ Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics.
 | ------------- | -------------------------------------------------------------------------------------- |
 | **`options`** | <code>{ keyAlias: string; type: <a href="#kemtype">KemType</a>; data: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ plaintext: string; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -375,7 +377,7 @@ Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics.
 ### setItem(...)
 
 ```typescript
-setItem(options: { key: string; value: string; }) => Promise<void>
+setItem(options: { key: string; value: string; }) => any
 ```
 
 Store a secret string under a key. Silent write (Android prompts once on the very first
@@ -385,13 +387,15 @@ write to create the store key). `value` is stored verbatim.
 | ------------- | -------------------------------------------- |
 | **`options`** | <code>{ key: string; value: string; }</code> |
 
+**Returns:** <code>any</code>
+
 --------------------
 
 
 ### getItem(...)
 
 ```typescript
-getItem(options: { key: string; }) => Promise<{ value: string | null; }>
+getItem(options: { key: string; }) => any
 ```
 
 Read a stored secret. Prompts for biometrics. Returns `null` if the key is absent.
@@ -400,7 +404,7 @@ Read a stored secret. Prompts for biometrics. Returns `null` if the key is absen
 | ------------- | ----------------------------- |
 | **`options`** | <code>{ key: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ value: string | null; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -408,14 +412,17 @@ Read a stored secret. Prompts for biometrics. Returns `null` if the key is absen
 ### removeItem(...)
 
 ```typescript
-removeItem(options: { key: string; }) => Promise<void>
+removeItem(options: { key: string; }) => any
 ```
 
-Delete a stored secret. No prompt.
+Delete a stored secret. Prompts for biometrics on device (a destructive op shouldn't be
+silent). No-op and no prompt if the key is absent. Web fallback has no biometric, so silent.
 
 | Param         | Type                          |
 | ------------- | ----------------------------- |
 | **`options`** | <code>{ key: string; }</code> |
+
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -423,7 +430,7 @@ Delete a stored secret. No prompt.
 ### hasItem(...)
 
 ```typescript
-hasItem(options: { key: string; }) => Promise<{ exists: boolean; }>
+hasItem(options: { key: string; }) => any
 ```
 
 Whether a key exists in the store. No prompt.
@@ -432,7 +439,7 @@ Whether a key exists in the store. No prompt.
 | ------------- | ----------------------------- |
 | **`options`** | <code>{ key: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ exists: boolean; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -440,12 +447,12 @@ Whether a key exists in the store. No prompt.
 ### keys()
 
 ```typescript
-keys() => Promise<{ keys: string[]; }>
+keys() => any
 ```
 
 List the names of stored secrets. No prompt.
 
-**Returns:** <code>Promise&lt;{ keys: string[]; }&gt;</code>
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -453,10 +460,13 @@ List the names of stored secrets. No prompt.
 ### clear()
 
 ```typescript
-clear() => Promise<void>
+clear() => any
 ```
 
-Delete every stored secret and the store key. No prompt.
+Delete every stored secret and the store key. Prompts for biometrics on device. No prompt if
+the store is already empty. Web fallback has no biometric, so silent.
+
+**Returns:** <code>any</code>
 
 --------------------
 
@@ -466,12 +476,14 @@ Delete every stored secret and the store key. No prompt.
 
 #### HardwareCapabilities
 
-| Prop                     | Type                   | Description                                                                                                                                                    |
-| ------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`supportsPqc`**        | <code>boolean</code>   | Whether the device exposes hardware-backed post-quantum crypto.                                                                                                |
-| **`supportedVariants`**  | <code>KeyType[]</code> | ML-DSA signing variants available on this device.                                                                                                              |
-| **`supportedKem`**       | <code>KemType[]</code> | ML-KEM variants available on this device.                                                                                                                      |
-| **`kemInSecureEnclave`** | <code>boolean</code>   | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key. |
+| Prop                     | Type                 | Description                                                                                                                                                                                             |
+| ------------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`supportsPqc`**        | <code>boolean</code> | Whether post-quantum operations are available (hardware OR software fallback).                                                                                                                          |
+| **`hardwareBacked`**     | <code>boolean</code> | True only when keys are held in secure hardware (TEE/Keychain/Secure Enclave). FALSE on the web software fallback, where keys live in localStorage. Gate seed-tier trust on this, not on `supportsPqc`. |
+| **`biometricGated`**     | <code>boolean</code> | True when reads are gated by a device biometric. False on the web software fallback.                                                                                                                    |
+| **`supportedVariants`**  | <code>{}</code>      | ML-DSA signing variants available on this device.                                                                                                                                                       |
+| **`supportedKem`**       | <code>{}</code>      | ML-KEM variants available on this device.                                                                                                                                                               |
+| **`kemInSecureEnclave`** | <code>boolean</code> | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key.                                          |
 
 
 ### Type Aliases
@@ -479,7 +491,7 @@ Delete every stored secret and the store key. No prompt.
 
 #### KeyType
 
-<code>"private" | "public" | "secret"</code>
+<code>'PQC_MLDSA_65' | 'PQC_MLDSA_87'</code>
 
 
 #### KemType
@@ -506,20 +518,25 @@ Delete every stored secret and the store key. No prompt.
 - **Alias validation.** Key aliases are restricted to `[A-Za-z0-9_-]` and cannot start with the
   plugin's reserved prefix, so a caller cannot clobber the plugin's own internal Keystore entries
   (`E_BAD_ALIAS`).
-- **Destructive ops.** `removeItem`/`clear`/`setItem`-overwrite are NOT biometric-gated (writes are
-  silent by design). `keys()`/`hasItem()` enumerate names without a prompt. Read-gating does not
-  protect integrity or availability from an attacker who reaches the JS bridge (the main surface in
-  a webview) — the host MUST guard bridge access. The store item MAC still prevents forged values.
+- **Destructive ops.** `removeItem` and `clear` are biometric-gated on device (bound to the store
+  wrap key, so a hooked callback can't fake the prompt); they skip the prompt only when there is
+  nothing to delete or the key is already invalidated. `setItem`-overwrite stays silent (writes are
+  silent by design) and `keys()`/`hasItem()` enumerate names without a prompt. The web fallback has
+  no biometric, so deletes there are silent. Gating still does not protect integrity or availability
+  from an attacker who reaches the JS bridge (the main surface in a webview) — the host MUST guard
+  bridge access. The store item MAC prevents forged values regardless.
 - **Cross-platform ML-KEM.** iOS (CryptoKit) and Android (BouncyCastle) must agree on the raw
   shared secret. Before relying on a ciphertext produced on one platform decrypting on the other,
   run a known-answer test against a FIPS-203 vector on a real device.
 
 ## Errors
 
-Rejections carry a code: `E_MISSING_PARAMS`, `E_BAD_ALIAS` (reserved/invalid alias), `E_AUTH_FAILED`
-(biometric cancelled/failed), `E_KEY_INVALIDATED` (biometric enrollment changed), `E_ENCRYPT`,
-`E_DECRYPT`, `E_KEY_NOT_FOUND`, `E_UNSUPPORTED`, `E_ALIAS_EXISTS`, `E_NO_ACTIVITY`, `E_TAMPERED`
-(integrity check failed), `E_TYPE_MISMATCH`, `E_BAD_CIPHERTEXT`, `E_BUSY`.
+Rejections carry a code: `E_MISSING_PARAMS`, `E_INVALID_ARGS` (key/value out of bounds),
+`E_BAD_ALIAS` (reserved/invalid alias), `E_AUTH_FAILED` (biometric cancelled/failed),
+`E_KEY_INVALIDATED` (biometric enrollment changed), `E_ENCRYPT`, `E_DECRYPT`, `E_KEYGEN`,
+`E_KEY_NOT_FOUND`, `E_UNSUPPORTED`, `E_ALIAS_EXISTS`, `E_NO_ACTIVITY`, `E_TAMPERED`
+(integrity check failed), `E_TYPE_MISMATCH`, `E_BAD_CIPHERTEXT`, `E_REMOVE`, `E_CLEAR`,
+`E_BUSY` (a keygen for the same alias is already in flight).
 
 ## Tests
 

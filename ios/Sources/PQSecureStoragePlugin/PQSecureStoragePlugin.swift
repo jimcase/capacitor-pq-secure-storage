@@ -222,6 +222,8 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if #available(iOS 26.0, *) {
             call.resolve([
                 "supportsPqc": true,
+                "hardwareBacked": true, // Secure Enclave / Keychain
+                "biometricGated": true,
                 "supportedVariants": ["PQC_MLDSA_65", "PQC_MLDSA_87"],
                 "supportedKem": ["PQC_MLKEM_768", "PQC_MLKEM_1024"],
                 // decapsulation runs inside the Secure Enclave on iOS 26
@@ -230,6 +232,8 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         } else {
             call.resolve([
                 "supportsPqc": false,
+                "hardwareBacked": false,
+                "biometricGated": false,
                 "supportedVariants": [],
                 "supportedKem": [],
                 "kemInSecureEnclave": false
@@ -479,8 +483,9 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     // a working key, because signature(for:) still goes through the SEP's own gate.
     private static func authenticate(reason: String, completion: @escaping (Result<LAContext, PQSecureStorageError>) -> Void) {
         let context = LAContext()
-        // let the SEP reuse this same evaluation at sign time instead of prompting twice
-        context.touchIDAuthenticationAllowableReuseDuration = LATouchIDAuthenticationMaximumAllowableReuseDuration
+        // no reuse: every sign/decrypt must re-authenticate. Max reuse let a caller loop sign()
+        // after one Touch ID approval and get many signatures without another prompt.
+        context.touchIDAuthenticationAllowableReuseDuration = 0
 
         var policyError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &policyError) else {
@@ -803,16 +808,34 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let key = call.getString("key") else {
             call.reject("Missing key", "E_MISSING_PARAMS"); return
         }
-        let query: [String: Any] = [
+        // don't prompt for a no-op: metadata check (skip UI) tells us if the item is even there
+        let existsQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
             kSecAttrAccount as String: key,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
         ]
-        let status = SecItemDelete(query as CFDictionary)
-        if status == errSecSuccess || status == errSecItemNotFound {
-            call.resolve()
-        } else {
-            call.reject("Remove failed (\(status))", "E_DECRYPT")
+        if SecItemCopyMatching(existsQuery as CFDictionary, nil) == errSecItemNotFound {
+            call.resolve(); return
+        }
+        // destructive: confirm with biometrics so a malicious bridge caller can't delete in silence
+        Self.authenticate(reason: "Authenticate to delete your secret") { result in
+            switch result {
+            case .failure:
+                call.reject("Authentication failed", "E_AUTH_FAILED")
+            case .success:
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: Self.ssService,
+                    kSecAttrAccount as String: key,
+                ]
+                let status = SecItemDelete(query as CFDictionary)
+                if status == errSecSuccess || status == errSecItemNotFound {
+                    call.resolve()
+                } else {
+                    call.reject("Remove failed (\(status))", "E_DECRYPT")
+                }
+            }
         }
     }
 
@@ -853,15 +876,32 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func clear(_ call: CAPPluginCall) {
-        let query: [String: Any] = [
+        // nothing stored -> nothing to protect, don't prompt
+        let anyQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
         ]
-        let status = SecItemDelete(query as CFDictionary)
-        if status == errSecSuccess || status == errSecItemNotFound {
-            call.resolve()
-        } else {
-            call.reject("Clear failed (\(status))", "E_DECRYPT")
+        if SecItemCopyMatching(anyQuery as CFDictionary, nil) == errSecItemNotFound {
+            call.resolve(); return
+        }
+        Self.authenticate(reason: "Authenticate to erase secure storage") { result in
+            switch result {
+            case .failure:
+                call.reject("Authentication failed", "E_AUTH_FAILED")
+            case .success:
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: Self.ssService,
+                ]
+                let status = SecItemDelete(query as CFDictionary)
+                if status == errSecSuccess || status == errSecItemNotFound {
+                    call.resolve()
+                } else {
+                    call.reject("Clear failed (\(status))", "E_DECRYPT")
+                }
+            }
         }
     }
 }

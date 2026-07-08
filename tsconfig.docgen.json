@@ -1,7 +1,8 @@
 {
   "compilerOptions": {
     "strict": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "lib": ["ES2021"]
   },
   "files": ["src/definitions.ts"]
 }

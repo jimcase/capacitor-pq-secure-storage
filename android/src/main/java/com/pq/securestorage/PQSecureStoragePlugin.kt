@@ -49,6 +49,8 @@ class PQSecureStoragePlugin : Plugin() {
     companion object {
         private const val TAG = "PQSecureStoragePlugin"
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+        private const val MAX_STORE_KEY_LEN = 512
+        private const val MAX_STORE_VALUE_LEN = 256 * 1024
     }
 
     private val api17 = 37 // confirm against Android 17 SDK
@@ -74,6 +76,8 @@ class PQSecureStoragePlugin : Plugin() {
         val ok = Build.VERSION.SDK_INT >= api17
         val ret = JSObject()
         ret.put("supportsPqc", ok)
+        ret.put("hardwareBacked", true) // keys in AndroidKeyStore / TEE
+        ret.put("biometricGated", true)
         ret.put("supportedVariants", if (ok) listOf("PQC_MLDSA_65", "PQC_MLDSA_87") else emptyList<String>())
         // ML-KEM works via software (BouncyCastle) on any API; the private key is wrapped by a
         // Keystore AES key. AndroidKeyStore does not expose ML-KEM to apps, so it is NOT in the SEP.
@@ -290,6 +294,10 @@ class PQSecureStoragePlugin : Plugin() {
     // MLKEMParameterSpec.ml_kem_768/1024, KEMGenerateSpec/KEMExtractSpec, SecretKeyWithEncapsulation
     // getEncapsulation()/encoded; and that Android's ChaCha20-Poly1305 provider is present.
 
+    // per-alias in-flight guard: the version read-modify-write and wrap-key rotation must not
+    // interleave, or two concurrent calls clobber each other's wrap key and brick the private
+    private val kemGenerating = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     @PluginMethod
     fun generateKemKeyPair(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
@@ -297,12 +305,14 @@ class PQSecureStoragePlugin : Plugin() {
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val spec = mlkemSpecOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         val overwrite = call.getBoolean("overwrite") ?: false
-        if (!overwrite && kemPrefs().contains(kemPubKeyKey(alias))) {
-            return call.reject("Alias already exists", "E_ALIAS_EXISTS")
-        }
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+        if (!kemGenerating.add(alias)) return call.reject("Key generation in progress, retry", "E_BUSY")
         try {
+            if (!overwrite && kemPrefs().contains(kemPubKeyKey(alias))) {
+                kemGenerating.remove(alias)
+                return call.reject("Alias already exists", "E_ALIAS_EXISTS")
+            }
             val kpg = KeyPairGenerator.getInstance("ML-KEM", bc)
             kpg.initialize(spec, SecureRandom())
             val kp = kpg.generateKeyPair()
@@ -314,32 +324,38 @@ class PQSecureStoragePlugin : Plugin() {
             val wrapKey = createKemWrapKey(alias, newVer)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
-            authenticateCipher(hostActivity, cipher, "Authenticate to create your PQ key", call) { boundCipher ->
-                // only overwrite prefs after the biometric-bound wrap succeeds; a cancelled
-                // prompt leaves the old keypair intact
+            authenticateCipher(hostActivity, cipher, "Authenticate to create your PQ key", call,
+                onError = { kemGenerating.remove(alias) }) { boundCipher ->
                 val wrapped = boundCipher.iv + boundCipher.doFinal(privBytes)
-                kemPrefs().edit()
+                // commit() is synchronous+durable, so the old wrap key is retired ONLY after the
+                // new state is on disk (a crash can't leave prefs pointing at a deleted key)
+                val committed = kemPrefs().edit()
                     .putString(kemPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
                     .putString(kemPubKeyKey(alias), Base64.encodeToString(rawPub, Base64.NO_WRAP))
                     .putString(kemTagKey(alias), pubTag("kem:$alias", rawPub)) // integrity tag
                     .putString(kemTypeKey(alias), type)
                     .putInt(kemWrapVerKey(alias), newVer)
-                    .apply()
-                // rotation committed: retire the previous wrap key so a restored old wrapped
-                // private can no longer be unwrapped (anti-rollback)
-                if (oldVer >= 0) {
-                    try {
-                        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-                        if (ks.containsAlias(kemWrapAlias(alias, oldVer))) ks.deleteEntry(kemWrapAlias(alias, oldVer))
-                    } catch (e: Exception) {
-                        logd("kem wrap rotate cleanup failed", e)
+                    .commit()
+                if (committed) {
+                    if (oldVer >= 0) {
+                        try {
+                            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                            if (ks.containsAlias(kemWrapAlias(alias, oldVer))) ks.deleteEntry(kemWrapAlias(alias, oldVer))
+                        } catch (e: Exception) {
+                            logd("kem wrap rotate cleanup failed", e)
+                        }
                     }
+                    kemGenerating.remove(alias)
+                    val ret = JSObject()
+                    ret.put("publicKey", Base64.encodeToString(rawPub, Base64.NO_WRAP))
+                    call.resolve(ret)
+                } else {
+                    kemGenerating.remove(alias)
+                    call.reject("KEM key generation failed", "E_KEYGEN")
                 }
-                val ret = JSObject()
-                ret.put("publicKey", Base64.encodeToString(rawPub, Base64.NO_WRAP))
-                call.resolve(ret)
             }
         } catch (e: Exception) {
+            kemGenerating.remove(alias)
             logd("generateKemKeyPair failed for alias=$alias", e)
             call.reject("KEM key generation failed", "E_KEYGEN")
         }
@@ -480,6 +496,13 @@ class PQSecureStoragePlugin : Plugin() {
         SubjectPublicKeyInfo.getInstance(encoded).publicKeyData.bytes
 
     private fun mlkemPublicFromRaw(raw: ByteArray, oid: ASN1ObjectIdentifier): PublicKey {
+        // reject a wrong-size raw key before wrapping it in SPKI (FIPS-203 fixed lengths)
+        val expected = when (oid) {
+            NISTObjectIdentifiers.id_alg_ml_kem_768 -> 1184
+            NISTObjectIdentifiers.id_alg_ml_kem_1024 -> 1568
+            else -> throw IllegalArgumentException("unsupported ML-KEM oid")
+        }
+        if (raw.size != expected) throw IllegalArgumentException("bad ML-KEM public key length")
         val spki = SubjectPublicKeyInfo(AlgorithmIdentifier(oid), raw)
         return KeyFactory.getInstance("ML-KEM", bc).generatePublic(X509EncodedKeySpec(spki.encoded))
     }
@@ -503,9 +526,11 @@ class PQSecureStoragePlugin : Plugin() {
         return kg.generateKey()
     }
 
-    // 2-byte length prefix per field so concatenated inputs can't be reinterpreted
+    // 4-byte length prefix per field so concatenated inputs can't be reinterpreted (a 2-byte
+    // prefix wraps past 64KiB and lets a long field collide with a short one)
     private fun macPut(mac: Mac, b: ByteArray) {
-        mac.update(byteArrayOf((b.size ushr 8).toByte(), b.size.toByte()))
+        val n = b.size
+        mac.update(byteArrayOf((n ushr 24).toByte(), (n ushr 16).toByte(), (n ushr 8).toByte(), n.toByte()))
         mac.update(b)
     }
 
@@ -630,6 +655,11 @@ class PQSecureStoragePlugin : Plugin() {
                     if (!settled.compareAndSet(false, true)) return
                     try {
                         onSuccess(result.cryptoObject!!.cipher!!)
+                    } catch (e: KeyPermanentlyInvalidatedException) {
+                        // biometric set changed mid-op: the key is gone, tell the caller to re-enroll
+                        logd("key invalidated during cipher op", e)
+                        onError()
+                        call.reject("Biometric enrollment changed; key invalidated", "E_KEY_INVALIDATED")
                     } catch (e: Exception) {
                         logd("cipher op failed", e)
                         onError()
@@ -647,15 +677,16 @@ class PQSecureStoragePlugin : Plugin() {
                     // biometric mismatch, prompt stays open for retry -- don't settle
                 }
             }
-            val promptInfo = BiometricPrompt.PromptInfo.Builder()
-                .setTitle(reason)
-                .setNegativeButtonText("Cancel")
-                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-                .build()
             try {
+                val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                    .setTitle(reason)
+                    .setNegativeButtonText("Cancel")
+                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                    .build()
                 BiometricPrompt(hostActivity, cryptoExecutor, callback).authenticate(promptInfo, cryptoObject)
             } catch (e: Exception) {
-                // authenticate() can throw if the activity is backgrounding; settle the call
+                // authenticate() can throw if the activity is backgrounding; settle the call so the
+                // caller's in-flight latch (ssInitializing / kemGenerating) is always released
                 if (settled.compareAndSet(false, true)) {
                     logd("biometric prompt failed to start", e)
                     onError()
@@ -683,6 +714,10 @@ class PQSecureStoragePlugin : Plugin() {
     fun setItem(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
         val value = call.getString("value") ?: return call.reject("Missing value", "E_MISSING_PARAMS")
+        // bound both so a caller can't fill prefs/keystore with a giant blob (DoS)
+        if (key.isEmpty() || key.length > MAX_STORE_KEY_LEN || value.length > MAX_STORE_VALUE_LEN) {
+            return call.reject("Key or value out of bounds", "E_INVALID_ARGS")
+        }
         val existingPub = storeMeta().getString("pub", null)
         if (storeMeta().contains("priv") && existingPub != null) {
             try {
@@ -814,13 +849,38 @@ class PQSecureStoragePlugin : Plugin() {
         }
     }
 
-    // removeItem/clear/keys/hasItem are not biometric-gated (reads of the values are). Deleting
-    // and enumerating names are cheap and frequent; the host app guards its own bridge access.
+    // keys/hasItem stay silent (enumerating names leaks nothing). removeItem/clear are destructive,
+    // so they prompt: a malicious bridge caller shouldn't be able to wipe the store in silence.
     @PluginMethod
     fun removeItem(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
-        storeItems().edit().remove(key).apply()
-        call.resolve()
+        if (!storeItems().contains(key)) { call.resolve(); return }
+        val hostActivity = activity as? FragmentActivity
+            ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+        val privB64 = storeMeta().getString("priv", null)
+        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        val wrapKey = ks.getKey(ssMasterAlias, null) as? SecretKey
+        // no store key -> nothing biometric to bind against, remove silently
+        if (privB64 == null || wrapKey == null) {
+            storeItems().edit().remove(key).apply(); call.resolve(); return
+        }
+        try {
+            val privBlob = Base64.decode(privB64, Base64.DEFAULT)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, privBlob.copyOfRange(0, 12)))
+            authenticateCipher(hostActivity, cipher, "Authenticate to delete your secret", call) { _ ->
+                storeItems().edit().remove(key).apply()
+                call.resolve()
+            }
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            // key already unusable, the value is unreadable anyway -> allow the delete
+            logd("removeItem: store key invalidated, removing", e)
+            storeItems().edit().remove(key).apply()
+            call.resolve()
+        } catch (e: Exception) {
+            logd("removeItem failed for key=$key", e)
+            call.reject("Remove failed", "E_REMOVE")
+        }
     }
 
     @PluginMethod
@@ -842,6 +902,35 @@ class PQSecureStoragePlugin : Plugin() {
 
     @PluginMethod
     fun clear(call: PluginCall) {
+        val hostActivity = activity as? FragmentActivity
+            ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+        val privB64 = storeMeta().getString("priv", null)
+        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        val wrapKey = ks.getKey(ssMasterAlias, null) as? SecretKey
+        // nothing provisioned yet -> nothing to protect, wipe silently
+        if (privB64 == null || wrapKey == null) {
+            doClearWipe(); call.resolve(); return
+        }
+        try {
+            val privBlob = Base64.decode(privB64, Base64.DEFAULT)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, privBlob.copyOfRange(0, 12)))
+            authenticateCipher(hostActivity, cipher, "Authenticate to erase secure storage", call) { _ ->
+                doClearWipe()
+                call.resolve()
+            }
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            // key gone, store already unreadable -> let the user wipe it
+            logd("clear: store key invalidated, wiping", e)
+            doClearWipe()
+            call.resolve()
+        } catch (e: Exception) {
+            logd("clear failed", e)
+            call.reject("Clear failed", "E_CLEAR")
+        }
+    }
+
+    private fun doClearWipe() {
         storeItems().edit().clear().apply()
         storeMeta().edit().clear().apply()
         try {
@@ -851,7 +940,6 @@ class PQSecureStoragePlugin : Plugin() {
         } catch (e: Exception) {
             logd("clear: keystore delete failed", e)
         }
-        call.resolve()
     }
 
     private fun getOrCreateSsMasterWrapKey(): SecretKey {

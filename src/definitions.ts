@@ -2,8 +2,16 @@ export type KeyType = 'PQC_MLDSA_65' | 'PQC_MLDSA_87';
 export type KemType = 'PQC_MLKEM_768' | 'PQC_MLKEM_1024';
 
 export interface HardwareCapabilities {
-    /** Whether the device exposes hardware-backed post-quantum crypto. */
+    /** Whether post-quantum operations are available (hardware OR software fallback). */
     supportsPqc: boolean;
+    /**
+     * True only when keys are held in secure hardware (TEE/Keychain/Secure Enclave). FALSE on the
+     * web software fallback, where keys live in localStorage. Gate seed-tier trust on this, not on
+     * `supportsPqc`.
+     */
+    hardwareBacked: boolean;
+    /** True when reads are gated by a device biometric. False on the web software fallback. */
+    biometricGated: boolean;
     /** ML-DSA signing variants available on this device. */
     supportedVariants: KeyType[];
     /** ML-KEM variants available on this device. */
@@ -75,7 +83,10 @@ export interface PQSecureStoragePlugin {
     /** Read a stored secret. Prompts for biometrics. Returns `null` if the key is absent. */
     getItem(options: { key: string }): Promise<{ value: string | null }>;
 
-    /** Delete a stored secret. No prompt. */
+    /**
+     * Delete a stored secret. Prompts for biometrics on device (a destructive op shouldn't be
+     * silent). No-op and no prompt if the key is absent. Web fallback has no biometric, so silent.
+     */
     removeItem(options: { key: string }): Promise<void>;
 
     /** Whether a key exists in the store. No prompt. */
@@ -84,6 +95,9 @@ export interface PQSecureStoragePlugin {
     /** List the names of stored secrets. No prompt. */
     keys(): Promise<{ keys: string[] }>;
 
-    /** Delete every stored secret and the store key. No prompt. */
+    /**
+     * Delete every stored secret and the store key. Prompts for biometrics on device. No prompt if
+     * the store is already empty. Web fallback has no biometric, so silent.
+     */
     clear(): Promise<void>;
 }
