@@ -57,4 +57,27 @@ describe('secure storage', () => {
         expect((await b.getItem({ key: 'k' })).value).toBeNull();
         expect((await b.hasItem({ key: 'k' })).exists).toBe(false);
     });
+
+    it('defaults to the silent tier', async () => {
+        const ss = new SecureStorageDouble();
+        await ss.setItem({ key: 'k', value: 'v' });
+        expect(ss.modeOf('k')).toBe('s');
+    });
+
+    it('round-trips a biometric value and records the bio tier', async () => {
+        const ss = new SecureStorageDouble();
+        await ss.setItem({ key: 'seed', value: 'top-secret', requireBiometric: true });
+        expect(ss.modeOf('seed')).toBe('b');
+        expect((await ss.getItem({ key: 'seed' })).value).toBe('top-secret');
+    });
+
+    it('silent and biometric items coexist under separate keypairs', async () => {
+        const ss = new SecureStorageDouble();
+        await ss.setItem({ key: 'silent', value: 'plain', requireBiometric: false });
+        await ss.setItem({ key: 'gated', value: 'secret', requireBiometric: true });
+        expect(ss.modeOf('silent')).toBe('s');
+        expect(ss.modeOf('gated')).toBe('b');
+        expect((await ss.getItem({ key: 'silent' })).value).toBe('plain');
+        expect((await ss.getItem({ key: 'gated' })).value).toBe('secret');
+    });
 });

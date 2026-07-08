@@ -1,4 +1,4 @@
-export type KeyType = 'PQC_MLDSA_65' | 'PQC_MLDSA_87';
+export type SignatureType = 'PQC_MLDSA_65' | 'PQC_MLDSA_87';
 export type KemType = 'PQC_MLKEM_768' | 'PQC_MLKEM_1024';
 
 export interface HardwareCapabilities {
@@ -13,7 +13,7 @@ export interface HardwareCapabilities {
     /** True when reads are gated by a device biometric. False on the web software fallback. */
     biometricGated: boolean;
     /** ML-DSA signing variants available on this device. */
-    supportedVariants: KeyType[];
+    supportedVariants: SignatureType[];
     /** ML-KEM variants available on this device. */
     supportedKem: KemType[];
     /**
@@ -31,7 +31,7 @@ export interface PQSecureStoragePlugin {
      * Generate a hardware-backed ML-DSA signing keypair under an alias and return the raw
      * public key. Rejects if the alias exists unless `overwrite` is true.
      */
-    generateKeyPair(options: { keyAlias: string; type: KeyType; overwrite?: boolean }): Promise<{ publicKey: string }>;
+    generateKeyPair(options: { keyAlias: string; type: SignatureType; overwrite?: boolean }): Promise<{ publicKey: string }>;
 
     /** Return the raw public key for an existing signing alias. */
     getPublicKey(options: { keyAlias: string }): Promise<{ publicKey: string }>;
@@ -43,7 +43,7 @@ export interface PQSecureStoragePlugin {
     sign(options: {
         keyAlias: string;
         data: string;
-        type: KeyType;
+        type: SignatureType;
         description?: string;
     }): Promise<{ signature: string }>;
 
@@ -75,12 +75,20 @@ export interface PQSecureStoragePlugin {
     decrypt(options: { keyAlias: string; type: KemType; data: string }): Promise<{ plaintext: string }>;
 
     /**
-     * Store a secret string under a key. Silent write (Android prompts once on the very first
-     * write to create the store key). `value` is stored verbatim.
+     * Store a secret string under a key. `value` is stored verbatim. Silent write.
+     *
+     * `requireBiometric` (default `false`) is decided per item at write time: `false` stores in a
+     * silent tier that reads without a prompt (drop-in for a plain secure store); `true` stores in
+     * a biometric tier whose reads prompt. The chosen mode is integrity-protected, so it can't be
+     * downgraded by tampering. Overwriting an item that was stored biometric prompts. On the web
+     * fallback there is no biometric, so the flag is accepted but reads stay silent either way.
      */
-    setItem(options: { key: string; value: string }): Promise<void>;
+    setItem(options: { key: string; value: string; requireBiometric?: boolean }): Promise<void>;
 
-    /** Read a stored secret. Prompts for biometrics. Returns `null` if the key is absent. */
+    /**
+     * Read a stored secret. Prompts for biometrics only if the item was stored with
+     * `requireBiometric: true`. Returns `null` if the key is absent.
+     */
     getItem(options: { key: string }): Promise<{ value: string | null }>;
 
     /**

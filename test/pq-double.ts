@@ -87,40 +87,50 @@ export class PQSecureStorageDouble {
     }
 }
 
-// Secure storage double. Models the Android envelope: the store owns a ML-KEM-1024 keypair,
-// setItem encapsulates to its public key (silent), getItem decapsulates with the private key.
-// The Map stands in for SharedPreferences; the native side keeps the private key in the TEE.
+// Secure storage double. Models the Android two-tier envelope: the store owns TWO ML-KEM-1024
+// keypairs, one silent and one biometric. setItem picks the tier from requireBiometric and records
+// the mode with the item; getItem decapsulates with the matching keypair. Distinct keypairs mean a
+// bio item is not readable via the silent private. The Map stands in for SharedPreferences; the
+// native side wraps each private in the TEE (silent = no-auth key, bio = auth-required key).
+type StoreKeypair = { publicKey: Uint8Array; secretKey: Uint8Array };
+
 export class SecureStorageDouble {
-    private items = new Map<string, string>(); // key -> base64 frame
-    private store?: { publicKey: Uint8Array; secretKey: Uint8Array };
+    private items = new Map<string, { mode: 's' | 'b'; frame: string }>();
+    private silent?: StoreKeypair;
+    private bio?: StoreKeypair;
     private readonly CT_LEN = 1568; // ML-KEM-1024 ciphertext
 
-    private ensureStore() {
-        if (!this.store) {
-            const { publicKey, secretKey } = ml_kem1024.keygen();
-            this.store = { publicKey, secretKey };
-        }
-        return this.store;
+    private tier(mode: 's' | 'b'): StoreKeypair {
+        if (mode === 'b') return (this.bio ??= ml_kem1024.keygen());
+        return (this.silent ??= ml_kem1024.keygen());
     }
 
-    async setItem(o: { key: string; value: string }): Promise<void> {
-        const store = this.ensureStore();
-        const { cipherText, sharedSecret } = ml_kem1024.encapsulate(store.publicKey);
+    async setItem(o: { key: string; value: string; requireBiometric?: boolean }): Promise<void> {
+        const mode: 's' | 'b' = o.requireBiometric ? 'b' : 's';
+        const t = this.tier(mode);
+        const { cipherText, sharedSecret } = ml_kem1024.encapsulate(t.publicKey);
         const nonce = randomBytes(12);
         const aead = chacha20poly1305(sharedSecret, nonce).encrypt(new TextEncoder().encode(o.value));
-        this.items.set(o.key, b64(concat(cipherText, nonce, aead)));
+        this.items.set(o.key, { mode, frame: b64(concat(cipherText, nonce, aead)) });
     }
 
     async getItem(o: { key: string }): Promise<{ value: string | null }> {
-        const frame = this.items.get(o.key);
-        if (!frame || !this.store) return { value: null };
-        const buf = unb64(frame);
+        const it = this.items.get(o.key);
+        if (!it) return { value: null };
+        const t = it.mode === 'b' ? this.bio : this.silent;
+        if (!t) return { value: null };
+        const buf = unb64(it.frame);
         const kemCt = buf.subarray(0, this.CT_LEN);
         const nonce = buf.subarray(this.CT_LEN, this.CT_LEN + 12);
         const aead = buf.subarray(this.CT_LEN + 12);
-        const sharedSecret = ml_kem1024.decapsulate(kemCt, this.store.secretKey);
+        const sharedSecret = ml_kem1024.decapsulate(kemCt, t.secretKey);
         const plain = chacha20poly1305(sharedSecret, nonce).decrypt(aead);
         return { value: new TextDecoder().decode(plain) };
+    }
+
+    // test hook: the tier a stored key used ('s'/'b'), null if absent
+    modeOf(key: string): 's' | 'b' | null {
+        return this.items.get(key)?.mode ?? null;
     }
 
     async removeItem(o: { key: string }): Promise<void> {
@@ -137,6 +147,7 @@ export class SecureStorageDouble {
 
     async clear(): Promise<void> {
         this.items.clear();
-        this.store = undefined;
+        this.silent = undefined;
+        this.bio = undefined;
     }
 }

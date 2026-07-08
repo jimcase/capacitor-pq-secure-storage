@@ -6,7 +6,7 @@ import { randomBytes } from '@noble/post-quantum/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 
-import type { PQSecureStoragePlugin, KeyType, KemType, HardwareCapabilities } from './definitions.js';
+import type { PQSecureStoragePlugin, SignatureType, KemType, HardwareCapabilities } from './definitions.js';
 
 // Software fallback for platforms without hardware PQC (the web, mainly). Uses @noble in pure
 // JS and persists keys/values in a Storage (localStorage by default). NOT hardware-backed and
@@ -17,7 +17,7 @@ import type { PQSecureStoragePlugin, KeyType, KemType, HardwareCapabilities } fr
 
 const KEM_CT_LEN: Record<KemType, number> = { PQC_MLKEM_768: 1088, PQC_MLKEM_1024: 1568 };
 // throw on any unknown type instead of silently falling through to the second variant
-const dsaOf = (t: KeyType) => {
+const dsaOf = (t: SignatureType) => {
     if (t === 'PQC_MLDSA_65') return ml_dsa65;
     if (t === 'PQC_MLDSA_87') return ml_dsa87;
     throw new Error('Unsupported key type');
@@ -129,7 +129,7 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         };
     }
 
-    async generateKeyPair(options: { keyAlias: string; type: KeyType; overwrite?: boolean }): Promise<{ publicKey: string }> {
+    async generateKeyPair(options: { keyAlias: string; type: SignatureType; overwrite?: boolean }): Promise<{ publicKey: string }> {
         const alias = this.safeAlias(options.keyAlias);
         if (!options.overwrite && this.store.getItem(`pqss.sign.${alias}`) !== null) {
             throw this.unavailable('Alias already exists');
@@ -145,7 +145,7 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         return { publicKey: toB64(kp.pk) };
     }
 
-    async sign(options: { keyAlias: string; data: string; type: KeyType }): Promise<{ signature: string }> {
+    async sign(options: { keyAlias: string; data: string; type: SignatureType }): Promise<{ signature: string }> {
         const kp = this.getKeypair('pqss.sign', this.safeAlias(options.keyAlias));
         if (!kp) throw this.unavailable('Key not found');
         if (kp.type !== options.type) throw this.unavailable('Key type mismatch');
@@ -201,7 +201,9 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         return { plaintext: toB64(plain) };
     }
 
-    async setItem(options: { key: string; value: string }): Promise<void> {
+    // requireBiometric is accepted for API parity but ignored: the web fallback has no biometric,
+    // so reads are always silent regardless of the flag
+    async setItem(options: { key: string; value: string; requireBiometric?: boolean }): Promise<void> {
         // bind the item name as AEAD associated data so a value can't be moved to another key
         this.put(
             `pqss.store.${options.key}`,

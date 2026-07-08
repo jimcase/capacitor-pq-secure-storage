@@ -740,16 +740,27 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let data = value.data(using: .utf8) else {
             call.reject("Invalid value", "E_MISSING_PARAMS"); return
         }
-        var aclError: Unmanaged<CFError>?
-        guard let access = SecAccessControlCreateWithFlags(
-            nil,
-            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            .biometryCurrentSet,
-            &aclError
-        ) else {
-            call.reject("Access control failed", "E_ENCRYPT"); return
+        // per-item: requireBiometric -> biometry ACL (reads prompt); else plain ThisDeviceOnly
+        // accessibility (silent reads). Chosen at write time.
+        let requireBiometric = call.getBool("requireBiometric") ?? false
+        var accessAttr: [String: Any] = [:]
+        if requireBiometric {
+            var aclError: Unmanaged<CFError>?
+            guard let access = SecAccessControlCreateWithFlags(
+                nil,
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                .biometryCurrentSet,
+                &aclError
+            ) else {
+                call.reject("Access control failed", "E_ENCRYPT"); return
+            }
+            accessAttr[kSecAttrAccessControl as String] = access
+        } else {
+            accessAttr[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         }
-        // add, or update the value in place when it already exists; never delete-then-add
+        // add, or update the value in place when it already exists; never delete-then-add. The ACL
+        // is set on both paths, so changing requireBiometric on an existing key re-tiers it (the OS
+        // prompts when the current item is biometric, blocking a silent downgrade/replace).
         let matchQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
@@ -757,10 +768,12 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         ]
         var addQuery = matchQuery
         addQuery[kSecValueData as String] = data
-        addQuery[kSecAttrAccessControl as String] = access
+        for (k, v) in accessAttr { addQuery[k] = v }
         var status = SecItemAdd(addQuery as CFDictionary, nil)
         if status == errSecDuplicateItem {
-            status = SecItemUpdate(matchQuery as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            var updateAttrs: [String: Any] = [kSecValueData as String: data]
+            for (k, v) in accessAttr { updateAttrs[k] = v }
+            status = SecItemUpdate(matchQuery as CFDictionary, updateAttrs as CFDictionary)
         }
         if status == errSecSuccess {
             call.resolve()
