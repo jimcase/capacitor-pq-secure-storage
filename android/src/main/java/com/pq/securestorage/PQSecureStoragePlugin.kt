@@ -2,6 +2,7 @@ package com.pq.securestorage
 
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.util.Log
@@ -84,6 +85,7 @@ class PQSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun generateKeyPair(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
+        if (!safeAlias(call, alias)) return
         val alg = algOf(call.getString("type")) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
         val overwrite = call.getBoolean("overwrite") ?: false
         try {
@@ -130,6 +132,7 @@ class PQSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun getPublicKey(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
+        if (!safeAlias(call, alias)) return
         try {
             val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
             val cert = ks.getCertificate(alias) ?: return call.reject("Key not found", "E_PUBKEY")
@@ -145,6 +148,7 @@ class PQSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun sign(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
+        if (!safeAlias(call, alias)) return
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val alg = algOf(type) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
@@ -231,6 +235,7 @@ class PQSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun encryptAtRest(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
+        if (!safeAlias(call, alias)) return
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         try {
             val key = getOrCreateAtRestKey(alias)
@@ -251,6 +256,7 @@ class PQSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun decryptAtRest(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
+        if (!safeAlias(call, alias)) return
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         try {
             val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
@@ -287,6 +293,7 @@ class PQSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun generateKemKeyPair(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
+        if (!safeAlias(call, alias)) return
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val spec = mlkemSpecOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         val overwrite = call.getBoolean("overwrite") ?: false
@@ -328,6 +335,7 @@ class PQSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun getKemPublicKey(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
+        if (!safeAlias(call, alias)) return
         val pub = kemPrefs().getString(kemPubKeyKey(alias), null)
             ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
         // refuse to hand out a public key whose integrity tag doesn't verify (someone tampered
@@ -374,6 +382,7 @@ class PQSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun decrypt(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
+        if (!safeAlias(call, alias)) return
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         val ctLen = when (type) {
@@ -419,6 +428,9 @@ class PQSecureStoragePlugin : Plugin() {
                 ret.put("plaintext", Base64.encodeToString(plain, Base64.NO_WRAP))
                 call.resolve(ret)
             }
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            logd("decrypt: key invalidated by biometric enrollment", e)
+            call.reject("Biometric enrollment changed; key invalidated", "E_KEY_INVALIDATED")
         } catch (e: Exception) {
             logd("decrypt failed for alias=$alias", e)
             call.reject("Decrypt failed", "E_DECRYPT")
@@ -476,11 +488,17 @@ class PQSecureStoragePlugin : Plugin() {
         return kg.generateKey()
     }
 
+    // 2-byte length prefix per field so concatenated inputs can't be reinterpreted
+    private fun macPut(mac: Mac, b: ByteArray) {
+        mac.update(byteArrayOf((b.size ushr 8).toByte(), b.size.toByte()))
+        mac.update(b)
+    }
+
     private fun pubTag(context: String, rawPub: ByteArray): String {
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(getOrCreatePubTagKey())
-        mac.update(context.toByteArray(Charsets.UTF_8))
-        mac.update(rawPub)
+        macPut(mac, context.toByteArray(Charsets.UTF_8))
+        macPut(mac, rawPub)
         return Base64.encodeToString(mac.doFinal(), Base64.NO_WRAP)
     }
 
@@ -490,6 +508,43 @@ class PQSecureStoragePlugin : Plugin() {
             pubTag(context, rawPub).toByteArray(Charsets.UTF_8),
             tag.toByteArray(Charsets.UTF_8)
         )
+    }
+
+    // ---- store item integrity MAC ----
+    // Items are encapsulated to the store's PUBLIC key, so a prefs writer could otherwise inject or
+    // swap arbitrary values. A Keystore-held HMAC over (itemKey || frame) makes forgery need the TEE
+    // key, and binds the value to its key name. Verified before decrypting.
+    private val ssMacAlias = "__pq_ss_mac__"
+
+    private fun getOrCreateStoreMacKey(): SecretKey {
+        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        (ks.getKey(ssMacAlias, null) as? SecretKey)?.let { return it }
+        val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, KEYSTORE_PROVIDER)
+        kg.init(
+            KeyGenParameterSpec.Builder(ssMacAlias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY).build()
+        )
+        return kg.generateKey()
+    }
+
+    private fun storeMac(itemKey: String, frame: ByteArray): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(getOrCreateStoreMacKey())
+        macPut(mac, itemKey.toByteArray(Charsets.UTF_8))
+        macPut(mac, frame)
+        return mac.doFinal()
+    }
+
+    // reject aliases that could collide with the plugin's internal Keystore entries (they use a
+    // "__pq" prefix and "." suffixes); dots are disallowed so a user alias can never equal an
+    // internal suffixed entry like "$alias.aes"/"$alias.kemwrap".
+    private val aliasRegex = Regex("^[A-Za-z0-9_-]{1,64}$")
+
+    private fun safeAlias(call: PluginCall, alias: String): Boolean {
+        if (!aliasRegex.matches(alias) || alias.startsWith("__pq")) {
+            call.reject("Invalid key alias", "E_BAD_ALIAS")
+            return false
+        }
+        return true
     }
 
     private fun atRestAlias(alias: String) = "$alias.aes"
@@ -680,14 +735,16 @@ class PQSecureStoragePlugin : Plugin() {
             javax.crypto.spec.IvParameterSpec(nonce))
         val aead = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
         val frame = kemCt + nonce + aead
-        storeItems().edit().putString(key, Base64.encodeToString(frame, Base64.NO_WRAP)).apply()
+        val stored = Base64.encodeToString(frame, Base64.NO_WRAP) + "." +
+            Base64.encodeToString(storeMac(key, frame), Base64.NO_WRAP)
+        storeItems().edit().putString(key, stored).apply()
     }
 
     @PluginMethod
     fun getItem(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
-        val frameB64 = storeItems().getString(key, null)
-        if (frameB64 == null) {
+        val stored = storeItems().getString(key, null)
+        if (stored == null) {
             val ret = JSObject(); ret.put("value", JSONObject.NULL); call.resolve(ret); return
         }
         val privB64 = storeMeta().getString("priv", null)
@@ -698,8 +755,14 @@ class PQSecureStoragePlugin : Plugin() {
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         val ctLen = 1568 // ML-KEM-1024
         try {
-            val frame = Base64.decode(frameB64, Base64.DEFAULT)
-            // validate before prompting, so a corrupt item doesn't ask for biometrics then fail
+            // split frame.mac and verify integrity before prompting or decrypting
+            val dot = stored.indexOf('.')
+            if (dot < 0) return call.reject("Store item integrity check failed", "E_TAMPERED")
+            val frame = Base64.decode(stored.substring(0, dot), Base64.DEFAULT)
+            val mac = Base64.decode(stored.substring(dot + 1), Base64.DEFAULT)
+            if (!MessageDigest.isEqual(mac, storeMac(key, frame))) {
+                return call.reject("Store item integrity check failed", "E_TAMPERED")
+            }
             if (frame.size <= ctLen + 12) return call.reject("Malformed stored item", "E_BAD_CIPHERTEXT")
             val privBlob = Base64.decode(privB64, Base64.DEFAULT)
             val wrapIv = privBlob.copyOfRange(0, 12)
@@ -726,6 +789,9 @@ class PQSecureStoragePlugin : Plugin() {
                 ret.put("value", String(plain, Charsets.UTF_8))
                 call.resolve(ret)
             }
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            logd("getItem: store key invalidated by biometric enrollment", e)
+            call.reject("Biometric enrollment changed; store key invalidated", "E_KEY_INVALIDATED")
         } catch (e: Exception) {
             logd("getItem failed for key=$key", e)
             call.reject("Read failed", "E_DECRYPT")
@@ -765,6 +831,7 @@ class PQSecureStoragePlugin : Plugin() {
         try {
             val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
             if (ks.containsAlias(ssMasterAlias)) ks.deleteEntry(ssMasterAlias)
+            if (ks.containsAlias(ssMacAlias)) ks.deleteEntry(ssMacAlias)
         } catch (e: Exception) {
             logd("clear: keystore delete failed", e)
         }

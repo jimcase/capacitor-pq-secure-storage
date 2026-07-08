@@ -560,17 +560,10 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     @available(iOS 26.0, *)
     private static func persist(key: PQKey, type: String, alias: String, overwrite: Bool) throws {
-        // `dataRepresentation` is already SEP-wrapped ciphertext, useless off this device and
-        // useless for signing without satisfying the SEP's own access control, so the Keychain
-        // entry only needs device-only/unlocked-only protection.
-        let privStatus = upsertKeychain(
-            account: privateAccount(for: alias),
-            data: key.dataRepresentation,
-            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly],
-            overwrite: overwrite
-        )
-        guard privStatus == errSecSuccess else { throw PQSecureStorageError.keychain(privStatus) }
-
+        // write public first: aliasExists() checks the public account, so a failed private write
+        // leaves a consistent state (alias reports exists) that heals on retry with overwrite,
+        // instead of an orphaned private that blocks the alias. dataRepresentation is SEP-wrapped
+        // ciphertext, so device-only/unlocked-only protection is enough.
         let pubStatus = upsertKeychain(
             account: publicAccount(for: alias),
             data: key.publicKeyBytes,
@@ -581,6 +574,14 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             overwrite: overwrite
         )
         guard pubStatus == errSecSuccess else { throw PQSecureStorageError.keychain(pubStatus) }
+
+        let privStatus = upsertKeychain(
+            account: privateAccount(for: alias),
+            data: key.dataRepresentation,
+            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly],
+            overwrite: overwrite
+        )
+        guard privStatus == errSecSuccess else { throw PQSecureStorageError.keychain(privStatus) }
     }
 
     private static func loadMetadata(alias: String) throws -> KeyMetadata {
@@ -666,15 +667,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     @available(iOS 26.0, *)
     private static func persistKem(key: PQKemKey, type: String, alias: String, overwrite: Bool) throws {
-        // dataRepresentation is a SEP-wrapped blob (see PQKey notes) -- device-only protection is enough
-        let privStatus = upsertKeychain(
-            account: kemPrivateAccount(for: alias),
-            data: key.dataRepresentation,
-            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly],
-            overwrite: overwrite
-        )
-        guard privStatus == errSecSuccess else { throw PQSecureStorageError.keychain(privStatus) }
-
+        // public first (see persist): keeps a failed private write healable instead of orphaning
         let pubStatus = upsertKeychain(
             account: kemPublicAccount(for: alias),
             data: key.publicKeyBytes,
@@ -685,6 +678,14 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             overwrite: overwrite
         )
         guard pubStatus == errSecSuccess else { throw PQSecureStorageError.keychain(pubStatus) }
+
+        let privStatus = upsertKeychain(
+            account: kemPrivateAccount(for: alias),
+            data: key.dataRepresentation,
+            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly],
+            overwrite: overwrite
+        )
+        guard privStatus == errSecSuccess else { throw PQSecureStorageError.keychain(privStatus) }
     }
 
     private static func loadKemMetadata(alias: String) throws -> KeyMetadata {

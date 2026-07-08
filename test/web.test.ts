@@ -83,4 +83,20 @@ describe('web software fallback', () => {
         await pq.clear();
         expect((await pq.keys()).keys).toEqual([]);
     });
+
+    it('rejects reserved or invalid aliases', async () => {
+        const pq = web();
+        await expect(pq.generateKeyPair({ keyAlias: 'pqss.evil', type: 'PQC_MLDSA_65' })).rejects.toThrow();
+        await expect(pq.encryptAtRest({ keyAlias: '__pqhack', data: b64('x') })).rejects.toThrow();
+    });
+
+    it('binds a stored value to its key name (no swap)', async () => {
+        const storage = new MemoryStorage();
+        const pq = new PQSecureStorageWeb(storage);
+        await pq.setItem({ key: 'a', value: 'AAA' });
+        await pq.setItem({ key: 'b', value: 'BBB' });
+        // move a's blob under b -> AAD mismatch on read
+        storage.setItem('pqss.store.b', storage.getItem('pqss.store.a') as string);
+        await expect(pq.getItem({ key: 'b' })).rejects.toThrow();
+    });
 });

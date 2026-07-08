@@ -31,7 +31,7 @@ android {
 }
 
 dependencies {
-    implementation 'com.getcapacitor:capacitor-core:5.+'
+    implementation 'com.getcapacitor:capacitor-core:7.+'
     implementation 'org.jetbrains.kotlin:kotlin-stdlib-jdk8'
     // BiometricPrompt + CryptoObject binding for sign() -- confirm 1.1.0 vs 1.2.0-alpha on-device
     implementation 'androidx.biometric:biometric:1.1.0'

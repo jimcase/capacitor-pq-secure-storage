@@ -60,7 +60,10 @@ Biometrics use Face ID, which requires a usage description or the app crashes. A
 <string>Authenticate to use your secure keys</string>
 ```
 
-Deployment target must be iOS 26 (the CryptoKit Secure Enclave PQC APIs).
+The pod deployment target is iOS 15, so any modern app can depend on it. The post-quantum
+parts (ML-DSA / ML-KEM in the Secure Enclave) are gated with `@available(iOS 26.0, *)`: they run
+only on iOS 26+, and below that `getHardwareCapabilities` reports `supportsPqc: false` while
+AES-at-rest and secure storage keep working. Building the pod still needs the iOS 26 SDK (Xcode 26+).
 
 ### Android setup
 
@@ -490,23 +493,33 @@ Delete every stored secret and the store key. No prompt.
 - **Recovery.** Biometric keys are bound to the current enrollment: adding or removing a
   fingerprint/face invalidates the Keystore/Secure Enclave keys, which makes the store's private
   key unrecoverable and every stored secret unreadable. This is deliberate (it blocks an attacker
-  who enrolls their own biometric), so the host app MUST keep an independent recovery path for
-  anything critical (e.g. an exportable mnemonic). Losing the device or re-enrolling is not
-  recoverable from the plugin alone.
+  who enrolls their own biometric). After such a change the plugin rejects with `E_KEY_INVALIDATED`
+  so the host can re-provision; the host MUST keep an independent recovery path for anything
+  critical (e.g. an exportable mnemonic). Losing the device or re-enrolling is not recoverable from
+  the plugin alone.
 - **Public key integrity (Android).** Stored ML-KEM public keys are tagged with an HMAC keyed by
   a non-exportable Keystore key. If the prefs are tampered, `getKemPublicKey`/`setItem` reject
   with `E_TAMPERED` instead of encrypting to a substituted key.
-- **Enumeration.** `keys()`/`hasItem()` return which names exist without a biometric (values stay
-  gated). Destructive ops (`removeItem`/`clear`) are also ungated. The host guards its bridge.
+- **Store item integrity (Android).** Each secure-storage item is MAC'd with a Keystore-held HMAC
+  over its key name and ciphertext, verified before decrypting. A prefs writer cannot inject a
+  chosen value or move a value to another key; both reject with `E_TAMPERED`.
+- **Alias validation.** Key aliases are restricted to `[A-Za-z0-9_-]` and cannot start with the
+  plugin's reserved prefix, so a caller cannot clobber the plugin's own internal Keystore entries
+  (`E_BAD_ALIAS`).
+- **Destructive ops.** `removeItem`/`clear`/`setItem`-overwrite are NOT biometric-gated (writes are
+  silent by design). `keys()`/`hasItem()` enumerate names without a prompt. Read-gating does not
+  protect integrity or availability from an attacker who reaches the JS bridge (the main surface in
+  a webview) — the host MUST guard bridge access. The store item MAC still prevents forged values.
 - **Cross-platform ML-KEM.** iOS (CryptoKit) and Android (BouncyCastle) must agree on the raw
   shared secret. Before relying on a ciphertext produced on one platform decrypting on the other,
   run a known-answer test against a FIPS-203 vector on a real device.
 
 ## Errors
 
-Rejections carry a code: `E_MISSING_PARAMS`, `E_AUTH_FAILED` (biometric cancelled/failed),
-`E_ENCRYPT`, `E_DECRYPT`, `E_KEY_NOT_FOUND`, `E_UNSUPPORTED`, `E_ALIAS_EXISTS`, `E_NO_ACTIVITY`,
-`E_TAMPERED` (integrity check failed), `E_TYPE_MISMATCH`, `E_BAD_CIPHERTEXT`, `E_BUSY`.
+Rejections carry a code: `E_MISSING_PARAMS`, `E_BAD_ALIAS` (reserved/invalid alias), `E_AUTH_FAILED`
+(biometric cancelled/failed), `E_KEY_INVALIDATED` (biometric enrollment changed), `E_ENCRYPT`,
+`E_DECRYPT`, `E_KEY_NOT_FOUND`, `E_UNSUPPORTED`, `E_ALIAS_EXISTS`, `E_NO_ACTIVITY`, `E_TAMPERED`
+(integrity check failed), `E_TYPE_MISMATCH`, `E_BAD_CIPHERTEXT`, `E_BUSY`.
 
 ## Tests
 

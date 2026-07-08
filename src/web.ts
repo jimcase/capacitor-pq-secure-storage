@@ -10,11 +10,16 @@ import type { PQSecureStoragePlugin, KeyType, KemType, HardwareCapabilities } fr
 
 // Software fallback for platforms without hardware PQC (the web, mainly). Uses @noble in pure
 // JS and persists keys/values in a Storage (localStorage by default). NOT hardware-backed and
-// NOT biometric-gated: keys live in browser storage, so treat this as dev/non-critical only.
+// NOT biometric-gated: keys live in browser storage, so any script in the origin can read them.
+// Dev / non-critical only. Because the AES key sits next to the data, this backend cannot offer
+// integrity against an attacker who can run script (they hold the key too); the key-name AAD only
+// stops accidental value swaps.
 
 const KEM_CT_LEN: Record<KemType, number> = { PQC_MLKEM_768: 1088, PQC_MLKEM_1024: 1568 };
 const dsaOf = (t: KeyType) => (t === 'PQC_MLDSA_65' ? ml_dsa65 : ml_dsa87);
 const kemOf = (t: KemType) => (t === 'PQC_MLKEM_768' ? ml_kem768 : ml_kem1024);
+
+const STORE_KEY = 'pqss.storekey'; // internal store master AES key, unreachable via a caller alias
 
 const utf8 = new TextEncoder();
 const utf8d = new TextDecoder();
@@ -48,6 +53,14 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         this.store = store ?? (globalThis as unknown as { localStorage: Storage }).localStorage;
     }
 
+    // reject empty aliases and any alias inside the plugin's own namespace
+    private safeAlias(alias: string): string {
+        if (!alias || alias.startsWith('pqss.') || alias.startsWith('__pq')) {
+            throw this.unavailable('Invalid key alias');
+        }
+        return alias;
+    }
+
     private get(k: string): Uint8Array | null {
         const v = this.store.getItem(k);
         return v === null ? null : fromB64(v);
@@ -56,13 +69,13 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         this.store.setItem(k, toB64(v));
     }
 
-    // frame = nonce(12) || gcm(includes tag)
-    private aesSeal(key: Uint8Array, data: Uint8Array): Uint8Array {
+    // frame = nonce(12) || gcm(includes tag), with optional associated data
+    private aesSeal(key: Uint8Array, data: Uint8Array, aad?: Uint8Array): Uint8Array {
         const nonce = randomBytes(12);
-        return concat(nonce, gcm(key, nonce).encrypt(data));
+        return concat(nonce, gcm(key, nonce, aad).encrypt(data));
     }
-    private aesOpen(key: Uint8Array, frame: Uint8Array): Uint8Array {
-        return gcm(key, frame.subarray(0, 12)).decrypt(frame.subarray(12));
+    private aesOpen(key: Uint8Array, frame: Uint8Array, aad?: Uint8Array): Uint8Array {
+        return gcm(key, frame.subarray(0, 12), aad).decrypt(frame.subarray(12));
     }
     private getOrCreateAes(alias: string): Uint8Array {
         const k = `pqss.aes.${alias}`;
@@ -70,6 +83,13 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         if (existing) return existing;
         const key = randomBytes(32);
         this.put(k, key);
+        return key;
+    }
+    private storeMasterKey(): Uint8Array {
+        const existing = this.get(STORE_KEY);
+        if (existing) return existing;
+        const key = randomBytes(32);
+        this.put(STORE_KEY, key);
         return key;
     }
 
@@ -83,72 +103,67 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         };
     }
 
-    async generateKeyPair(options: {
-        keyAlias: string;
-        type: KeyType;
-        overwrite?: boolean;
-    }): Promise<{ publicKey: string }> {
-        const pkKey = `pqss.sign.${options.keyAlias}.pk`;
+    async generateKeyPair(options: { keyAlias: string; type: KeyType; overwrite?: boolean }): Promise<{ publicKey: string }> {
+        const alias = this.safeAlias(options.keyAlias);
+        const pkKey = `pqss.sign.${alias}.pk`;
         if (!options.overwrite && this.store.getItem(pkKey) !== null) {
             throw this.unavailable('Alias already exists');
         }
         const kp = dsaOf(options.type).keygen();
-        this.put(`pqss.sign.${options.keyAlias}.sk`, kp.secretKey);
+        this.put(`pqss.sign.${alias}.sk`, kp.secretKey);
         this.put(pkKey, kp.publicKey);
+        this.store.setItem(`pqss.sign.${alias}.type`, options.type);
         return { publicKey: toB64(kp.publicKey) };
     }
 
     async getPublicKey(options: { keyAlias: string }): Promise<{ publicKey: string }> {
-        const pk = this.get(`pqss.sign.${options.keyAlias}.pk`);
+        const pk = this.get(`pqss.sign.${this.safeAlias(options.keyAlias)}.pk`);
         if (!pk) throw this.unavailable('Key not found');
         return { publicKey: toB64(pk) };
     }
 
     async sign(options: { keyAlias: string; data: string; type: KeyType }): Promise<{ signature: string }> {
-        const sk = this.get(`pqss.sign.${options.keyAlias}.sk`);
+        const alias = this.safeAlias(options.keyAlias);
+        if (this.store.getItem(`pqss.sign.${alias}.type`) !== options.type) {
+            throw this.unavailable('Key type mismatch');
+        }
+        const sk = this.get(`pqss.sign.${alias}.sk`);
         if (!sk) throw this.unavailable('Key not found');
         const sig = dsaOf(options.type).sign(fromB64(options.data), sk);
         return { signature: toB64(sig) };
     }
 
     async encryptAtRest(options: { keyAlias: string; data: string }): Promise<{ ciphertext: string }> {
-        const key = this.getOrCreateAes(options.keyAlias);
+        const key = this.getOrCreateAes(this.safeAlias(options.keyAlias));
         return { ciphertext: toB64(this.aesSeal(key, fromB64(options.data))) };
     }
 
     async decryptAtRest(options: { keyAlias: string; data: string }): Promise<{ plaintext: string }> {
-        const key = this.get(`pqss.aes.${options.keyAlias}`);
+        const key = this.get(`pqss.aes.${this.safeAlias(options.keyAlias)}`);
         if (!key) throw this.unavailable('Key not found');
         return { plaintext: toB64(this.aesOpen(key, fromB64(options.data))) };
     }
 
-    async generateKemKeyPair(options: {
-        keyAlias: string;
-        type: KemType;
-        overwrite?: boolean;
-    }): Promise<{ publicKey: string }> {
-        const pkKey = `pqss.kem.${options.keyAlias}.pk`;
+    async generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boolean }): Promise<{ publicKey: string }> {
+        const alias = this.safeAlias(options.keyAlias);
+        const pkKey = `pqss.kem.${alias}.pk`;
         if (!options.overwrite && this.store.getItem(pkKey) !== null) {
             throw this.unavailable('Alias already exists');
         }
         const kp = kemOf(options.type).keygen();
-        this.put(`pqss.kem.${options.keyAlias}.sk`, kp.secretKey);
+        this.put(`pqss.kem.${alias}.sk`, kp.secretKey);
         this.put(pkKey, kp.publicKey);
-        this.store.setItem(`pqss.kem.${options.keyAlias}.type`, options.type);
+        this.store.setItem(`pqss.kem.${alias}.type`, options.type);
         return { publicKey: toB64(kp.publicKey) };
     }
 
     async getKemPublicKey(options: { keyAlias: string }): Promise<{ publicKey: string }> {
-        const pk = this.get(`pqss.kem.${options.keyAlias}.pk`);
+        const pk = this.get(`pqss.kem.${this.safeAlias(options.keyAlias)}.pk`);
         if (!pk) throw this.unavailable('Key not found');
         return { publicKey: toB64(pk) };
     }
 
-    async encryptTo(options: {
-        recipientPublicKey: string;
-        type: KemType;
-        data: string;
-    }): Promise<{ ciphertext: string }> {
+    async encryptTo(options: { recipientPublicKey: string; type: KemType; data: string }): Promise<{ ciphertext: string }> {
         const { cipherText, sharedSecret } = kemOf(options.type).encapsulate(fromB64(options.recipientPublicKey));
         const nonce = randomBytes(12);
         const aead = chacha20poly1305(sharedSecret, nonce).encrypt(fromB64(options.data));
@@ -156,12 +171,13 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
     }
 
     async decrypt(options: { keyAlias: string; type: KemType; data: string }): Promise<{ plaintext: string }> {
-        const storedType = this.store.getItem(`pqss.kem.${options.keyAlias}.type`);
-        if (storedType !== options.type) throw this.unavailable('Key type mismatch');
-        const sk = this.get(`pqss.kem.${options.keyAlias}.sk`);
+        const alias = this.safeAlias(options.keyAlias);
+        if (this.store.getItem(`pqss.kem.${alias}.type`) !== options.type) throw this.unavailable('Key type mismatch');
+        const sk = this.get(`pqss.kem.${alias}.sk`);
         if (!sk) throw this.unavailable('Key not found');
         const buf = fromB64(options.data);
         const ctLen = KEM_CT_LEN[options.type];
+        if (buf.length <= ctLen + 12) throw this.unavailable('Malformed ciphertext');
         const sharedSecret = kemOf(options.type).decapsulate(buf.subarray(0, ctLen), sk);
         const nonce = buf.subarray(ctLen, ctLen + 12);
         const plain = chacha20poly1305(sharedSecret, nonce).decrypt(buf.subarray(ctLen + 12));
@@ -169,15 +185,18 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
     }
 
     async setItem(options: { key: string; value: string }): Promise<void> {
-        const key = this.getOrCreateAes('__pqss_store__');
-        this.put(`pqss.store.${options.key}`, this.aesSeal(key, utf8.encode(options.value)));
+        // bind the item name as AEAD associated data so a value can't be moved to another key
+        this.put(
+            `pqss.store.${options.key}`,
+            this.aesSeal(this.storeMasterKey(), utf8.encode(options.value), utf8.encode(options.key)),
+        );
     }
 
     async getItem(options: { key: string }): Promise<{ value: string | null }> {
         const frame = this.get(`pqss.store.${options.key}`);
-        const key = this.get(`pqss.aes.__pqss_store__`);
+        const key = this.get(STORE_KEY);
         if (!frame || !key) return { value: null };
-        return { value: utf8d.decode(this.aesOpen(key, frame)) };
+        return { value: utf8d.decode(this.aesOpen(key, frame, utf8.encode(options.key))) };
     }
 
     async removeItem(options: { key: string }): Promise<void> {
@@ -206,5 +225,6 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
             if (k && k.startsWith(prefix)) toRemove.push(k);
         }
         for (const k of toRemove) this.store.removeItem(k);
+        this.store.removeItem(STORE_KEY);
     }
 }
