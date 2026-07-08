@@ -309,7 +309,9 @@ class PQSecureStoragePlugin : Plugin() {
             val privBytes = kp.private.encoded // PKCS8
             val rawPub = rawFromSpki(kp.public.encoded) // raw FIPS-203 bytes
 
-            val wrapKey = getOrCreateKemWrapKey(alias)
+            val oldVer = kemPrefs().getInt(kemWrapVerKey(alias), -1)
+            val newVer = oldVer + 1
+            val wrapKey = createKemWrapKey(alias, newVer)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
             authenticateCipher(hostActivity, cipher, "Authenticate to create your PQ key", call) { boundCipher ->
@@ -321,7 +323,18 @@ class PQSecureStoragePlugin : Plugin() {
                     .putString(kemPubKeyKey(alias), Base64.encodeToString(rawPub, Base64.NO_WRAP))
                     .putString(kemTagKey(alias), pubTag("kem:$alias", rawPub)) // integrity tag
                     .putString(kemTypeKey(alias), type)
+                    .putInt(kemWrapVerKey(alias), newVer)
                     .apply()
+                // rotation committed: retire the previous wrap key so a restored old wrapped
+                // private can no longer be unwrapped (anti-rollback)
+                if (oldVer >= 0) {
+                    try {
+                        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                        if (ks.containsAlias(kemWrapAlias(alias, oldVer))) ks.deleteEntry(kemWrapAlias(alias, oldVer))
+                    } catch (e: Exception) {
+                        logd("kem wrap rotate cleanup failed", e)
+                    }
+                }
                 val ret = JSObject()
                 ret.put("publicKey", Base64.encodeToString(rawPub, Base64.NO_WRAP))
                 call.resolve(ret)
@@ -398,6 +411,8 @@ class PQSecureStoragePlugin : Plugin() {
             if (storedType != type) return call.reject("Key type mismatch", "E_TYPE_MISMATCH")
             val privStr = kemPrefs().getString(kemPrivKey(alias), null)
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
+            val ver = kemPrefs().getInt(kemWrapVerKey(alias), -1)
+            if (ver < 0) return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val privBlob = Base64.decode(privStr, Base64.DEFAULT)
             val frame = Base64.decode(data, Base64.DEFAULT)
             if (frame.size <= ctLen + 12) return call.reject("Malformed ciphertext", "E_BAD_CIPHERTEXT")
@@ -405,7 +420,7 @@ class PQSecureStoragePlugin : Plugin() {
             val wrapIv = privBlob.copyOfRange(0, 12)
             val wrapped = privBlob.copyOfRange(12, privBlob.size)
             val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-            val wrapKey = ks.getKey(kemWrapAlias(alias), null) as? SecretKey
+            val wrapKey = ks.getKey(kemWrapAlias(alias, ver), null) as? SecretKey
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val unwrapCipher = Cipher.getInstance("AES/GCM/NoPadding")
             unwrapCipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, wrapIv))
@@ -548,7 +563,8 @@ class PQSecureStoragePlugin : Plugin() {
     }
 
     private fun atRestAlias(alias: String) = "$alias.aes"
-    private fun kemWrapAlias(alias: String) = "$alias.kemwrap"
+    private fun kemWrapAlias(alias: String, ver: Int) = "$alias.kemwrap.$ver"
+    private fun kemWrapVerKey(alias: String) = "$alias.wrapver"
     private fun kemPrefs() = context.getSharedPreferences("pq_kem", android.content.Context.MODE_PRIVATE)
     private fun kemPrivKey(alias: String) = "$alias.priv"
     private fun kemPubKeyKey(alias: String) = "$alias.pub"
@@ -572,16 +588,16 @@ class PQSecureStoragePlugin : Plugin() {
         return kg.generateKey()
     }
 
-    private fun getOrCreateKemWrapKey(alias: String): SecretKey {
-        // reuse the existing wrap key on overwrite instead of deleting it first. Re-wrapping
-        // the new private with the same key (fresh IV) is safe, and the old wrapped blob stays
-        // readable until the success callback overwrites the prefs.
+    private fun createKemWrapKey(alias: String, ver: Int): SecretKey {
+        // a fresh wrap key per generation (versioned alias). On overwrite the old version is
+        // deleted after the new keypair is persisted, so a restored pre-rotation wrapped-private
+        // can no longer be unwrapped. Clear any orphan at this version first (cancelled attempt).
         val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        (ks.getKey(kemWrapAlias(alias), null) as? SecretKey)?.let { return it }
+        if (ks.containsAlias(kemWrapAlias(alias, ver))) ks.deleteEntry(kemWrapAlias(alias, ver))
         val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
         kg.init(
             KeyGenParameterSpec.Builder(
-                kemWrapAlias(alias),
+                kemWrapAlias(alias, ver),
                 KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
             )
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
