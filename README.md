@@ -268,8 +268,10 @@ Return the raw public key for an existing signing alias.
 sign(options: { keyAlias: string; data: string; type: SignatureType; description?: string; }) => Promise<{ signature: string; }>
 ```
 
-Sign data with the aliased ML-DSA key. Prompts for biometrics. `description`, if given,
-is shown in the prompt so the user sees what they authorize.
+Sign data with the aliased ML-DSA key. Prompts for biometrics. WARNING: the signature covers
+the raw `data` bytes as-is and `description` is only prompt text (the caller controls both),
+so this is NOT a WYSIWYG consent guarantee. A host app that signs untrusted payloads must show
+its own confirmation of what is being signed; `description` is truncated for the prompt.
 
 | Param         | Type                                                                                                                     |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
@@ -286,7 +288,7 @@ is shown in the prompt so the user sees what they authorize.
 encryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ ciphertext: string; }>
 ```
 
-Encrypt data with an AES-256-GCM key held in the TEE/Keychain. Returns the blob to store.
+Encrypt data with an AES-256-GCM key (TEE/Keychain on device, localStorage on web). Returns the blob to store.
 
 | Param         | Type                                             |
 | ------------- | ------------------------------------------------ |
@@ -338,7 +340,7 @@ alias exists unless `overwrite` is true.
 getKemPublicKey(options: { keyAlias: string; }) => Promise<{ publicKey: string; }>
 ```
 
-Return the raw ML-KEM public key for an alias. Rejects if it fails an integrity check.
+Return the raw ML-KEM public key for an alias. On Android a failed HMAC integrity-tag check rejects it; iOS/web have no such tag.
 
 | Param         | Type                               |
 | ------------- | ---------------------------------- |
@@ -393,9 +395,10 @@ Store a secret string under a key. `value` is stored verbatim. Silent write.
 
 `requireBiometric` (default `false`) is decided per item at write time: `false` stores in a
 silent tier that reads without a prompt (drop-in for a plain secure store); `true` stores in
-a biometric tier whose reads prompt. The chosen mode is integrity-protected, so it can't be
-downgraded by tampering. Overwriting an item that was stored biometric prompts. On the web
-fallback there is no biometric, so the flag is accepted but reads stay silent either way.
+a biometric tier whose reads prompt. On device the mode is integrity-protected (Android MACs
+it, iOS binds it to the Keychain access control), so tampering can't downgrade a biometric
+item to silent. Overwriting an item that was stored biometric prompts. On the web fallback
+there is no biometric and no such integrity, so the flag is accepted but reads stay silent.
 
 | Param         | Type                                                                     |
 | ------------- | ------------------------------------------------------------------------ |

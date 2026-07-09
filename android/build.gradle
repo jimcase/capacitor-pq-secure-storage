@@ -10,6 +10,9 @@ android {
         minSdk 34 // tracks the wallet's minSdk
         targetSdk 37 // Android 17
 
+        // ship the keep rules to the consuming app: its R8 must not strip BouncyCastle
+        consumerProguardFiles 'proguard-rules.pro'
+
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 

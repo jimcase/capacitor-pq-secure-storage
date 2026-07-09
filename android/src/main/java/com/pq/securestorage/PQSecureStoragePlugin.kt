@@ -156,8 +156,9 @@ class PQSecureStoragePlugin : Plugin() {
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val alg = algOf(type) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
-        // optional host-supplied text shown in the prompt so the user sees what they authorize
-        val description = call.getString("description")
+        // optional host-supplied prompt text (NOT a consent guarantee, see definitions.ts). Cap the
+        // length so a caller can't push a giant string or shove real content off-screen.
+        val description = call.getString("description")?.take(200)
 
         // Capacitor's BridgeActivity is a FragmentActivity, which is what BiometricPrompt needs
         // to host its DialogFragment. Any custom host activity has to be one too.
@@ -855,12 +856,21 @@ class PQSecureStoragePlugin : Plugin() {
         }
         try {
             val privBlob = Base64.decode(privB64, Base64.DEFAULT)
+            val wrapped = privBlob.copyOfRange(12, privBlob.size)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, privBlob.copyOfRange(0, 12)))
-            authenticateCipher(hostActivity, cipher, "Authenticate to replace your secret", call) { _ ->
+            authenticateCipher(hostActivity, cipher, "Authenticate to replace your secret", call) { boundCipher ->
                 try {
+                    // unwrap with the bound cipher so a forged callback can't replace/downgrade the item
+                    boundCipher.doFinal(wrapped)
                     if (newMode == "b") {
                         val rawPub = Base64.decode(storeMeta().getString("pub", null), Base64.DEFAULT)
+                        // verify the store pub tag (same as setBio) so a swapped pub can't redirect
+                        // the re-encapsulated value to an attacker key
+                        if (!verifyPubTag("ss:master", rawPub, storeMeta().getString("tag", null))) {
+                            call.reject("Store key integrity check failed", "E_TAMPERED")
+                            return@authenticateCipher
+                        }
                         persistItem(key, value, mlkemPublicFromRaw(rawPub, NISTObjectIdentifiers.id_alg_ml_kem_1024), "b")
                         call.resolve()
                     } else {
@@ -1027,9 +1037,12 @@ class PQSecureStoragePlugin : Plugin() {
         }
         try {
             val privBlob = Base64.decode(privB64, Base64.DEFAULT)
+            val wrapped = privBlob.copyOfRange(12, privBlob.size)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, privBlob.copyOfRange(0, 12)))
-            authenticateCipher(hostActivity, cipher, "Authenticate to delete your secret", call) { _ ->
+            authenticateCipher(hostActivity, cipher, "Authenticate to delete your secret", call) { boundCipher ->
+                // unwrap with the bound cipher so a forged callback can't trigger the delete
+                boundCipher.doFinal(wrapped)
                 storeItems().edit().remove(key).apply()
                 call.resolve()
             }
@@ -1077,9 +1090,13 @@ class PQSecureStoragePlugin : Plugin() {
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         try {
             val privBlob = Base64.decode(privB64, Base64.DEFAULT)
+            val wrapped = privBlob.copyOfRange(12, privBlob.size)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, privBlob.copyOfRange(0, 12)))
-            authenticateCipher(hostActivity, cipher, "Authenticate to erase secure storage", call) { _ ->
+            authenticateCipher(hostActivity, cipher, "Authenticate to erase secure storage", call) { boundCipher ->
+                // actually unwrap with the bound cipher: a forged onAuthenticationSucceeded that
+                // replays our un-unlocked cipher throws here, so the wipe only runs on a real match
+                boundCipher.doFinal(wrapped)
                 doClearWipe()
                 call.resolve()
             }
@@ -1121,6 +1138,25 @@ class PQSecureStoragePlugin : Plugin() {
                 .setKeySize(256)
                 .setUserAuthenticationRequired(true)
                 .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+                .build()
+        )
+        return kg.generateKey()
+    }
+
+    // silent tier wrap key: same AES-256-GCM in the TEE but NO auth requirement, so the silent
+    // private can be unwrapped without a biometric prompt
+    private fun getOrCreateSsSilentWrapKey(): SecretKey {
+        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        (ks.getKey(ssSilentAlias, null) as? SecretKey)?.let { return it }
+        val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+        kg.init(
+            KeyGenParameterSpec.Builder(
+                ssSilentAlias,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
                 .build()
         )
         return kg.generateKey()

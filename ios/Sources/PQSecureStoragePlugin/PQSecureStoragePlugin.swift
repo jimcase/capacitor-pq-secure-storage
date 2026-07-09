@@ -295,7 +295,9 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Unsupported key type", "E_UNSUPPORTED")
         }
         // optional host-supplied text shown in the prompt so the user sees what they authorize
-        let reason = call.getString("description") ?? "Authenticate to sign with your PQ key"
+        // prompt text only, not a consent guarantee (see definitions.ts). Cap so a caller can't
+        // push a giant string or shove real content off-screen.
+        let reason = String((call.getString("description") ?? "Authenticate to sign with your PQ key").prefix(200))
 
         Self.authenticate(reason: reason) { result in
             switch result {
@@ -758,9 +760,6 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         } else {
             accessAttr[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         }
-        // add, or update the value in place when it already exists; never delete-then-add. The ACL
-        // is set on both paths, so changing requireBiometric on an existing key re-tiers it (the OS
-        // prompts when the current item is biometric, blocking a silent downgrade/replace).
         let matchQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
@@ -769,16 +768,35 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         var addQuery = matchQuery
         addQuery[kSecValueData as String] = data
         for (k, v) in accessAttr { addQuery[k] = v }
-        var status = SecItemAdd(addQuery as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            var updateAttrs: [String: Any] = [kSecValueData as String: data]
-            for (k, v) in accessAttr { updateAttrs[k] = v }
-            status = SecItemUpdate(matchQuery as CFDictionary, updateAttrs as CFDictionary)
+
+        // delete-then-add sets the ACL deterministically. SecItemUpdate does NOT reliably change an
+        // item's access control, so a silent->bio upgrade could otherwise stay silent (false
+        // protection) or a bio->silent downgrade could be applied with no prompt.
+        let writeItem: () -> Void = {
+            SecItemDelete(matchQuery as CFDictionary)
+            let status = SecItemAdd(addQuery as CFDictionary, nil)
+            if status == errSecSuccess { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
         }
-        if status == errSecSuccess {
-            call.resolve()
-        } else {
-            call.reject("Store failed (\(status))", "E_ENCRYPT")
+
+        // probe the existing item's tier WITHOUT prompting to decide whether a biometric is needed
+        var probe = matchQuery
+        probe[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        switch SecItemCopyMatching(probe as CFDictionary, nil) {
+        case errSecItemNotFound:
+            let status = SecItemAdd(addQuery as CFDictionary, nil)
+            if status == errSecSuccess { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
+        case errSecInteractionNotAllowed:
+            // the current item is biometric: require a real biometric before replacing/re-tiering it,
+            // so a silent bridge caller can't overwrite or downgrade a biometric secret
+            Self.authenticate(reason: "Authenticate to replace your secret") { result in
+                switch result {
+                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .success: writeItem()
+                }
+            }
+        default:
+            // current item is silent (or absent-by-race): overwrite; delete+add applies the new tier
+            writeItem()
         }
     }
 
@@ -812,7 +830,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             case errSecUserCanceled, errSecAuthFailed:
                 call.reject("Authentication failed", "E_AUTH_FAILED")
             default:
-                call.reject("Read failed (\(status))", "E_DECRYPT")
+                call.reject("Read failed", "E_DECRYPT")
             }
         }
     }
@@ -846,7 +864,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 if status == errSecSuccess || status == errSecItemNotFound {
                     call.resolve()
                 } else {
-                    call.reject("Remove failed (\(status))", "E_DECRYPT")
+                    call.reject("Remove failed", "E_DECRYPT")
                 }
             }
         }
@@ -912,7 +930,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 if status == errSecSuccess || status == errSecItemNotFound {
                     call.resolve()
                 } else {
-                    call.reject("Clear failed (\(status))", "E_DECRYPT")
+                    call.reject("Clear failed", "E_DECRYPT")
                 }
             }
         }
