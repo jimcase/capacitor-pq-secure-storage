@@ -220,14 +220,16 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func getHardwareCapabilities(_ call: CAPPluginCall) {
         if #available(iOS 26.0, *) {
+            // gate on the actual SEP: an iOS 26 device/simulator without a Secure Enclave can't do
+            // any of this, so don't claim hardware backing it doesn't have
+            let hw = SecureEnclave.isAvailable
             call.resolve([
-                "supportsPqc": true,
-                "hardwareBacked": true, // Secure Enclave / Keychain
-                "biometricGated": true,
-                "supportedVariants": ["PQC_MLDSA_65", "PQC_MLDSA_87"],
-                "supportedKem": ["PQC_MLKEM_768", "PQC_MLKEM_1024"],
-                // decapsulation runs inside the Secure Enclave on iOS 26
-                "kemInSecureEnclave": true
+                "supportsPqc": hw,
+                "hardwareBacked": hw,
+                "biometricGated": hw,
+                "supportedVariants": hw ? ["PQC_MLDSA_65", "PQC_MLDSA_87"] : [],
+                "supportedKem": hw ? ["PQC_MLKEM_768", "PQC_MLKEM_1024"] : [],
+                "kemInSecureEnclave": hw
             ])
         } else {
             call.resolve([
@@ -252,19 +254,43 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
 
         let overwrite = call.getBool("overwrite") ?? false
-        if !overwrite && Self.aliasExists(alias) {
+        let exists = Self.aliasExists(alias)
+        if !overwrite && exists {
             // alias may back a live identity already -- refuse to silently clobber it
             return call.reject("Alias already exists", "E_ALIAS_EXISTS")
         }
 
-        do {
-            let access = try Self.makeSepAccessControl()
-            let key = try PQKey.generate(type: type, accessControl: access)
-            try Self.persist(key: key, type: type, alias: alias, overwrite: overwrite)
-            call.resolve(["publicKey": key.publicKeyBytes.base64EncodedString()])
-        } catch {
-            os_log("generateKeyPair failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
-            call.reject("Key generation failed", "E_KEYGEN")
+        let doGenerate: () -> Void = {
+            do {
+                let access = try Self.makeSepAccessControl()
+                let key = try PQKey.generate(type: type, accessControl: access)
+                try Self.persist(key: key, type: type, alias: alias, overwrite: true)
+                call.resolve(["publicKey": key.publicKeyBytes.base64EncodedString()])
+            } catch {
+                os_log("generateKeyPair failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+                call.reject("Key generation failed", "E_KEYGEN")
+            }
+        }
+
+        if exists {
+            // destructive overwrite of a live signing key: prove a real biometric on the EXISTING
+            // key first (sign with it), so a silent bridge caller can't rotate/brick an identity key
+            Self.authenticate(reason: "Authenticate to replace your key") { result in
+                switch result {
+                case .failure:
+                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .success(let ctx):
+                    do {
+                        _ = try Self.loadKey(alias: alias, context: ctx).sign(Data([0]))
+                        doGenerate()
+                    } catch {
+                        os_log("overwrite auth failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+                        call.reject("Authentication failed", "E_AUTH_FAILED")
+                    }
+                }
+            }
+        } else {
+            doGenerate()
         }
     }
 

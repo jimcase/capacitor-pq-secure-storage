@@ -233,8 +233,11 @@ Report what post-quantum crypto this device supports.
 generateKeyPair(options: { keyAlias: string; type: SignatureType; overwrite?: boolean; }) => Promise<{ publicKey: string; }>
 ```
 
-Generate a hardware-backed ML-DSA signing keypair under an alias and return the raw
-public key. Rejects if the alias exists unless `overwrite` is true.
+Generate a hardware-backed ML-DSA signing keypair under an alias and return the raw public
+key. Rejects if the alias exists unless `overwrite` is true. Overwriting an existing key
+PROMPTS for biometrics (bound to the existing key), because it destroys a possibly-live
+identity key; a fresh alias does not prompt. Distinct aliases give independent keypairs (use
+that for KERI rotation, one alias per key).
 
 | Param         | Type                                                                                                      |
 | ------------- | --------------------------------------------------------------------------------------------------------- |
@@ -400,6 +403,10 @@ it, iOS binds it to the Keychain access control), so tampering can't downgrade a
 item to silent. Overwriting an item that was stored biometric prompts. On the web fallback
 there is no biometric and no such integrity, so the flag is accepted but reads stay silent.
 
+WARNING: a silent item is readable by any code on the JS bridge after device unlock (no
+prompt), so for seed-tier material (mnemonic, signing seed) pass `requireBiometric: true`.
+The silent default exists for drop-in migration, not because silent is safe for secrets.
+
 | Param         | Type                                                                     |
 | ------------- | ------------------------------------------------------------------------ |
 | **`options`** | <code>{ key: string; value: string; requireBiometric?: boolean; }</code> |
@@ -414,7 +421,9 @@ getItem(options: { key: string; }) => Promise<{ value: string | null; }>
 ```
 
 Read a stored secret. Prompts for biometrics only if the item was stored with
-`requireBiometric: true`. Returns `null` if the key is absent.
+`requireBiometric: true`. Returns `null` if the key is absent. NOTE: the plaintext is
+returned to the JS caller, so a compromised webview sees it; the host should minimize how
+long the value lives in JS.
 
 | Param         | Type                          |
 | ------------- | ----------------------------- |
@@ -488,14 +497,14 @@ the store is already empty. Web fallback has no biometric, so silent.
 
 #### HardwareCapabilities
 
-| Prop                     | Type                         | Description                                                                                                                                                                                             |
-| ------------------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`supportsPqc`**        | <code>boolean</code>         | Whether post-quantum operations are available (hardware OR software fallback).                                                                                                                          |
-| **`hardwareBacked`**     | <code>boolean</code>         | True only when keys are held in secure hardware (TEE/Keychain/Secure Enclave). FALSE on the web software fallback, where keys live in localStorage. Gate seed-tier trust on this, not on `supportsPqc`. |
-| **`biometricGated`**     | <code>boolean</code>         | True when reads are gated by a device biometric. False on the web software fallback.                                                                                                                    |
-| **`supportedVariants`**  | <code>SignatureType[]</code> | ML-DSA signing variants available on this device.                                                                                                                                                       |
-| **`supportedKem`**       | <code>KemType[]</code>       | ML-KEM variants available on this device.                                                                                                                                                               |
-| **`kemInSecureEnclave`** | <code>boolean</code>         | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key.                                          |
+| Prop                     | Type                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **`supportsPqc`**        | <code>boolean</code>         | Whether post-quantum operations are available (hardware OR software fallback).                                                                                                                                                                                                                                                                                                                                                                         |
+| **`hardwareBacked`**     | <code>boolean</code>         | True when a real key-security-level probe says the TEE/Secure Enclave backs the Keystore/ Keychain keys (FALSE on the web fallback, and FALSE if KeyMint silently fell back to a software keystore). Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android ML-KEM is ALWAYS software (the private is only wrapped by a hardware key); this flag reflects the AES/wrap keys, and hardware ML-DSA additionally needs per-key attestation. |
+| **`biometricGated`**     | <code>boolean</code>         | True when reads are gated by a device biometric. False on the web software fallback.                                                                                                                                                                                                                                                                                                                                                                   |
+| **`supportedVariants`**  | <code>SignatureType[]</code> | ML-DSA signing variants available on this device.                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **`supportedKem`**       | <code>KemType[]</code>       | ML-KEM variants available on this device.                                                                                                                                                                                                                                                                                                                                                                                                              |
+| **`kemInSecureEnclave`** | <code>boolean</code>         | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key.                                                                                                                                                                                                                                                                                         |
 
 
 ### Type Aliases
@@ -530,6 +539,23 @@ the store is already empty. Web fallback has no biometric, so silent.
 - **Alias validation.** Key aliases are restricted to `[A-Za-z0-9_-]` and cannot start with the
   plugin's reserved prefix, so a caller cannot clobber the plugin's own internal Keystore entries
   (`E_BAD_ALIAS`).
+- **Identity-key overwrite.** `generateKeyPair` (ML-DSA) with `overwrite: true` on an existing
+  alias destroys a possibly-live signing key, so it now requires a biometric bound to the existing
+  key first — a silent bridge caller cannot rotate/brick an identity key. `generateKemKeyPair`
+  overwrite already prompts (to wrap the new private), though that prompt is not bound to the old key.
+- **Rollback (residual).** The store item MAC stops forgery but not full-snapshot rollback: an
+  attacker who can restore an old copy of the prefs (value + MAC + mode, all still valid) can revive
+  a rotated-away or revoked secret. Android has no universal monotonic anti-rollback counter
+  (StrongBox has one, not on all devices). The host should not rely on the store alone for freshness
+  of revocable state.
+- **Memory hygiene.** ML-DSA private keys never leave the Keystore. ML-KEM privates are software
+  (BouncyCastle) — the raw private and the KEM shared secret are wiped from the heap right after use,
+  best-effort (JVM copies in `SecretKeySpec`/GC still linger, and the decrypted plaintext `String`
+  is immutable and cannot be wiped). Treat in-process memory as recoverable by a determined attacker.
+- **`hardwareBacked` is a probe, not a promise.** It reflects a real Keystore security-level check
+  for the AES/wrap keys. ML-KEM is always software; hardware ML-DSA additionally needs KeyMint
+  support (per-key attestation), which is not checked here. Do not read `hardwareBacked: true` as
+  "ML-KEM/ML-DSA are in hardware."
 - **Per-item biometric.** `requireBiometric` is chosen at write time and pins the item to a silent
   or a biometric tier (distinct keypairs on Android, distinct Keychain access control on iOS). A
   bio item is not readable through the silent tier. `getItem`/`removeItem` prompt only for bio

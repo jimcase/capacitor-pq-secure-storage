@@ -5,9 +5,11 @@ export interface HardwareCapabilities {
     /** Whether post-quantum operations are available (hardware OR software fallback). */
     supportsPqc: boolean;
     /**
-     * True only when keys are held in secure hardware (TEE/Keychain/Secure Enclave). FALSE on the
-     * web software fallback, where keys live in localStorage. Gate seed-tier trust on this, not on
-     * `supportsPqc`.
+     * True when a real key-security-level probe says the TEE/Secure Enclave backs the Keystore/
+     * Keychain keys (FALSE on the web fallback, and FALSE if KeyMint silently fell back to a
+     * software keystore). Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android
+     * ML-KEM is ALWAYS software (the private is only wrapped by a hardware key); this flag reflects
+     * the AES/wrap keys, and hardware ML-DSA additionally needs per-key attestation.
      */
     hardwareBacked: boolean;
     /** True when reads are gated by a device biometric. False on the web software fallback. */
@@ -28,8 +30,11 @@ export interface PQSecureStoragePlugin {
     getHardwareCapabilities(): Promise<HardwareCapabilities>;
 
     /**
-     * Generate a hardware-backed ML-DSA signing keypair under an alias and return the raw
-     * public key. Rejects if the alias exists unless `overwrite` is true.
+     * Generate a hardware-backed ML-DSA signing keypair under an alias and return the raw public
+     * key. Rejects if the alias exists unless `overwrite` is true. Overwriting an existing key
+     * PROMPTS for biometrics (bound to the existing key), because it destroys a possibly-live
+     * identity key; a fresh alias does not prompt. Distinct aliases give independent keypairs (use
+     * that for KERI rotation, one alias per key).
      */
     generateKeyPair(options: { keyAlias: string; type: SignatureType; overwrite?: boolean }): Promise<{ publicKey: string }>;
 
@@ -85,12 +90,18 @@ export interface PQSecureStoragePlugin {
      * it, iOS binds it to the Keychain access control), so tampering can't downgrade a biometric
      * item to silent. Overwriting an item that was stored biometric prompts. On the web fallback
      * there is no biometric and no such integrity, so the flag is accepted but reads stay silent.
+     *
+     * WARNING: a silent item is readable by any code on the JS bridge after device unlock (no
+     * prompt), so for seed-tier material (mnemonic, signing seed) pass `requireBiometric: true`.
+     * The silent default exists for drop-in migration, not because silent is safe for secrets.
      */
     setItem(options: { key: string; value: string; requireBiometric?: boolean }): Promise<void>;
 
     /**
      * Read a stored secret. Prompts for biometrics only if the item was stored with
-     * `requireBiometric: true`. Returns `null` if the key is absent.
+     * `requireBiometric: true`. Returns `null` if the key is absent. NOTE: the plaintext is
+     * returned to the JS caller, so a compromised webview sees it; the host should minimize how
+     * long the value lives in JS.
      */
     getItem(options: { key: string }): Promise<{ value: string | null }>;
 
