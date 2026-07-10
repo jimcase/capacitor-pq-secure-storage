@@ -882,19 +882,23 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         addQuery[kSecValueData as String] = data
         for (k, v) in accessAttr { addQuery[k] = v }
 
-        // delete-then-add sets the ACL deterministically. SecItemUpdate does NOT reliably change an
-        // item's access control, so a silent->bio upgrade could otherwise stay silent (false
-        // protection) or a bio->silent downgrade could be applied with no prompt.
-        let writeItem: () -> Void = {
-            SecItemDelete(matchQuery as CFDictionary)
+        let create: () -> Void = {
             let status = SecItemAdd(addQuery as CFDictionary, nil)
             if status == errSecSuccess { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
         }
+        // value-only update. The tier/ACL is fixed at creation (a tier change rejects E_TIER_MISMATCH
+        // below), so this never re-tiers, and it is atomic: a failed update leaves the old secret
+        // intact, unlike delete-then-add which could lose it.
+        let update: (LAContext?) -> Void = { ctx in
+            var q = matchQuery
+            if let ctx = ctx { q[kSecUseAuthenticationContext as String] = ctx }
+            let status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            if status == errSecSuccess { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
+        }
 
-        // probe the existing item's tier WITHOUT prompting to decide whether a biometric is needed.
-        // Request DATA so the biometry ACL (which gates data, not metadata) is actually exercised;
-        // with UIFail a bio item then returns errSecInteractionNotAllowed instead of a metadata-only
-        // errSecSuccess that would be misread as silent and silently downgraded.
+        // probe the existing item's tier WITHOUT prompting. Request DATA so the biometry ACL (which
+        // gates data, not metadata) is exercised: a bio item returns errSecInteractionNotAllowed, a
+        // silent one errSecSuccess, so a bio item can't be misread as silent.
         var probe = matchQuery
         probe[kSecReturnData as String] = true
         probe[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -902,20 +906,27 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         var probeOut: CFTypeRef?
         switch SecItemCopyMatching(probe as CFDictionary, &probeOut) {
         case errSecItemNotFound:
-            let status = SecItemAdd(addQuery as CFDictionary, nil)
-            if status == errSecSuccess { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
+            create()
+        case errSecSuccess:
+            // existing item is silent; the tier is fixed, so a bio request must removeItem first
+            if requireBiometric {
+                call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
+            } else {
+                update(nil)
+            }
         case errSecInteractionNotAllowed:
-            // the current item is biometric: require a real biometric before replacing/re-tiering it,
-            // so a silent bridge caller can't overwrite or downgrade a biometric secret
-            Self.authenticate(reason: "Authenticate to replace your secret") { result in
-                switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
-                case .success: writeItem()
+            // existing item is biometric; a silent request must removeItem first
+            if !requireBiometric {
+                call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
+            } else {
+                // same tier: authenticate, then update the value atomically
+                Self.authenticate(reason: "Authenticate to replace your secret") { result in
+                    switch result {
+                    case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                    case .success(let ctx): update(ctx)
+                    }
                 }
             }
-        case errSecSuccess:
-            // current item is silent: overwrite; delete+add applies the new tier
-            writeItem()
         default:
             // unexpected status (e.g. errSecParam): fail closed instead of blindly overwriting
             call.reject("Store failed", "E_ENCRYPT")
