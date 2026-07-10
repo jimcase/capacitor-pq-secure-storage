@@ -574,17 +574,6 @@ class PQSecureStoragePlugin : Plugin() {
     // key, and binds the value to its key name. Verified before decrypting.
     private val ssMacAlias = "__pq_ss_mac__"
 
-    // MAC binds the item to its key name AND its biometric mode, so a prefs writer can't move a
-    // value between keys or downgrade a bio item to silent.
-    private fun storeMac(itemKey: String, mode: String, frame: ByteArray): ByteArray {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(getOrCreateHmacKey(ssMacAlias))
-        macPut(mac, itemKey.toByteArray(Charsets.UTF_8))
-        macPut(mac, mode.toByteArray(Charsets.UTF_8))
-        macPut(mac, frame)
-        return mac.doFinal()
-    }
-
     // ---- item-name confidentiality ----
     // The SharedPreferences key is a keyed hash of the item name (not the plaintext), so a prefs
     // reader never sees names like "seed-phrase". The real name is also stored AES-encrypted inside
@@ -598,7 +587,7 @@ class PQSecureStoragePlugin : Plugin() {
     private fun nameTag(name: String): String {
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(getOrCreateHmacKey(ssMacAlias))
-        macPut(mac, "name".toByteArray(Charsets.UTF_8)) // domain-separate from storeMac
+        macPut(mac, "name".toByteArray(Charsets.UTF_8)) // domain-separate from the item-key tag
         macPut(mac, name.toByteArray(Charsets.UTF_8))
         return Base64.encodeToString(mac.doFinal(), Base64.NO_WRAP)
     }
@@ -614,13 +603,6 @@ class PQSecureStoragePlugin : Plugin() {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, getOrCreateStoreNameKey(), GCMParameterSpec(128, blob.copyOfRange(0, 12)))
         return String(cipher.doFinal(blob.copyOfRange(12, blob.size)), Charsets.UTF_8)
-    }
-
-    // extract the mode field ('s'/'b') without the name / MAC check (only decides whether clear()
-    // prompts; the real integrity check is parseStoreItem on read). Unparseable -> treat as bio.
-    private fun storedMode(stored: String): String {
-        val parts = stored.split(".")
-        return if (parts.size == 4 && (parts[1] == "s" || parts[1] == "b")) parts[1] else "b"
     }
 
     // reject aliases that could collide with the plugin's internal Keystore entries (they use a
@@ -807,31 +789,62 @@ class PQSecureStoragePlugin : Plugin() {
     // GHSA-safe binding as sign/decrypt). The first setItem creates the keypair and wraps the
     // private, which needs one biometric prompt; after that setItem is silent.
 
-    private val ssMasterAlias = "__pq_ss_master__"    // bio wrap key (auth-required)
-    private val ssSilentAlias = "__pq_ss_silent__"    // silent wrap key (no auth)
-    private val ssInitializing = AtomicBoolean(false)       // bio keypair provisioning
-    private val ssInitializingSilent = AtomicBoolean(false) // silent keypair provisioning
+    private val itemAliasPrefix = "__pq_ss_i_"
 
     private fun storeItems() = context.getSharedPreferences("pq_secure_store", android.content.Context.MODE_PRIVATE)
-    private fun storeMeta() = context.getSharedPreferences("pq_secure_store_key", android.content.Context.MODE_PRIVATE)
 
-    private class StoreItem(val mode: String, val frame: ByteArray)
+    // per-item Keystore alias derived from the name (url-safe base64 so it's a valid alias)
+    private fun itemKeyAlias(name: String): String {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(getOrCreateHmacKey(ssMacAlias))
+        macPut(mac, "itemkey".toByteArray(Charsets.UTF_8))
+        macPut(mac, name.toByteArray(Charsets.UTF_8))
+        return itemAliasPrefix + Base64.encodeToString(mac.doFinal(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+    }
 
-    // parse "encName.mode.frame.mac"; verify the MAC over (name, mode, frame). null = corrupt/forged.
-    // base64 NO_WRAP never contains '.', so splitting on it is unambiguous.
-    private fun parseStoreItem(key: String, stored: String): StoreItem? {
-        val parts = stored.split(".")
+    // afterFirstUnlock* keeps the key usable while the device is locked; everything else requires unlock
+    private fun unlockRequiredFor(accessibility: String?): Boolean =
+        accessibility != "afterFirstUnlock" && accessibility != "afterFirstUnlockThisDeviceOnly"
+
+    private fun isAuthRequired(key: SecretKey): Boolean = try {
+        val info = SecretKeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
+            .getKeySpec(key, KeyInfo::class.java) as KeyInfo
+        info.isUserAuthenticationRequired
+    } catch (e: Exception) {
+        false
+    }
+
+    // create (replacing any existing) the per-item AES-256-GCM key: StrongBox-backed where available,
+    // setUnlockedDeviceRequired for accessibility, per-op strong biometric when authRequired.
+    private fun createItemKey(alias: String, authRequired: Boolean, unlockRequired: Boolean): SecretKey {
+        val ks = keystore()
+        if (ks.containsAlias(alias)) ks.deleteEntry(alias)
+        fun build(strongBox: Boolean): SecretKey {
+            val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+            val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .setUnlockedDeviceRequired(unlockRequired)
+            if (authRequired) {
+                spec.setUserAuthenticationRequired(true)
+                    .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+            }
+            if (strongBox) spec.setIsStrongBoxBacked(true)
+            kg.init(spec.build())
+            return kg.generateKey()
+        }
         return try {
-            if (parts.size != 4) return null
-            val mode = parts[1] // parts[0] is the encrypted name, only used by keys()
-            if (mode != "s" && mode != "b") return null
-            val frame = Base64.decode(parts[2], Base64.DEFAULT)
-            val mac = Base64.decode(parts[3], Base64.DEFAULT)
-            if (MessageDigest.isEqual(mac, storeMac(key, mode, frame))) StoreItem(mode, frame) else null
-        } catch (e: Exception) {
-            null
+            build(true)
+        } catch (e: android.security.keystore.StrongBoxUnavailableException) {
+            build(false)
         }
     }
+
+    // stored under nameTag(name): encName . iv . ct  (AES-256-GCM under the item key, name as AAD).
+    // GCM + the per-item key give integrity, so there's no separate MAC.
+    private fun storedValue(name: String, iv: ByteArray, ct: ByteArray): String =
+        encName(name) + "." + Base64.encodeToString(iv, Base64.NO_WRAP) + "." + Base64.encodeToString(ct, Base64.NO_WRAP)
 
     @PluginMethod
     fun setItem(call: PluginCall) {
@@ -841,209 +854,61 @@ class PQSecureStoragePlugin : Plugin() {
         if (key.isEmpty() || key.length > MAX_STORE_KEY_LEN || value.length > MAX_STORE_VALUE_LEN) {
             return call.reject("Key or value out of bounds", "E_INVALID_ARGS")
         }
-        val newMode = if (call.getBoolean("requireBiometric") ?: false) "b" else "s"
-        val existing = storeItems().getString(key, null)
-        val existingItem = existing?.let { parseStoreItem(key, it) }
-        if (existing != null && existingItem == null) {
-            return call.reject("Store item integrity check failed", "E_TAMPERED")
-        }
-        // overwriting a bio item requires biometric, so a silent bridge caller can't replace or
-        // downgrade a secret that was stored biometric
-        if (existingItem?.mode == "b") {
-            return overwriteBioItem(call, key, value, newMode)
-        }
-        if (newMode == "s") setSilent(call, key, value) else setBio(call, key, value)
-    }
-
-    // silent write: encapsulate to the silent tier public (provisioning it once if absent, no prompt)
-    private fun setSilent(call: PluginCall, key: String, value: String) {
-        try {
-            val pub = ensureSilentPub(call) ?: return
-            persistItem(key, value, pub, "s")
-            call.resolve()
-        } catch (e: Exception) {
-            logd("setItem(silent) failed for key=$key", e)
-            call.reject("Store failed", "E_ENCRYPT")
-        }
-    }
-
-    // bio write: encapsulate to the bio tier public. Encapsulation needs no private, so it's silent
-    // once the bio keypair exists; only the first-ever bio write prompts to wrap the bio private.
-    private fun setBio(call: PluginCall, key: String, value: String) {
-        val meta = storeMeta()
-        val pubB64 = meta.getString("pub", null)
-        if (meta.contains("priv") && pubB64 != null) {
-            // a bio write after a biometric enrollment change encapsulates to a keypair whose private
-            // can never be unwrapped again. Detect the dead wrap key: if it's alive, take the fast
-            // path; if it's invalidated, rotate to a fresh bio keypair (old bio items were already
-            // unreadable, so nothing extra is lost) instead of bricking every future bio write.
-            val invalidated = try {
-                val ks = keystore()
-                (ks.getKey(ssMasterAlias, null) as? SecretKey)?.let {
-                    Cipher.getInstance("AES/GCM/NoPadding").init(Cipher.ENCRYPT_MODE, it)
-                }
-                false
-            } catch (e: KeyPermanentlyInvalidatedException) {
-                true
-            } catch (e: Exception) {
-                false // other init errors (needs auth etc.) mean the key is still usable
+        val newBio = call.getBoolean("requireBiometric") ?: false
+        val alias = itemKeyAlias(key)
+        val existing = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
+        val itemKey: SecretKey = if (existing != null && !invalidated(existing)) {
+            // an item's tier is fixed at creation; changing requireBiometric must go through removeItem
+            if (isAuthRequired(existing) != newBio) {
+                return call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
             }
-            if (!invalidated) {
-                try {
-                    val rawPub = Base64.decode(pubB64, Base64.DEFAULT)
-                    if (!verifyPubTag("ss:master", rawPub, meta.getString("tag", null))) {
-                        return call.reject("Store key integrity check failed", "E_TAMPERED")
-                    }
-                    persistItem(key, value, mlkemPublicFromRaw(rawPub, NISTObjectIdentifiers.id_alg_ml_kem_1024), "b")
-                    call.resolve()
-                } catch (e: Exception) {
-                    logd("setItem(bio) failed for key=$key", e)
-                    call.reject("Store failed", "E_ENCRYPT")
-                }
-                return
-            }
-            // dead bio tier: drop the invalidated wrap key + stale meta, then fall through to
-            // re-provision a fresh keypair below
+            existing // reuse (an accessibility change on overwrite is ignored -- set at creation)
+        } else {
             try {
-                val ks = keystore()
-                if (ks.containsAlias(ssMasterAlias)) ks.deleteEntry(ssMasterAlias)
+                createItemKey(alias, newBio, unlockRequiredFor(call.getString("accessibility")))
             } catch (e: Exception) {
-                logd("setItem(bio) rotate: delete failed", e)
+                logd("setItem: key create failed for key=$key", e)
+                return call.reject("Store failed", "E_ENCRYPT")
             }
-            meta.edit().remove("priv").remove("pub").remove("tag").commit()
         }
-        val hostActivity = activity as? FragmentActivity
-            ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-        if (!ssInitializing.compareAndSet(false, true)) {
-            return call.reject("Store is initializing, retry", "E_BUSY")
-        }
+        encryptAndStore(call, key, value, itemKey, newBio)
+    }
+
+    // a reused bio key is dead after a biometric enrollment change; detect it so setItem recreates
+    private fun invalidated(key: SecretKey): Boolean = try {
+        Cipher.getInstance("AES/GCM/NoPadding").init(Cipher.ENCRYPT_MODE, key)
+        false
+    } catch (e: KeyPermanentlyInvalidatedException) {
+        true
+    } catch (e: Exception) {
+        false // other errors (e.g. needs auth) mean the key is still usable
+    }
+
+    private fun encryptAndStore(call: PluginCall, key: String, value: String, itemKey: SecretKey, bio: Boolean) {
         try {
-            val kpg = KeyPairGenerator.getInstance("ML-KEM", bc)
-            kpg.initialize(MLKEMParameterSpec.ml_kem_1024, SecureRandom())
-            val kp = kpg.generateKeyPair()
-            val privBytes = kp.private.encoded
-            val rawPub = rawFromSpki(kp.public.encoded)
-            val wrapKey = getOrCreateSsMasterWrapKey()
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
-            authenticateCipher(hostActivity, cipher, "Authenticate to set up secure storage", call,
-                onError = { ssInitializing.set(false) }) { boundCipher ->
-                val wrapped = boundCipher.iv + boundCipher.doFinal(privBytes)
-                privBytes.fill(0)
-                val ok = meta.edit()
-                    .putString("priv", Base64.encodeToString(wrapped, Base64.NO_WRAP))
-                    .putString("pub", Base64.encodeToString(rawPub, Base64.NO_WRAP))
-                    .putString("tag", pubTag("ss:master", rawPub))
-                    .commit()
-                if (ok) {
-                    persistItem(key, value, kp.public, "b")
-                    ssInitializing.set(false)
+            cipher.init(Cipher.ENCRYPT_MODE, itemKey)
+            val iv = cipher.iv
+            if (!bio) {
+                cipher.updateAAD(key.toByteArray(Charsets.UTF_8))
+                val ct = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+                storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
+                call.resolve()
+            } else {
+                // a biometric item's own key gates the WRITE too (encrypt needs the key), so the
+                // prompt here is the same gate that blocks a silent bridge caller from overwriting it
+                val hostActivity = activity as? FragmentActivity
+                    ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+                authenticateCipher(hostActivity, cipher, "Authenticate to save your secret", call) { boundCipher ->
+                    boundCipher.updateAAD(key.toByteArray(Charsets.UTF_8))
+                    val ct = boundCipher.doFinal(value.toByteArray(Charsets.UTF_8))
+                    storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
                     call.resolve()
-                } else {
-                    ssInitializing.set(false)
-                    call.reject("Store failed", "E_ENCRYPT")
                 }
             }
         } catch (e: Exception) {
-            ssInitializing.set(false)
-            logd("setItem(bio) keygen failed for key=$key", e)
+            logd("setItem encrypt failed for key=$key", e)
             call.reject("Store failed", "E_ENCRYPT")
-        }
-    }
-
-    // replacing a bio item: prove biometric first (bind to the bio wrap key), then write in the
-    // requested mode (bio kept, or silent = an explicit user-authorized downgrade)
-    private fun overwriteBioItem(call: PluginCall, key: String, value: String, newMode: String) {
-        val hostActivity = activity as? FragmentActivity
-            ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-        val privB64 = storeMeta().getString("priv", null)
-        val ks = keystore()
-        val wrapKey = ks.getKey(ssMasterAlias, null) as? SecretKey
-        if (privB64 == null || wrapKey == null) {
-            return call.reject("Store key missing", "E_KEY_NOT_FOUND")
-        }
-        try {
-            val privBlob = Base64.decode(privB64, Base64.DEFAULT)
-            val wrapped = privBlob.copyOfRange(12, privBlob.size)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, privBlob.copyOfRange(0, 12)))
-            authenticateCipher(hostActivity, cipher, "Authenticate to replace your secret", call) { boundCipher ->
-                try {
-                    // unwrap with the bound cipher so a forged callback can't replace/downgrade the item
-                    boundCipher.doFinal(wrapped)
-                    if (newMode == "b") {
-                        val rawPub = Base64.decode(storeMeta().getString("pub", null), Base64.DEFAULT)
-                        // verify the store pub tag (same as setBio) so a swapped pub can't redirect
-                        // the re-encapsulated value to an attacker key
-                        if (!verifyPubTag("ss:master", rawPub, storeMeta().getString("tag", null))) {
-                            call.reject("Store key integrity check failed", "E_TAMPERED")
-                            return@authenticateCipher
-                        }
-                        persistItem(key, value, mlkemPublicFromRaw(rawPub, NISTObjectIdentifiers.id_alg_ml_kem_1024), "b")
-                        call.resolve()
-                    } else {
-                        val pub = ensureSilentPub(call) ?: return@authenticateCipher
-                        persistItem(key, value, pub, "s")
-                        call.resolve()
-                    }
-                } catch (e: Exception) {
-                    logd("overwriteBioItem persist failed for key=$key", e)
-                    call.reject("Store failed", "E_ENCRYPT")
-                }
-            }
-        } catch (e: KeyPermanentlyInvalidatedException) {
-            logd("overwriteBioItem: bio key invalidated", e)
-            call.reject("Biometric enrollment changed; store key invalidated", "E_KEY_INVALIDATED")
-        } catch (e: Exception) {
-            logd("overwriteBioItem failed for key=$key", e)
-            call.reject("Store failed", "E_ENCRYPT")
-        }
-    }
-
-    // silent tier public, provisioning the silent keypair on first use (no prompt). Rejects the
-    // call (and returns null) on tamper or provisioning contention.
-    private fun ensureSilentPub(call: PluginCall): PublicKey? {
-        val meta = storeMeta()
-        val pubB64 = meta.getString("pub_s", null)
-        if (meta.contains("priv_s") && pubB64 != null) {
-            val rawPub = Base64.decode(pubB64, Base64.DEFAULT)
-            if (!verifyPubTag("ss:silent", rawPub, meta.getString("tag_s", null))) {
-                call.reject("Store key integrity check failed", "E_TAMPERED"); return null
-            }
-            return mlkemPublicFromRaw(rawPub, NISTObjectIdentifiers.id_alg_ml_kem_1024)
-        }
-        if (!ssInitializingSilent.compareAndSet(false, true)) {
-            call.reject("Store is initializing, retry", "E_BUSY"); return null
-        }
-        try {
-            // re-check under the gate in case another thread just provisioned
-            val pb = meta.getString("pub_s", null)
-            if (meta.contains("priv_s") && pb != null) {
-                val rawPub = Base64.decode(pb, Base64.DEFAULT)
-                if (!verifyPubTag("ss:silent", rawPub, meta.getString("tag_s", null))) {
-                    call.reject("Store key integrity check failed", "E_TAMPERED"); return null
-                }
-                return mlkemPublicFromRaw(rawPub, NISTObjectIdentifiers.id_alg_ml_kem_1024)
-            }
-            val kpg = KeyPairGenerator.getInstance("ML-KEM", bc)
-            kpg.initialize(MLKEMParameterSpec.ml_kem_1024, SecureRandom())
-            val kp = kpg.generateKeyPair()
-            val rawPub = rawFromSpki(kp.public.encoded)
-            val wrapKey = getOrCreateSsSilentWrapKey()
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
-            val privBytes = kp.private.encoded
-            val wrapped = cipher.iv + cipher.doFinal(privBytes)
-            privBytes.fill(0)
-            val ok = meta.edit()
-                .putString("priv_s", Base64.encodeToString(wrapped, Base64.NO_WRAP))
-                .putString("pub_s", Base64.encodeToString(rawPub, Base64.NO_WRAP))
-                .putString("tag_s", pubTag("ss:silent", rawPub))
-                .commit()
-            if (!ok) { call.reject("Store failed", "E_ENCRYPT"); return null }
-            return kp.public
-        } finally {
-            ssInitializingSilent.set(false)
         }
     }
 
@@ -1064,16 +929,6 @@ class PQSecureStoragePlugin : Plugin() {
             sharedSecret.fill(0)
         }
         return kemCt + nonce + aead
-    }
-
-    private fun persistItem(key: String, value: String, pub: PublicKey, mode: String) {
-        val frame = encapAndSeal(pub, value.toByteArray(Charsets.UTF_8))
-        // encName . mode . frame . mac, stored under a keyed hash of the name (not the name itself)
-        val stored = encName(key) + "." +
-            mode + "." +
-            Base64.encodeToString(frame, Base64.NO_WRAP) + "." +
-            Base64.encodeToString(storeMac(key, mode, frame), Base64.NO_WRAP)
-        storeItems().edit().putString(nameTag(key), stored).apply()
     }
 
     // decapsulate the frame with the (already unwrapped) private. Wipes privBytes + shared secret
@@ -1098,9 +953,6 @@ class PQSecureStoragePlugin : Plugin() {
         }
     }
 
-    private fun decapsAndDecrypt(privBytes: ByteArray, frame: ByteArray, ctLen: Int): String =
-        String(decapsulate(privBytes, frame, ctLen), Charsets.UTF_8)
-
     @PluginMethod
     fun getItem(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
@@ -1108,42 +960,28 @@ class PQSecureStoragePlugin : Plugin() {
         if (stored == null) {
             val ret = JSObject(); ret.put("value", JSONObject.NULL); call.resolve(ret); return
         }
-        val item = parseStoreItem(key, stored)
-            ?: return call.reject("Store item integrity check failed", "E_TAMPERED")
-        val ctLen = 1568 // ML-KEM-1024
-        if (item.frame.size <= ctLen + 12) return call.reject("Malformed stored item", "E_BAD_CIPHERTEXT")
-        // pick the tier by the (MAC-verified) mode: silent reads without a prompt, bio prompts
-        val metaPriv = if (item.mode == "b") "priv" else "priv_s"
-        val wrapAlias = if (item.mode == "b") ssMasterAlias else ssSilentAlias
-        val privB64 = storeMeta().getString(metaPriv, null)
+        val parts = stored.split(".")
+        if (parts.size != 3) return call.reject("Store item corrupt", "E_TAMPERED")
+        val itemKey = (try { keystore().getKey(itemKeyAlias(key), null) as? SecretKey } catch (e: Exception) { null })
             ?: return call.reject("Store key missing", "E_KEY_NOT_FOUND")
         try {
-            val privBlob = Base64.decode(privB64, Base64.DEFAULT)
-            val wrapIv = privBlob.copyOfRange(0, 12)
-            val wrapped = privBlob.copyOfRange(12, privBlob.size)
-            val ks = keystore()
-            val wrapKey = ks.getKey(wrapAlias, null) as? SecretKey
-                ?: return call.reject("Store key missing", "E_KEY_NOT_FOUND")
-            val unwrapCipher = Cipher.getInstance("AES/GCM/NoPadding")
-            unwrapCipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, wrapIv))
-            if (item.mode == "s") {
-                // silent wrap key is not auth-bound: unwrap and decapsulate inline, no prompt
-                val privBytes = unwrapCipher.doFinal(wrapped)
-                val ret = JSObject()
-                ret.put("value", decapsAndDecrypt(privBytes, item.frame, ctLen))
-                call.resolve(ret)
+            val iv = Base64.decode(parts[1], Base64.DEFAULT)
+            val ct = Base64.decode(parts[2], Base64.DEFAULT)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, itemKey, GCMParameterSpec(128, iv))
+            if (!isAuthRequired(itemKey)) {
+                cipher.updateAAD(key.toByteArray(Charsets.UTF_8))
+                val ret = JSObject(); ret.put("value", String(cipher.doFinal(ct), Charsets.UTF_8)); call.resolve(ret)
             } else {
                 val hostActivity = activity as? FragmentActivity
                     ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-                authenticateCipher(hostActivity, unwrapCipher, "Authenticate to read your secret", call) { boundCipher ->
-                    val privBytes = boundCipher.doFinal(wrapped)
-                    val ret = JSObject()
-                    ret.put("value", decapsAndDecrypt(privBytes, item.frame, ctLen))
-                    call.resolve(ret)
+                authenticateCipher(hostActivity, cipher, "Authenticate to read your secret", call) { boundCipher ->
+                    boundCipher.updateAAD(key.toByteArray(Charsets.UTF_8))
+                    val ret = JSObject(); ret.put("value", String(boundCipher.doFinal(ct), Charsets.UTF_8)); call.resolve(ret)
                 }
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
-            logd("getItem: store key invalidated by biometric enrollment", e)
+            logd("getItem: key invalidated by biometric enrollment for key=$key", e)
             call.reject("Biometric enrollment changed; store key invalidated", "E_KEY_INVALIDATED")
         } catch (e: Exception) {
             logd("getItem failed for key=$key", e)
@@ -1151,41 +989,32 @@ class PQSecureStoragePlugin : Plugin() {
         }
     }
 
-    // keys/hasItem stay silent (enumerating names leaks nothing). removeItem/clear prompt ONLY for
-    // biometric items, so silent items keep the drop-in @evva behaviour.
+    // keys/hasItem stay silent (enumerating names leaks nothing). removeItem prompts only for a
+    // biometric item, so silent items keep the drop-in behaviour.
     @PluginMethod
     fun removeItem(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
-        val stored = storeItems().getString(nameTag(key), null) ?: run { call.resolve(); return }
-        val item = parseStoreItem(key, stored)
-        // silent or unreadable (corrupt) items delete without a prompt
-        if (item == null || item.mode == "s") {
-            storeItems().edit().remove(nameTag(key)).commit(); call.resolve(); return
+        val alias = itemKeyAlias(key)
+        val itemKey = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
+        val del = {
+            try { keystore().deleteEntry(alias) } catch (e: Exception) { logd("removeItem: key delete failed", e) }
+            storeItems().edit().remove(nameTag(key)).commit()
+            call.resolve()
         }
+        if (itemKey == null || !isAuthRequired(itemKey)) { del(); return }
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-        val privB64 = storeMeta().getString("priv", null)
-        val ks = keystore()
-        val wrapKey = ks.getKey(ssMasterAlias, null) as? SecretKey
-        if (privB64 == null || wrapKey == null) {
-            storeItems().edit().remove(nameTag(key)).commit(); call.resolve(); return
-        }
         try {
-            val privBlob = Base64.decode(privB64, Base64.DEFAULT)
-            val wrapped = privBlob.copyOfRange(12, privBlob.size)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, privBlob.copyOfRange(0, 12)))
+            cipher.init(Cipher.ENCRYPT_MODE, itemKey)
             authenticateCipher(hostActivity, cipher, "Authenticate to delete your secret", call) { boundCipher ->
-                // unwrap with the bound cipher so a forged callback can't trigger the delete
-                boundCipher.doFinal(wrapped)
-                storeItems().edit().remove(nameTag(key)).commit()
-                call.resolve()
+                boundCipher.doFinal(ByteArray(0)) // real op proves the biometric before the delete
+                del()
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
             // key already unusable, the value is unreadable anyway -> allow the delete
-            logd("removeItem: store key invalidated, removing", e)
-            storeItems().edit().remove(nameTag(key)).commit()
-            call.resolve()
+            logd("removeItem: key invalidated, removing", e)
+            del()
         } catch (e: Exception) {
             logd("removeItem failed for key=$key", e)
             call.reject("Remove failed", "E_REMOVE")
@@ -1206,7 +1035,7 @@ class PQSecureStoragePlugin : Plugin() {
         // prefs keys are hashed; recover the real names from the encrypted encName field
         for ((_, v) in storeItems().all) {
             val parts = (v as? String)?.split(".") ?: continue
-            if (parts.size != 4) continue
+            if (parts.size != 3) continue
             try {
                 arr.put(decName(parts[0]))
             } catch (e: Exception) {
@@ -1220,34 +1049,26 @@ class PQSecureStoragePlugin : Plugin() {
 
     @PluginMethod
     fun clear(call: PluginCall) {
-        // prompt once only if the store holds at least one biometric item. The prefs key is a hash
-        // now, so read the mode field directly (this only decides whether to prompt; clear wipes all).
-        val anyBio = storeItems().all.any { (_, v) ->
-            (v as? String)?.let { storedMode(it) == "b" } ?: false
-        }
         val ks = keystore()
-        val privB64 = storeMeta().getString("priv", null)
-        val wrapKey = ks.getKey(ssMasterAlias, null) as? SecretKey
-        if (!anyBio || privB64 == null || wrapKey == null) {
-            doClearWipe(); call.resolve(); return
+        val itemAliases = ks.aliases().toList().filter { it.startsWith(itemAliasPrefix) }
+        val bioAlias = itemAliases.firstOrNull { a ->
+            (ks.getKey(a, null) as? SecretKey)?.let { isAuthRequired(it) } ?: false
         }
+        if (bioAlias == null) { doClearWipe(); call.resolve(); return }
+        // prompt once, bound to a biometric item's key, before wiping
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         try {
-            val privBlob = Base64.decode(privB64, Base64.DEFAULT)
-            val wrapped = privBlob.copyOfRange(12, privBlob.size)
+            val bioKey = ks.getKey(bioAlias, null) as SecretKey
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, privBlob.copyOfRange(0, 12)))
+            cipher.init(Cipher.ENCRYPT_MODE, bioKey)
             authenticateCipher(hostActivity, cipher, "Authenticate to erase secure storage", call) { boundCipher ->
-                // actually unwrap with the bound cipher: a forged onAuthenticationSucceeded that
-                // replays our un-unlocked cipher throws here, so the wipe only runs on a real match
-                boundCipher.doFinal(wrapped)
+                boundCipher.doFinal(ByteArray(0))
                 doClearWipe()
                 call.resolve()
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
-            // key gone, bio items already unreadable -> let the user wipe it
-            logd("clear: store key invalidated, wiping", e)
+            logd("clear: key invalidated, wiping", e)
             doClearWipe()
             call.resolve()
         } catch (e: Exception) {
@@ -1257,23 +1078,18 @@ class PQSecureStoragePlugin : Plugin() {
     }
 
     private fun doClearWipe() {
-        // commit() the prefs wipe BEFORE deleting the Keystore keys. apply() is async, so a crash
-        // could leave items on disk while the keys are already gone -> unreadable E_TAMPERED forever.
+        // wipe prefs, then delete every per-item key plus the name-hashing/encryption keys
         storeItems().edit().clear().commit()
-        storeMeta().edit().clear().commit()
         try {
             val ks = keystore()
-            for (a in listOf(ssMasterAlias, ssSilentAlias, ssMacAlias, ssNameKeyAlias)) {
+            for (a in ks.aliases().toList().filter { it.startsWith(itemAliasPrefix) }) {
+                try { ks.deleteEntry(a) } catch (e: Exception) { logd("clear: item key delete failed", e) }
+            }
+            for (a in listOf(ssMacAlias, ssNameKeyAlias)) {
                 if (ks.containsAlias(a)) ks.deleteEntry(a)
             }
         } catch (e: Exception) {
             logd("clear: keystore delete failed", e)
         }
     }
-
-    private fun getOrCreateSsMasterWrapKey(): SecretKey = getOrCreateAesKey(ssMasterAlias, true)
-
-    // silent tier wrap key: same AES-256-GCM in the TEE but NO auth requirement, so the silent
-    // private can be unwrapped without a biometric prompt
-    private fun getOrCreateSsSilentWrapKey(): SecretKey = getOrCreateAesKey(ssSilentAlias, false)
 }

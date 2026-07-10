@@ -2,10 +2,11 @@ export type SignatureType = 'PQC_MLDSA_65' | 'PQC_MLDSA_87';
 export type KemType = 'PQC_MLKEM_768' | 'PQC_MLKEM_1024';
 
 /**
- * When a stored item is reachable, mapped to the iOS Keychain `kSecAttrAccessible*` classes.
- * `*ThisDeviceOnly` values never leave the device (no backup/restore to another device).
- * iOS honors this per item; on Android the store is always Keystore-backed and this-device-only,
- * so the value is accepted but does not change per-item behavior (accessibility is an iOS concept).
+ * When a stored item is reachable, honored per item on both platforms: iOS maps it to the Keychain
+ * `kSecAttrAccessible*` classes; Android maps the unlock requirement to the item key's
+ * `setUnlockedDeviceRequired` (`afterFirstUnlock*` keeps it usable while locked, the rest require an
+ * unlocked device). Android Keystore keys are always device-bound, so every value is effectively
+ * this-device-only there.
  */
 export type Accessibility =
     | 'whenUnlocked'
@@ -95,21 +96,22 @@ export interface PQSecureStoragePlugin {
     decrypt(options: { keyAlias: string; type: KemType; data: string }): Promise<{ plaintext: string }>;
 
     /**
-     * Store a secret string under a key. `value` is stored verbatim. Silent write.
+     * Store a secret string under a key. `value` is stored verbatim. Each item is encrypted under
+     * its OWN hardware key (iOS Keychain item / Android Keystore AES-256-GCM key, StrongBox-backed
+     * where available), so the flags below are enforced per item by the platform.
      *
-     * `requireBiometric` (default `false`) is decided per item at write time: `false` stores in a
-     * silent tier that reads without a prompt (drop-in for a plain secure store); `true` stores in
-     * a biometric tier whose reads prompt. On device the mode is integrity-protected (Android MACs
-     * it, iOS binds it to the Keychain access control), so tampering can't downgrade a biometric
-     * item to silent. Overwriting an item that was stored biometric prompts. On the web fallback
-     * there is no biometric and no such integrity, so the flag is accepted but reads stay silent.
+     * `requireBiometric` (default `false`): `false` reads without a prompt (drop-in for a plain
+     * secure store); `true` gates the item behind a device biometric. A `true` READ prompts on both
+     * platforms; a `true` WRITE is silent on iOS but prompts on Android (the item's own key gates the
+     * encrypt). An item's tier is fixed when it's created -- to change `requireBiometric`, remove the
+     * item first (setItem on an existing item with a different value rejects `E_TIER_MISMATCH`).
      *
      * WARNING: a silent item is readable by any code on the JS bridge after device unlock (no
      * prompt), so for seed-tier material (mnemonic, signing seed) pass `requireBiometric: true`.
      * The silent default exists for drop-in migration, not because silent is safe for secrets.
      *
-     * `accessibility` (default `whenUnlockedThisDeviceOnly`) sets when the item is reachable. It is
-     * honored per item on iOS; on Android the store is always Keystore-backed this-device-only.
+     * `accessibility` (default `whenUnlockedThisDeviceOnly`) sets when the item is reachable, honored
+     * per item on both platforms (set when the item is first created).
      *
      * On Android the item NAME is not stored in the clear: the prefs key is a keyed hash of the
      * name, so a prefs reader sees neither the values nor the names.

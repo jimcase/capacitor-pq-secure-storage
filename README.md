@@ -19,7 +19,7 @@ custody path.
 | ML-DSA sign | Secure Enclave (hardware) | Keystore (hardware) |
 | ML-KEM decapsulate | Secure Enclave (hardware) | software (BouncyCastle), private wrapped by a Keystore AES key (TEE) |
 | AES at rest | Keychain / CryptoKit | Keystore AES-256-GCM (TEE) |
-| Secure storage | Keychain, per-item access control | two ML-KEM-1024 envelopes (silent + biometric), biometric bound to the unwrap Cipher |
+| Secure storage | Keychain, per-item access control | per-item Keystore AES-256-GCM key (StrongBox where available), biometric bound to the item Cipher |
 
 iOS decapsulates ML-KEM inside the Secure Enclave; Android does not, because the Android
 Keystore exposes ML-DSA to apps but not ML-KEM (ML-KEM stays in KeyMint / attestation / TLS,
@@ -156,33 +156,31 @@ await PQSecureStorage.clear(); // prompts once if any biometric item exists
 Notes:
 
 - `getItem` on a missing key resolves `{ value: null }`, it does not throw.
-- The mode is integrity-protected, so a prefs writer cannot downgrade a biometric item to silent.
-  Overwriting a biometric item prompts (a silent caller cannot replace or downgrade it).
+- Each item is encrypted under its OWN hardware key (Android Keystore AES-256-GCM, StrongBox where
+  available; iOS one Keychain item per key). The item's key carries its `requireBiometric` and
+  `accessibility`, so both are enforced per item by the platform and can't be downgraded by tampering.
+- A biometric READ prompts on both platforms; a biometric WRITE is silent on iOS but prompts on
+  Android (encrypting needs the item's own auth-gated key). To change an item's `requireBiometric`,
+  `removeItem` first -- overwriting with a different value rejects `E_TIER_MISMATCH`.
 - Secrets are stored `ThisDeviceOnly` and excluded from backups (see Android note below).
-- Android keeps two ML-KEM-1024 store keypairs (silent + biometric); a biometric item is not
-  readable via the silent private. The **first** biometric `setItem` prompts once to wrap the
-  biometric private in the TEE; later writes are silent. iOS uses one Keychain item per key with a
-  per-item access control (biometry flag set only for the biometric tier).
 
 #### Android backup exclusion
 
-Backup rules live in the host app, not the library. Exclude the two prefs files in your app's
+Backup rules live in the host app, not the library. Exclude the store's prefs file in your app's
 `data_extraction_rules.xml`:
 
 ```xml
 <data-extraction-rules>
   <cloud-backup>
     <exclude domain="sharedpref" path="pq_secure_store.xml"/>
-    <exclude domain="sharedpref" path="pq_secure_store_key.xml"/>
   </cloud-backup>
   <device-transfer>
     <exclude domain="sharedpref" path="pq_secure_store.xml"/>
-    <exclude domain="sharedpref" path="pq_secure_store_key.xml"/>
   </device-transfer>
 </data-extraction-rules>
 ```
 
-The Keystore wrap key never leaves the TEE, so a leaked backup is still useless off-device; the
+The per-item keys never leave the Keystore, so a leaked backup is still useless off-device; the
 exclusion is defense in depth. Also set `android:allowBackup="false"` in the host app so the
 prefs cannot be pulled/edited via `adb backup`/`restore`.
 
@@ -394,21 +392,22 @@ Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics.
 setItem(options: { key: string; value: string; requireBiometric?: boolean; accessibility?: Accessibility; }) => Promise<void>
 ```
 
-Store a secret string under a key. `value` is stored verbatim. Silent write.
+Store a secret string under a key. `value` is stored verbatim. Each item is encrypted under
+its OWN hardware key (iOS Keychain item / Android Keystore AES-256-GCM key, StrongBox-backed
+where available), so the flags below are enforced per item by the platform.
 
-`requireBiometric` (default `false`) is decided per item at write time: `false` stores in a
-silent tier that reads without a prompt (drop-in for a plain secure store); `true` stores in
-a biometric tier whose reads prompt. On device the mode is integrity-protected (Android MACs
-it, iOS binds it to the Keychain access control), so tampering can't downgrade a biometric
-item to silent. Overwriting an item that was stored biometric prompts. On the web fallback
-there is no biometric and no such integrity, so the flag is accepted but reads stay silent.
+`requireBiometric` (default `false`): `false` reads without a prompt (drop-in for a plain
+secure store); `true` gates the item behind a device biometric. A `true` READ prompts on both
+platforms; a `true` WRITE is silent on iOS but prompts on Android (the item's own key gates the
+encrypt). An item's tier is fixed when it's created -- to change `requireBiometric`, remove the
+item first (setItem on an existing item with a different value rejects `E_TIER_MISMATCH`).
 
 WARNING: a silent item is readable by any code on the JS bridge after device unlock (no
 prompt), so for seed-tier material (mnemonic, signing seed) pass `requireBiometric: true`.
 The silent default exists for drop-in migration, not because silent is safe for secrets.
 
-`accessibility` (default `whenUnlockedThisDeviceOnly`) sets when the item is reachable. It is
-honored per item on iOS; on Android the store is always Keystore-backed this-device-only.
+`accessibility` (default `whenUnlockedThisDeviceOnly`) sets when the item is reachable, honored
+per item on both platforms (set when the item is first created).
 
 On Android the item NAME is not stored in the clear: the prefs key is a keyed hash of the
 name, so a prefs reader sees neither the values nor the names.
@@ -528,10 +527,11 @@ the store is already empty. Web fallback has no biometric, so silent.
 
 #### Accessibility
 
-When a stored item is reachable, mapped to the iOS Keychain `kSecAttrAccessible*` classes.
-`*ThisDeviceOnly` values never leave the device (no backup/restore to another device).
-iOS honors this per item; on Android the store is always Keystore-backed and this-device-only,
-so the value is accepted but does not change per-item behavior (accessibility is an iOS concept).
+When a stored item is reachable, honored per item on both platforms: iOS maps it to the Keychain
+`kSecAttrAccessible*` classes; Android maps the unlock requirement to the item key's
+`setUnlockedDeviceRequired` (`afterFirstUnlock*` keeps it usable while locked, the rest require an
+unlocked device). Android Keystore keys are always device-bound, so every value is effectively
+this-device-only there.
 
 <code>'whenUnlocked' | 'afterFirstUnlock' | 'whenPasscodeSetThisDeviceOnly' | 'whenUnlockedThisDeviceOnly' | 'afterFirstUnlockThisDeviceOnly'</code>
 
@@ -548,17 +548,17 @@ so the value is accepted but does not change per-item behavior (accessibility is
 - **Public key integrity (Android).** Stored ML-KEM public keys are tagged with an HMAC keyed by
   a non-exportable Keystore key. If the prefs are tampered, `getKemPublicKey`/`setItem` reject
   with `E_TAMPERED` instead of encrypting to a substituted key.
-- **Store item integrity (Android).** Each secure-storage item is MAC'd with a Keystore-held HMAC
-  over its key name, biometric mode, and ciphertext, verified before decrypting. A prefs writer
-  cannot inject a chosen value, move a value to another key, or downgrade a biometric item to
-  silent; all reject with `E_TAMPERED`.
+- **Store item integrity (Android).** Each item is encrypted under its own non-exportable Keystore
+  AES-256-GCM key with the item name bound as GCM AAD. A prefs writer can't forge a value (no key),
+  move a value to another key (each key is per-item), or downgrade the tier (`requireBiometric`/
+  accessibility live in the key, not in prefs). Tampering fails the GCM tag -> `E_DECRYPT`.
 - **Item-name confidentiality (Android).** The SharedPreferences key is a Keystore-keyed hash of
   the item name, and the real name is stored AES-encrypted (Keystore key) inside the value. So a
   prefs reader (root/backup) sees neither the values nor the names (e.g. `seed-phrase`); `keys()`
   still lists real names via the in-TEE key. iOS keeps names in the Keychain, which encrypts them.
-- **Accessibility.** `setItem` takes an `accessibility` option (default `whenUnlockedThisDeviceOnly`)
-  mapped to the iOS `kSecAttrAccessible*` classes, per item. On Android the store is always
-  Keystore-backed and this-device-only, so the option is accepted but does not vary per item.
+- **Accessibility.** `setItem` takes an `accessibility` option (default `whenUnlockedThisDeviceOnly`),
+  honored per item on both platforms: iOS maps it to the `kSecAttrAccessible*` classes, Android to
+  the item key's `setUnlockedDeviceRequired`.
 - **Alias validation.** Key aliases are restricted to `[A-Za-z0-9_-]` and cannot start with the
   plugin's reserved prefix, so a caller cannot clobber the plugin's own internal Keystore entries
   (`E_BAD_ALIAS`).
@@ -566,27 +566,24 @@ so the value is accepted but does not change per-item behavior (accessibility is
   alias destroys a possibly-live signing key, so it now requires a biometric bound to the existing
   key first — a silent bridge caller cannot rotate/brick an identity key. `generateKemKeyPair`
   overwrite already prompts (to wrap the new private), though that prompt is not bound to the old key.
-- **Rollback (residual).** The store item MAC stops forgery but not full-snapshot rollback: an
-  attacker who can restore an old copy of the prefs (value + MAC + mode, all still valid) can revive
-  a rotated-away or revoked secret. Android has no universal monotonic anti-rollback counter
-  (StrongBox has one, not on all devices). The host should not rely on the store alone for freshness
-  of revocable state.
-- **Memory hygiene.** ML-DSA private keys never leave the Keystore. ML-KEM privates are software
-  (BouncyCastle) — the raw private and the KEM shared secret are wiped from the heap right after use,
-  best-effort (JVM copies in `SecretKeySpec`/GC still linger, and the decrypted plaintext `String`
-  is immutable and cannot be wiped). Treat in-process memory as recoverable by a determined attacker.
+- **Rollback (residual).** Per-item keys stop forgery but not full-snapshot rollback: an attacker
+  who restores an old copy of the prefs AND the matching old item key can revive a rotated-away or
+  revoked secret. Android has no universal monotonic anti-rollback counter (StrongBox has one, not
+  on all devices). The host should not rely on the store alone for freshness of revocable state.
+- **Memory hygiene.** Store item keys and ML-DSA signing keys never leave the Keystore. The ML-KEM
+  API (`encryptTo`/`decrypt`) is software (BouncyCastle) — its raw private and shared secret are
+  wiped from the heap right after use, best-effort (JVM copies in `SecretKeySpec`/GC still linger,
+  and a decrypted plaintext `String` is immutable). Treat in-process memory as recoverable.
 - **`hardwareBacked` is a probe, not a promise.** It reflects a real Keystore security-level check
   for the AES/wrap keys. ML-KEM is always software; hardware ML-DSA additionally needs KeyMint
   support (per-key attestation), which is not checked here. Do not read `hardwareBacked: true` as
   "ML-KEM/ML-DSA are in hardware."
-- **Per-item biometric.** `requireBiometric` is chosen at write time and pins the item to a silent
-  or a biometric tier (distinct keypairs on Android, distinct Keychain access control on iOS). A
-  bio item is not readable through the silent tier. `getItem`/`removeItem` prompt only for bio
-  items; `clear` prompts once if any bio item exists; overwriting a bio item prompts. Gating is
-  bound to the store wrap key, so a hooked callback can't fake the prompt. It still does not protect
-  integrity or availability from an attacker who reaches the JS bridge (the main surface in a
-  webview) — the host MUST guard bridge access. The store item MAC prevents forged values and
-  mode-downgrade regardless.
+- **Per-item biometric.** `requireBiometric` is baked into the item's own key at creation
+  (`setUserAuthenticationRequired` on Android, the biometry access control on iOS). `getItem`/
+  `removeItem`/`clear` prompt only when a bio item is involved; on Android a bio WRITE prompts too
+  (encrypting needs the auth-gated key). The prompt is bound to the item's key op (CryptoObject),
+  so a hooked callback can't fake it. It does not protect against an attacker who reaches the JS
+  bridge (the main surface in a webview) — the host MUST guard bridge access.
 - **Cross-platform ML-KEM.** iOS (CryptoKit) and Android (BouncyCastle) must agree on the raw
   shared secret. Before relying on a ciphertext produced on one platform decrypting on the other,
   run a known-answer test against a FIPS-203 vector on a real device.
@@ -598,6 +595,7 @@ Rejections carry a code: `E_MISSING_PARAMS`, `E_INVALID_ARGS` (key/value out of 
 `E_KEY_INVALIDATED` (biometric enrollment changed), `E_ENCRYPT`, `E_DECRYPT`, `E_KEYGEN`,
 `E_KEY_NOT_FOUND`, `E_UNSUPPORTED`, `E_ALIAS_EXISTS`, `E_NO_ACTIVITY`, `E_TAMPERED`
 (integrity check failed), `E_TYPE_MISMATCH`, `E_BAD_CIPHERTEXT`, `E_REMOVE`, `E_CLEAR`,
+`E_TIER_MISMATCH` (setItem on an item stored with a different `requireBiometric`; removeItem first),
 `E_BUSY` (a keygen for the same alias is already in flight).
 
 ## Tests
