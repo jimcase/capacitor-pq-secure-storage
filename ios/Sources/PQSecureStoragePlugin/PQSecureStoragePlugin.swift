@@ -368,7 +368,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
-    // MARK: - Symmetric at rest (AES-256-GCM)
+    // MARK: - Symmetric at rest (Secure Enclave ECIES)
 
     @objc func encryptAtRest(_ call: CAPPluginCall) {
         guard let alias = call.getString("keyAlias"),
@@ -379,11 +379,13 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
-            let key = try Self.loadOrCreateAesKey(alias: alias)
-            let sealed = try AES.GCM.seal(raw, using: key)
-            // combined = nonce(12) || ciphertext || tag(16)
-            guard let combined = sealed.combined else { throw PQSecureStorageError.badCiphertext }
-            call.resolve(["ciphertext": combined.base64EncodedString()])
+            let priv = try Self.atRestKey(alias: alias, create: true)
+            guard let pub = SecKeyCopyPublicKey(priv) else { throw PQSecureStorageError.badCiphertext }
+            var err: Unmanaged<CFError>?
+            guard let ct = SecKeyCreateEncryptedData(pub, Self.atRestAlgo, raw as CFData, &err) as Data? else {
+                throw PQSecureStorageError.badCiphertext
+            }
+            call.resolve(["ciphertext": ct.base64EncodedString()])
         } catch {
             os_log("encryptAtRest failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
             call.reject("Encrypt failed", "E_ENCRYPT")
@@ -399,9 +401,11 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
-            let key = try Self.loadAesKey(alias: alias)
-            let box = try AES.GCM.SealedBox(combined: raw)
-            let plain = try AES.GCM.open(box, using: key)
+            let priv = try Self.atRestKey(alias: alias, create: false)
+            var err: Unmanaged<CFError>?
+            guard let plain = SecKeyCreateDecryptedData(priv, Self.atRestAlgo, raw as CFData, &err) as Data? else {
+                throw PQSecureStorageError.badCiphertext
+            }
             call.resolve(["plaintext": plain.base64EncodedString()])
         } catch PQSecureStorageError.keyNotFound {
             call.reject("Key not found", "E_KEY_NOT_FOUND")
@@ -771,35 +775,52 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         return try PQKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
     }
 
-    // MARK: - AES-at-rest key (Keychain, device-only)
+    // MARK: - At-rest key (per-alias Secure Enclave P-256, ECIES)
 
-    private static func aesAccount(for alias: String) -> String { "\(alias).aes" }
+    // hybrid ECIES: an ephemeral key + X9.63-KDF + AES-GCM under the hood. The ECDH runs inside the
+    // Secure Enclave with a non-extractable private key, so unlike a raw Keychain AES key nothing
+    // decryptable ever leaves hardware. No biometry (at-rest is silent), device-only + unlocked-only.
+    private static let atRestAlgo: SecKeyAlgorithm = .eciesEncryptionCofactorVariableIVX963SHA256AESGCM
 
-    // AES-256 key material lives in the Keychain (device-only, unlocked-only). Unlike the SEP
-    // signing/KEM keys, the symmetric key itself is readable by this app after unlock -- AES-GCM
-    // runs in-process, the SEP does not store symmetric keys.
-    private static func loadOrCreateAesKey(alias: String) throws -> SymmetricKey {
-        if let existing = try? loadAesKey(alias: alias) { return existing }
-        let key = SymmetricKey(size: .bits256)
-        let raw = key.withUnsafeBytes { Data($0) }
-        var query = baseQuery(account: aesAccount(for: alias))
-        query[kSecValueData as String] = raw
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else { throw PQSecureStorageError.keychain(status) }
-        return key
-    }
+    private static func atRestKeyTag(_ alias: String) -> Data { Data("pq.atrest.\(alias)".utf8) }
 
-    private static func loadAesKey(alias: String) throws -> SymmetricKey {
-        var query = baseQuery(account: aesAccount(for: alias))
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let raw = result as? Data else {
-            throw PQSecureStorageError.keyNotFound
+    private static func atRestKey(alias: String, create: Bool) throws -> SecKey {
+        let tag = atRestKeyTag(alias)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tag,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecReturnRef as String: true,
+        ]
+        var out: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let ref = out {
+            return ref as! SecKey
         }
-        return SymmetricKey(data: raw)
+        guard create else { throw PQSecureStorageError.keyNotFound }
+        var aclError: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+            nil,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            .privateKeyUsage,
+            &aclError
+        ) else {
+            throw PQSecureStorageError.accessControlFailed
+        }
+        let attrs: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+            kSecPrivateKeyAttrs as String: [
+                kSecAttrIsPermanent as String: true,
+                kSecAttrApplicationTag as String: tag,
+                kSecAttrAccessControl as String: access,
+            ],
+        ]
+        var createError: Unmanaged<CFError>?
+        guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &createError) else {
+            throw PQSecureStorageError.badCiphertext
+        }
+        return key
     }
 
     // MARK: - ML-KEM key persistence (separate accounts from signing keys)

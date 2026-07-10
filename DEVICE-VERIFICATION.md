@@ -217,6 +217,12 @@ Document the choice in the security policy.
 - [ ] Two `setItem` on the same key concurrently: one resolves, the other rejects `E_BUSY` (no corrupted item).
 - [ ] Biometric KEM overwrite (`generateKemKeyPair overwrite:true` on a bio key) still shows both prompts in sequence (authorize replacement, then create) and succeeds, not `E_BUSY`.
 
+## iOS at-rest (device)
+
+- [ ] `encryptAtRest` then `decryptAtRest` round-trips under the same alias; a different alias fails.
+- [ ] The at-rest key is a Secure Enclave key: querying it with `kSecReturnData` returns nothing (non-extractable), only `kSecReturnRef` works.
+- [ ] `getPublicKey`/`getKemPublicKey` reject `E_TAMPERED` if the stored public entry is modified out of band.
+
 ## Acceptance Criteria
 
 - [ ] Android step 4: Attestation chain confirms StrongBox or TEE.

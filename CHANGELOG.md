@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Security
+
+- Cap decoded input at 10 MiB on `sign`/`encryptAtRest`/`decryptAtRest`/`encryptTo`/`decrypt`
+  (`E_INPUT_TOO_LARGE`) to stop a bridge-driven memory DoS.
+- Android: per-key guard so concurrent `setItem` on the same key can't race the item-key create,
+  and a single-prompt guard so biometric ops can't stack (`E_BUSY`).
+- Android: `generateKemKeyPair` with `overwrite` now requires a biometric on the existing key
+  before rotating, matching signing keys; `isAuthRequired` fails safe on a probe error.
+- Android: `getHardwareCapabilities` probes the real ML-DSA Keystore algorithm instead of gating on
+  a fixed API level.
+- iOS: public keys carry an HMAC integrity tag, verified on read (`E_TAMPERED`), matching Android.
+
+### Changed
+
+- iOS store enforces a fixed tier per item (`E_TIER_MISMATCH` on a `requireBiometric` change,
+  matching Android) and updates values atomically via `SecItemUpdate` instead of delete-then-add.
+
+### Format (pre-release, no migration)
+
+- iOS at-rest now uses a per-alias Secure Enclave P-256 key with ECIES; the blob format changed
+  from AES-GCM combined. The private key is non-extractable in the enclave.
+- iOS public-key metadata attribute changed from `type:bio` to `type:bio:tag`.
+
 ## [0.1.0] - 2026-07-07
 
 ### Added
