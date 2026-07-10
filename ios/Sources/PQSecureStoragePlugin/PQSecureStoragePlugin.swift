@@ -308,6 +308,9 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             // reads the plain, non-gated public Keychain entry -- never touches the SEP key
             // handle, so this never triggers a biometric prompt
             let meta = try Self.loadMetadata(alias: alias)
+            guard let tag = meta.tag, try Self.pubTag(meta.publicKey) == tag else {
+                return call.reject("Public key integrity check failed", "E_TAMPERED")
+            }
             call.resolve(["publicKey": meta.publicKey.base64EncodedString()])
         } catch {
             call.reject("Key not found for alias", "E_KEY_NOT_FOUND")
@@ -459,6 +462,9 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         do {
             let meta = try Self.loadKemMetadata(alias: alias)
+            guard let tag = meta.tag, try Self.pubTag(meta.publicKey) == tag else {
+                return call.reject("Public key integrity check failed", "E_TAMPERED")
+            }
             call.resolve(["publicKey": meta.publicKey.base64EncodedString()])
         } catch {
             call.reject("Key not found for alias", "E_KEY_NOT_FOUND")
@@ -629,22 +635,50 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         let type: String
         let publicKey: Data
         let requireBiometric: Bool
+        let tag: Data?
     }
 
-    // the biometric flag rides with the type in the public entry's generic attr as "type:0|1". It's
-    // only a hint for whether to show a prompt; the SEP enforces the real gate regardless.
-    private static func encodeGeneric(type: String, requireBiometric: Bool) -> Data {
-        Data("\(type):\(requireBiometric ? "1" : "0")".utf8)
+    // the public entry's generic attr holds "type:0|1:tagB64". The bio flag is only a prompt hint
+    // (the SEP enforces the real gate); the tag is an HMAC over the stored public key so a tampered
+    // public entry is detected on read. base64 never contains ':', so the split is unambiguous.
+    private static func encodeGeneric(type: String, requireBiometric: Bool, tag: Data) -> Data {
+        Data("\(type):\(requireBiometric ? "1" : "0"):\(tag.base64EncodedString())".utf8)
     }
-    private static func decodeGeneric(_ data: Data) -> (type: String, requireBiometric: Bool)? {
+    private static func decodeGeneric(_ data: Data) -> (type: String, requireBiometric: Bool, tag: Data?)? {
         guard let s = String(data: data, encoding: .utf8) else { return nil }
-        let parts = s.split(separator: ":", maxSplits: 1)
+        let parts = s.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
         guard let type = parts.first else { return nil }
-        return (String(type), parts.count > 1 ? parts[1] == "1" : true) // old entries default to bio
+        let bio = parts.count > 1 ? parts[1] == "1" : true // old entries default to bio
+        let tag = parts.count > 2 ? Data(base64Encoded: String(parts[2])) : nil
+        return (String(type), bio, tag)
     }
 
     private static func privateAccount(for alias: String) -> String { "\(alias).private" }
     private static func publicAccount(for alias: String) -> String { "\(alias).pub" }
+
+    // HMAC key for the public-key integrity tag. Load-or-create, silent, device-only. Unlike
+    // Android (Keystore/hardware HMAC key), this key lives in the Keychain (readable in-process): the
+    // tag defends against offline/backup tampering of the stored public key, not an in-process attacker.
+    private static func pubTagKey() throws -> SymmetricKey {
+        var query = baseQuery(account: "__pq_pubtag_hmac")
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: AnyObject?
+        if SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let raw = out as? Data {
+            return SymmetricKey(data: raw)
+        }
+        let key = SymmetricKey(size: .bits256)
+        let raw = key.withUnsafeBytes { Data($0) }
+        var add = baseQuery(account: "__pq_pubtag_hmac")
+        add[kSecValueData as String] = raw
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let status = SecItemAdd(add as CFDictionary, nil)
+        guard status == errSecSuccess else { throw PQSecureStorageError.keychain(status) }
+        return key
+    }
+    private static func pubTag(_ pub: Data) throws -> Data {
+        Data(HMAC<SHA256>.authenticationCode(for: pub, using: try pubTagKey()))
+    }
 
     private static func baseQuery(account: String) -> [String: Any] {
         [
@@ -686,7 +720,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             account: publicAccount(for: alias),
             data: key.publicKeyBytes,
             attrs: [
-                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric),
+                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: try pubTag(key.publicKeyBytes)),
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
         )
@@ -715,7 +749,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let decoded = decodeGeneric(typeData) else {
             throw PQSecureStorageError.keyNotFound
         }
-        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag)
     }
 
     @available(iOS 26.0, *)
@@ -788,7 +822,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             account: kemPublicAccount(for: alias),
             data: key.publicKeyBytes,
             attrs: [
-                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric),
+                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: try pubTag(key.publicKeyBytes)),
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
         )
@@ -816,7 +850,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let decoded = decodeGeneric(typeData) else {
             throw PQSecureStorageError.keyNotFound
         }
-        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag)
     }
 
     @available(iOS 26.0, *)
