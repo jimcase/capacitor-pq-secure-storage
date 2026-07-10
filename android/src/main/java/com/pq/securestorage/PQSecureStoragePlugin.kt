@@ -382,6 +382,11 @@ class PQSecureStoragePlugin : Plugin() {
     // interleave, or two concurrent calls clobber each other's wrap key and brick the private
     private val kemGenerating = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    // per-key guard so two setItem on the same key can't race the item-key create; global latch so
+    // only one biometric prompt shows at a time (no prompt spam / stacking)
+    private val storeWriting = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val authInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
     @PluginMethod
     fun generateKemKeyPair(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
@@ -781,6 +786,11 @@ class PQSecureStoragePlugin : Plugin() {
         onError: () -> Unit = {},
         onSuccess: (Cipher) -> Unit
     ) {
+        // only one prompt at a time; a second concurrent op is rejected, not stacked
+        if (!authInFlight.compareAndSet(false, true)) {
+            onError()
+            return call.reject("Another authentication is in progress", "E_BUSY")
+        }
         val cryptoObject = BiometricPrompt.CryptoObject(cipher)
         hostActivity.runOnUiThread {
             val settled = AtomicBoolean(false)
@@ -788,6 +798,9 @@ class PQSecureStoragePlugin : Plugin() {
             val callback = object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     if (!settled.compareAndSet(false, true)) return
+                    // the prompt is dismissed now, so free the latch before onSuccess -- onSuccess may
+                    // legitimately chain a second prompt (e.g. biometric KEM overwrite)
+                    authInFlight.set(false)
                     try {
                         onSuccess(result.cryptoObject!!.cipher!!)
                     } catch (e: KeyPermanentlyInvalidatedException) {
@@ -805,6 +818,7 @@ class PQSecureStoragePlugin : Plugin() {
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     if (!settled.compareAndSet(false, true)) return
                     onError()
+                    authInFlight.set(false)
                     call.reject("Authentication failed", "E_AUTH_FAILED")
                 }
 
@@ -825,6 +839,7 @@ class PQSecureStoragePlugin : Plugin() {
                 if (settled.compareAndSet(false, true)) {
                     logd("biometric prompt failed to start", e)
                     onError()
+                    authInFlight.set(false)
                     call.reject("Authentication failed", "E_AUTH_FAILED")
                 }
             }
@@ -841,12 +856,18 @@ class PQSecureStoragePlugin : Plugin() {
         call: PluginCall,
         onSuccess: (Signature) -> Unit
     ) {
+        // only one prompt at a time; a second concurrent op is rejected, not stacked
+        if (!authInFlight.compareAndSet(false, true)) {
+            return call.reject("Another authentication is in progress", "E_BUSY")
+        }
         val cryptoObject = BiometricPrompt.CryptoObject(signer)
         hostActivity.runOnUiThread {
             val settled = AtomicBoolean(false)
             val callback = object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     if (!settled.compareAndSet(false, true)) return
+                    // prompt dismissed; free the latch before onSuccess in case it chains a prompt
+                    authInFlight.set(false)
                     try {
                         onSuccess(result.cryptoObject!!.signature!!)
                     } catch (e: KeyPermanentlyInvalidatedException) {
@@ -860,6 +881,7 @@ class PQSecureStoragePlugin : Plugin() {
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     if (!settled.compareAndSet(false, true)) return
+                    authInFlight.set(false)
                     call.reject("Authentication failed", "E_AUTH_FAILED")
                 }
 
@@ -878,6 +900,7 @@ class PQSecureStoragePlugin : Plugin() {
             } catch (e: Exception) {
                 if (settled.compareAndSet(false, true)) {
                     logd("biometric prompt failed to start", e)
+                    authInFlight.set(false)
                     call.reject("Authentication failed", "E_AUTH_FAILED")
                 }
             }
@@ -958,12 +981,15 @@ class PQSecureStoragePlugin : Plugin() {
         if (key.isEmpty() || key.length > MAX_STORE_KEY_LEN || value.length > MAX_STORE_VALUE_LEN) {
             return call.reject("Key or value out of bounds", "E_INVALID_ARGS")
         }
+        if (!storeWriting.add(key)) return call.reject("Store write in progress, retry", "E_BUSY")
+        val done = { storeWriting.remove(key); Unit }
         val newBio = call.getBoolean("requireBiometric") ?: false
         val alias = itemKeyAlias(key)
         val existing = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
         val itemKey: SecretKey = if (existing != null && !invalidated(existing)) {
             // an item's tier is fixed at creation; changing requireBiometric must go through removeItem
             if (isAuthRequired(existing) != newBio) {
+                done()
                 return call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
             }
             existing // reuse (an accessibility change on overwrite is ignored -- set at creation)
@@ -972,10 +998,11 @@ class PQSecureStoragePlugin : Plugin() {
                 createItemKey(alias, newBio, unlockRequiredFor(call.getString("accessibility")))
             } catch (e: Exception) {
                 logd("setItem: key create failed for key=$key", e)
+                done()
                 return call.reject("Store failed", "E_ENCRYPT")
             }
         }
-        encryptAndStore(call, key, value, itemKey, newBio)
+        encryptAndStore(call, key, value, itemKey, newBio, done)
     }
 
     // a reused bio key is dead after a biometric enrollment change; detect it so setItem recreates
@@ -988,7 +1015,7 @@ class PQSecureStoragePlugin : Plugin() {
         false // other errors (e.g. needs auth) mean the key is still usable
     }
 
-    private fun encryptAndStore(call: PluginCall, key: String, value: String, itemKey: SecretKey, bio: Boolean) {
+    private fun encryptAndStore(call: PluginCall, key: String, value: String, itemKey: SecretKey, bio: Boolean, done: () -> Unit) {
         try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, itemKey)
@@ -997,21 +1024,25 @@ class PQSecureStoragePlugin : Plugin() {
                 cipher.updateAAD(key.toByteArray(Charsets.UTF_8))
                 val ct = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
                 storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
+                done()
                 call.resolve()
             } else {
                 // a biometric item's own key gates the WRITE too (encrypt needs the key), so the
                 // prompt here is the same gate that blocks a silent bridge caller from overwriting it
                 val hostActivity = activity as? FragmentActivity
-                    ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-                authenticateCipher(hostActivity, cipher, "Authenticate to save your secret", call) { boundCipher ->
+                    ?: run { done(); return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY") }
+                authenticateCipher(hostActivity, cipher, "Authenticate to save your secret", call,
+                    onError = { done() }) { boundCipher ->
                     boundCipher.updateAAD(key.toByteArray(Charsets.UTF_8))
                     val ct = boundCipher.doFinal(value.toByteArray(Charsets.UTF_8))
                     storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
+                    done()
                     call.resolve()
                 }
             }
         } catch (e: Exception) {
             logd("setItem encrypt failed for key=$key", e)
+            done()
             call.reject("Store failed", "E_ENCRYPT")
         }
     }

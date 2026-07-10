@@ -211,6 +211,12 @@ Document the choice in the security policy.
 
 ---
 
+## Concurrency (device)
+
+- [ ] Two biometric ops back-to-back (e.g. sign then getItem on a bio item) do NOT stack two prompts; the second rejects `E_BUSY` while the first prompt is open.
+- [ ] Two `setItem` on the same key concurrently: one resolves, the other rejects `E_BUSY` (no corrupted item).
+- [ ] Biometric KEM overwrite (`generateKemKeyPair overwrite:true` on a bio key) still shows both prompts in sequence (authorize replacement, then create) and succeeds, not `E_BUSY`.
+
 ## Acceptance Criteria
 
 - [ ] Android step 4: Attestation chain confirms StrongBox or TEE.
