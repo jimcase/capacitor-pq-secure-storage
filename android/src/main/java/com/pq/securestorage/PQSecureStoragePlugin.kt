@@ -104,6 +104,7 @@ class PQSecureStoragePlugin : Plugin() {
         if (!safeAlias(call, alias)) return
         val alg = algOf(call.getString("type")) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
         val overwrite = call.getBoolean("overwrite") ?: false
+        val requireBiometric = call.getBoolean("requireBiometric") ?: true
         val ks = try {
             keystore()
         } catch (e: Exception) {
@@ -115,15 +116,16 @@ class PQSecureStoragePlugin : Plugin() {
             // alias may back a live identity already -- refuse to silently clobber it
             return call.reject("Alias already exists", "E_ALIAS_EXISTS")
         }
-        if (exists) {
-            // destructive overwrite of a live signing key: require a real biometric bound to the
-            // EXISTING key first, so a silent bridge caller can't rotate/brick an identity key
+        // gate the overwrite behind a biometric ONLY when the existing key is itself biometric -- a
+        // silent key isn't biometrically protected, so its overwrite is silent too
+        val existingBio = exists && (ks.getKey(alias, null) as? java.security.PrivateKey)?.let { keyRequiresAuth(it) } == true
+        if (existingBio) {
             val hostActivity = activity as? FragmentActivity
                 ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-            authForExistingSign(hostActivity, alias, call) { doGenerateSigningKey(alias, alg, call) }
+            authForExistingSign(hostActivity, alias, call) { doGenerateSigningKey(alias, alg, requireBiometric, call) }
             return
         }
-        doGenerateSigningKey(alias, alg, call)
+        doGenerateSigningKey(alias, alg, requireBiometric, call)
     }
 
     @Volatile private var hwCache: Boolean? = null
@@ -164,7 +166,23 @@ class PQSecureStoragePlugin : Plugin() {
         return hw
     }
 
-    private fun doGenerateSigningKey(alias: String, alg: String, call: PluginCall) {
+    // whether a Keystore key was created with per-op user authentication (biometric). This is the
+    // authoritative key property (not tamperable metadata); on failure assume auth required (safe).
+    private fun keyRequiresAuth(key: java.security.PrivateKey): Boolean = try {
+        (KeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER).getKeySpec(key, KeyInfo::class.java) as KeyInfo)
+            .isUserAuthenticationRequired
+    } catch (e: Exception) {
+        logd("keyRequiresAuth probe failed", e); true
+    }
+
+    private fun secretKeyRequiresAuth(key: SecretKey): Boolean = try {
+        (SecretKeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER).getKeySpec(key, KeyInfo::class.java) as KeyInfo)
+            .isUserAuthenticationRequired
+    } catch (e: Exception) {
+        logd("secretKeyRequiresAuth probe failed", e); true
+    }
+
+    private fun doGenerateSigningKey(alias: String, alg: String, requireBiometric: Boolean, call: PluginCall) {
         try {
             // no pre-delete. Generating to an existing alias replaces it; a failed keygen
             // leaves the old key intact instead of destroying it first.
@@ -173,16 +191,14 @@ class PQSecureStoragePlugin : Plugin() {
             // implement ML-DSA in hardware on this device it silently falls back to the software
             // keystore. getHardwareCapabilities probes the real security level instead of assuming.
             val kpg = KeyPairGenerator.getInstance(alg, KEYSTORE_PROVIDER)
-            kpg.initialize(
-                KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
-                    // Per-operation auth: timeout 0 means there's no time window where the key
-                    // just sits unlocked. Every use needs a fresh biometric bound to the specific
-                    // CryptoObject/Signature it was requested for (see sign() below). That's what
-                    // closes the GHSA-vx5f-vmr6-32wf bypass.
-                    .setUserAuthenticationRequired(true)
+            val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
+            if (requireBiometric) {
+                // Per-operation auth: timeout 0 means the key never sits unlocked. Every use needs a
+                // fresh biometric bound to the specific Signature (see sign()) -- closes GHSA-vx5f.
+                spec.setUserAuthenticationRequired(true)
                     .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
-                    .build()
-            )
+            }
+            kpg.initialize(spec.build())
             val kp = kpg.generateKeyPair()
             val ret = JSObject()
             ret.put("publicKey", Base64.encodeToString(rawFromSpki(kp.public.encoded), Base64.NO_WRAP))
@@ -247,26 +263,28 @@ class PQSecureStoragePlugin : Plugin() {
         // length so a caller can't push a giant string or shove real content off-screen.
         val description = call.getString("description")?.take(200)
 
-        // Capacitor's BridgeActivity is a FragmentActivity, which is what BiometricPrompt needs
-        // to host its DialogFragment. Any custom host activity has to be one too.
-        val hostActivity = activity as? FragmentActivity
-            ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-
         try {
-            val ks = keystore()
-            val priv = ks.getKey(alias, null) as? java.security.PrivateKey ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
-
-            // initSign() here does NOT unlock the key -- it just prepares the Signature object.
-            // The Keystore only actually releases the key material inside sign()/update(), and
-            // only for the exact Signature instance a real biometric match was bound to below.
+            val priv = keystore().getKey(alias, null) as? java.security.PrivateKey
+                ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
+            // initSign() does NOT unlock the key -- the Keystore only releases material inside
+            // sign()/update(), and (for a biometric key) only for the Signature a real match bound.
             val signer = Signature.getInstance(alg)
             signer.initSign(priv)
-            // the SAME Signature the Keystore hardware-unlocks for this one match -- signing with
-            // anything built after a hooked/forged callback throws, because that key was never released
-            authenticateSignature(hostActivity, signer, "Authorize signature", description, call) { boundSigner ->
-                boundSigner.update(Base64.decode(data, Base64.DEFAULT))
+            if (keyRequiresAuth(priv)) {
+                // Capacitor's BridgeActivity is a FragmentActivity, needed to host BiometricPrompt
+                val hostActivity = activity as? FragmentActivity
+                    ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+                authenticateSignature(hostActivity, signer, "Authorize signature", description, call) { boundSigner ->
+                    boundSigner.update(Base64.decode(data, Base64.DEFAULT))
+                    val ret = JSObject()
+                    ret.put("signature", Base64.encodeToString(boundSigner.sign(), Base64.NO_WRAP))
+                    call.resolve(ret)
+                }
+            } else {
+                // silent key: sign directly, no prompt
+                signer.update(Base64.decode(data, Base64.DEFAULT))
                 val ret = JSObject()
-                ret.put("signature", Base64.encodeToString(boundSigner.sign(), Base64.NO_WRAP))
+                ret.put("signature", Base64.encodeToString(signer.sign(), Base64.NO_WRAP))
                 call.resolve(ret)
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
@@ -349,8 +367,7 @@ class PQSecureStoragePlugin : Plugin() {
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val spec = mlkemSpecOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         val overwrite = call.getBoolean("overwrite") ?: false
-        val hostActivity = activity as? FragmentActivity
-            ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+        val requireBiometric = call.getBoolean("requireBiometric") ?: true
         if (!kemGenerating.add(alias)) return call.reject("Key generation in progress, retry", "E_BUSY")
         try {
             if (!overwrite && kemPrefs().contains(kemPubKeyKey(alias))) {
@@ -365,39 +382,50 @@ class PQSecureStoragePlugin : Plugin() {
 
             val oldVer = kemPrefs().getInt(kemWrapVerKey(alias), -1)
             val newVer = oldVer + 1
-            val wrapKey = createKemWrapKey(alias, newVer)
+            val wrapKey = createKemWrapKey(alias, newVer, requireBiometric)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
-            authenticateCipher(hostActivity, cipher, "Authenticate to create your PQ key", call,
-                onError = { kemGenerating.remove(alias) }) { boundCipher ->
-                val wrapped = boundCipher.iv + boundCipher.doFinal(privBytes)
-                privBytes.fill(0) // raw ML-KEM private no longer needed after wrapping
-                // commit() is synchronous+durable, so the old wrap key is retired ONLY after the
-                // new state is on disk (a crash can't leave prefs pointing at a deleted key)
+
+            // wrap the private + rotate. commit() is synchronous+durable, so the old wrap key is
+            // retired ONLY after the new state is on disk (a crash can't point prefs at a deleted key)
+            val persist = { c: Cipher ->
+                val wrapped = c.iv + c.doFinal(privBytes)
+                privBytes.fill(0)
                 val committed = kemPrefs().edit()
                     .putString(kemPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
                     .putString(kemPubKeyKey(alias), Base64.encodeToString(rawPub, Base64.NO_WRAP))
-                    .putString(kemTagKey(alias), pubTag("kem:$alias", rawPub)) // integrity tag
+                    .putString(kemTagKey(alias), pubTag("kem:$alias", rawPub))
                     .putString(kemTypeKey(alias), type)
                     .putInt(kemWrapVerKey(alias), newVer)
                     .commit()
-                if (committed) {
-                    if (oldVer >= 0) {
-                        try {
-                            val ks = keystore()
-                            if (ks.containsAlias(kemWrapAlias(alias, oldVer))) ks.deleteEntry(kemWrapAlias(alias, oldVer))
-                        } catch (e: Exception) {
-                            logd("kem wrap rotate cleanup failed", e)
-                        }
+                if (committed && oldVer >= 0) {
+                    try {
+                        val ks = keystore()
+                        if (ks.containsAlias(kemWrapAlias(alias, oldVer))) ks.deleteEntry(kemWrapAlias(alias, oldVer))
+                    } catch (e: Exception) {
+                        logd("kem wrap rotate cleanup failed", e)
                     }
-                    kemGenerating.remove(alias)
+                }
+                kemGenerating.remove(alias)
+                if (committed) {
                     val ret = JSObject()
                     ret.put("publicKey", Base64.encodeToString(rawPub, Base64.NO_WRAP))
                     call.resolve(ret)
                 } else {
-                    kemGenerating.remove(alias)
                     call.reject("KEM key generation failed", "E_KEYGEN")
                 }
+            }
+
+            if (requireBiometric) {
+                val hostActivity = activity as? FragmentActivity
+                if (hostActivity == null) {
+                    kemGenerating.remove(alias)
+                    return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+                }
+                authenticateCipher(hostActivity, cipher, "Authenticate to create your PQ key", call,
+                    onError = { kemGenerating.remove(alias) }) { boundCipher -> persist(boundCipher) }
+            } else {
+                persist(cipher) // no-auth wrap key: wrap silently, no prompt
             }
         } catch (e: Exception) {
             kemGenerating.remove(alias)
@@ -454,8 +482,6 @@ class PQSecureStoragePlugin : Plugin() {
             "PQC_MLKEM_1024" -> 1568
             else -> return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         }
-        val hostActivity = activity as? FragmentActivity
-            ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         try {
             val storedType = kemPrefs().getString(kemTypeKey(alias), null)
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
@@ -470,14 +496,23 @@ class PQSecureStoragePlugin : Plugin() {
 
             val wrapIv = privBlob.copyOfRange(0, 12)
             val wrapped = privBlob.copyOfRange(12, privBlob.size)
-            val ks = keystore()
-            val wrapKey = ks.getKey(kemWrapAlias(alias, ver), null) as? SecretKey
+            val wrapKey = keystore().getKey(kemWrapAlias(alias, ver), null) as? SecretKey
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val unwrapCipher = Cipher.getInstance("AES/GCM/NoPadding")
             unwrapCipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, wrapIv))
 
-            authenticateCipher(hostActivity, unwrapCipher, "Authenticate to decrypt with your PQ key", call) { boundCipher ->
-                val plain = decapsulate(boundCipher.doFinal(wrapped), frame, ctLen)
+            if (secretKeyRequiresAuth(wrapKey)) {
+                val hostActivity = activity as? FragmentActivity
+                    ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+                authenticateCipher(hostActivity, unwrapCipher, "Authenticate to decrypt with your PQ key", call) { boundCipher ->
+                    val plain = decapsulate(boundCipher.doFinal(wrapped), frame, ctLen)
+                    val ret = JSObject()
+                    ret.put("plaintext", Base64.encodeToString(plain, Base64.NO_WRAP))
+                    call.resolve(ret)
+                }
+            } else {
+                // no-auth wrap key: unwrap + decapsulate inline, no prompt
+                val plain = decapsulate(unwrapCipher.doFinal(wrapped), frame, ctLen)
                 val ret = JSObject()
                 ret.put("plaintext", Base64.encodeToString(plain, Base64.NO_WRAP))
                 call.resolve(ret)
@@ -645,26 +680,26 @@ class PQSecureStoragePlugin : Plugin() {
 
     private fun getOrCreateAtRestKey(alias: String): SecretKey = getOrCreateAesKey(atRestAlias(alias), false)
 
-    private fun createKemWrapKey(alias: String, ver: Int): SecretKey {
+    private fun createKemWrapKey(alias: String, ver: Int, requireBiometric: Boolean): SecretKey {
         // a fresh wrap key per generation (versioned alias). On overwrite the old version is
         // deleted after the new keypair is persisted, so a restored pre-rotation wrapped-private
         // can no longer be unwrapped. Clear any orphan at this version first (cancelled attempt).
         val ks = keystore()
         if (ks.containsAlias(kemWrapAlias(alias, ver))) ks.deleteEntry(kemWrapAlias(alias, ver))
         val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        kg.init(
-            KeyGenParameterSpec.Builder(
-                kemWrapAlias(alias, ver),
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                // per-op biometric bound to the cipher (same GHSA-safe pattern as sign())
-                .setUserAuthenticationRequired(true)
-                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
-                .build()
+        val spec = KeyGenParameterSpec.Builder(
+            kemWrapAlias(alias, ver),
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
         )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+        if (requireBiometric) {
+            // per-op biometric bound to the cipher (same GHSA-safe pattern as sign())
+            spec.setUserAuthenticationRequired(true)
+                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+        }
+        kg.init(spec.build())
         return kg.generateKey()
     }
 

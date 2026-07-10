@@ -228,18 +228,21 @@ Report what post-quantum crypto this device supports.
 ### generateKeyPair(...)
 
 ```typescript
-generateKeyPair(options: { keyAlias: string; type: SignatureType; overwrite?: boolean; }) => Promise<{ publicKey: string; }>
+generateKeyPair(options: { keyAlias: string; type: SignatureType; overwrite?: boolean; requireBiometric?: boolean; }) => Promise<{ publicKey: string; }>
 ```
 
 Generate a hardware-backed ML-DSA signing keypair under an alias and return the raw public
-key. Rejects if the alias exists unless `overwrite` is true. Overwriting an existing key
-PROMPTS for biometrics (bound to the existing key), because it destroys a possibly-live
-identity key; a fresh alias does not prompt. Distinct aliases give independent keypairs (use
-that for KERI rotation, one alias per key).
+key. Rejects if the alias exists unless `overwrite` is true. Distinct aliases give independent
+keypairs (use that for KERI rotation, one alias per key).
 
-| Param         | Type                                                                                                      |
-| ------------- | --------------------------------------------------------------------------------------------------------- |
-| **`options`** | <code>{ keyAlias: string; type: <a href="#signaturetype">SignatureType</a>; overwrite?: boolean; }</code> |
+`requireBiometric` (default `true`) is baked into the key: `true` makes every `sign` prompt
+for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
+the device is unlocked. It cannot be changed after creation, and overwriting a biometric key
+prompts (a silent one overwrites silently).
+
+| Param         | Type                                                                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| **`options`** | <code>{ keyAlias: string; type: <a href="#signaturetype">SignatureType</a>; overwrite?: boolean; requireBiometric?: boolean; }</code> |
 
 **Returns:** <code>Promise&lt;{ publicKey: string; }&gt;</code>
 
@@ -269,10 +272,11 @@ Return the raw public key for an existing signing alias.
 sign(options: { keyAlias: string; data: string; type: SignatureType; description?: string; }) => Promise<{ signature: string; }>
 ```
 
-Sign data with the aliased ML-DSA key. Prompts for biometrics. WARNING: the signature covers
-the raw `data` bytes as-is and `description` is only prompt text (the caller controls both),
-so this is NOT a WYSIWYG consent guarantee. A host app that signs untrusted payloads must show
-its own confirmation of what is being signed; `description` is truncated for the prompt.
+Sign data with the aliased ML-DSA key. Prompts for biometrics only if the key was created
+with `requireBiometric: true` (the default); a silent key signs with no prompt. WARNING: the
+signature covers the raw `data` bytes as-is and `description` is only prompt text (the caller
+controls both), so this is NOT a WYSIWYG consent guarantee. A host app that signs untrusted
+payloads must show its own confirmation; `description` is truncated for the prompt.
 
 | Param         | Type                                                                                                                     |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
@@ -320,15 +324,16 @@ Decrypt a blob produced by `encryptAtRest` under the same alias.
 ### generateKemKeyPair(...)
 
 ```typescript
-generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boolean; }) => Promise<{ publicKey: string; }>
+generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boolean; requireBiometric?: boolean; }) => Promise<{ publicKey: string; }>
 ```
 
-Generate an ML-KEM keypair under an alias and return the raw public key. Rejects if the
-alias exists unless `overwrite` is true.
+Generate an ML-KEM keypair under an alias and return the raw public key. Rejects if the alias
+exists unless `overwrite` is true. `requireBiometric` (default `true`) is baked into the key:
+`true` makes every `decrypt` prompt; `false` decrypts silently while the device is unlocked.
 
-| Param         | Type                                                                                          |
-| ------------- | --------------------------------------------------------------------------------------------- |
-| **`options`** | <code>{ keyAlias: string; type: <a href="#kemtype">KemType</a>; overwrite?: boolean; }</code> |
+| Param         | Type                                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **`options`** | <code>{ keyAlias: string; type: <a href="#kemtype">KemType</a>; overwrite?: boolean; requireBiometric?: boolean; }</code> |
 
 **Returns:** <code>Promise&lt;{ publicKey: string; }&gt;</code>
 
@@ -375,7 +380,7 @@ Encrypt data to a recipient's raw ML-KEM public key. Pure software, no alias or 
 decrypt(options: { keyAlias: string; type: KemType; data: string; }) => Promise<{ plaintext: string; }>
 ```
 
-Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics.
+Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics only if the key requires it.
 
 | Param         | Type                                                                                   |
 | ------------- | -------------------------------------------------------------------------------------- |

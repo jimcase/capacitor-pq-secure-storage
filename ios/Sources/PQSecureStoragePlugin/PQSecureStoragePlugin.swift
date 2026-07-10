@@ -255,6 +255,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
 
         let overwrite = call.getBool("overwrite") ?? false
+        let requireBiometric = call.getBool("requireBiometric") ?? true
         let exists = Self.aliasExists(alias)
         if !overwrite && exists {
             // alias may back a live identity already -- refuse to silently clobber it
@@ -263,9 +264,9 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
         let doGenerate: () -> Void = {
             do {
-                let access = try Self.makeSepAccessControl()
+                let access = try Self.makeSepAccessControl(requireBiometric: requireBiometric)
                 let key = try PQKey.generate(type: type, accessControl: access)
-                try Self.persist(key: key, type: type, alias: alias)
+                try Self.persist(key: key, type: type, alias: alias, requireBiometric: requireBiometric)
                 call.resolve(["publicKey": key.publicKeyBytes.base64EncodedString()])
             } catch {
                 os_log("generateKeyPair failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
@@ -273,18 +274,17 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
 
-        if exists {
-            // destructive overwrite of a live signing key: prove a real biometric on the EXISTING
-            // key first (sign with it), so a silent bridge caller can't rotate/brick an identity key
+        // gate the overwrite behind a biometric ONLY when the existing key is itself biometric -- a
+        // silent key isn't biometrically protected, so its overwrite is silent too
+        let existingBio = exists && ((try? Self.loadMetadata(alias: alias).requireBiometric) ?? true)
+        if existingBio {
             Self.authenticate(reason: "Authenticate to replace your key") { result in
                 switch result {
                 case .failure:
                     call.reject("Authentication failed", "E_AUTH_FAILED")
                 case .success(let ctx):
-                    // prove the biometric bound to the existing key when possible. If it's gone or
-                    // invalidated (half-written alias, or enrollment change), the sign throws --
-                    // still regenerate, since the user authenticated and the old key is unusable.
-                    // authenticate() already blocks a silent bridge caller (it can't pass biometry).
+                    // prove the biometric bound to the existing key when possible; if it's gone or
+                    // invalidated the sign throws -- still regenerate, since the user authenticated.
                     do {
                         _ = try Self.loadKey(alias: alias, context: ctx).sign(Data([0]))
                     } catch {
@@ -331,28 +331,36 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         // push a giant string or shove real content off-screen.
         let reason = String((call.getString("description") ?? "Authenticate to sign with your PQ key").prefix(200))
 
-        Self.authenticate(reason: reason) { result in
-            switch result {
-            case .failure:
-                call.reject("Authentication failed", "E_AUTH_FAILED")
-            case .success(let context):
-                do {
-                    let key = try Self.loadKey(alias: alias, context: context)
-                    switch (type, key) {
-                    case ("PQC_MLDSA_65", .v65), ("PQC_MLDSA_87", .v87):
-                        break
-                    default:
-                        return call.reject("Key type mismatch", "E_TYPE_MISMATCH")
-                    }
-                    let signature = try key.sign(raw)
-                    call.resolve(["signature": signature.base64EncodedString()])
-                } catch PQSecureStorageError.keyNotFound {
-                    call.reject("Key not found", "E_KEY_NOT_FOUND")
-                } catch {
-                    os_log("sign failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
-                    call.reject("Signing failed", "E_SIGN")
+        let doSign: (LAContext) -> Void = { context in
+            do {
+                let key = try Self.loadKey(alias: alias, context: context)
+                switch (type, key) {
+                case ("PQC_MLDSA_65", .v65), ("PQC_MLDSA_87", .v87):
+                    break
+                default:
+                    return call.reject("Key type mismatch", "E_TYPE_MISMATCH")
+                }
+                let signature = try key.sign(raw)
+                call.resolve(["signature": signature.base64EncodedString()])
+            } catch PQSecureStorageError.keyNotFound {
+                call.reject("Key not found", "E_KEY_NOT_FOUND")
+            } catch {
+                os_log("sign failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+                call.reject("Signing failed", "E_SIGN")
+            }
+        }
+
+        // prompt only for a biometric key; a silent key signs with a fresh (unevaluated) context and
+        // the SEP releases it while the device is unlocked, no prompt
+        if (try? Self.loadMetadata(alias: alias).requireBiometric) ?? true {
+            Self.authenticate(reason: reason) { result in
+                switch result {
+                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .success(let context): doSign(context)
                 }
             }
+        } else {
+            doSign(LAContext())
         }
     }
 
@@ -411,25 +419,25 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
 
         let overwrite = call.getBool("overwrite") ?? false
+        let requireBiometric = call.getBool("requireBiometric") ?? true
         let exists = Self.kemAliasExists(alias)
         if !overwrite && exists {
             return call.reject("Alias already exists", "E_ALIAS_EXISTS")
         }
         let doGenerate: () -> Void = {
             do {
-                let access = try Self.makeSepAccessControl()
+                let access = try Self.makeSepAccessControl(requireBiometric: requireBiometric)
                 let key = try PQKemKey.generate(type: type, accessControl: access)
-                try Self.persistKem(key: key, type: type, alias: alias)
+                try Self.persistKem(key: key, type: type, alias: alias, requireBiometric: requireBiometric)
                 call.resolve(["publicKey": key.publicKeyBytes.base64EncodedString()])
             } catch {
                 os_log("generateKemKeyPair failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
                 call.reject("KEM key generation failed", "E_KEYGEN")
             }
         }
-        if exists {
-            // destructive overwrite of a live KEM key: require a real biometric first, so a silent
-            // bridge caller can't replace it (every ciphertext addressed to the old key would become
-            // undecryptable). Mirrors the signing gate and Android's prompt-on-overwrite.
+        // gate the overwrite only when the existing key is biometric (a silent one overwrites silently)
+        let existingBio = exists && ((try? Self.loadKemMetadata(alias: alias).requireBiometric) ?? true)
+        if existingBio {
             Self.authenticate(reason: "Authenticate to replace your key") { result in
                 switch result {
                 case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
@@ -498,34 +506,42 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard frame.count > ctLen + 12 else {
             return call.reject("Malformed ciphertext", "E_BAD_CIPHERTEXT")
         }
-        // reject a type/key mismatch before prompting (parity with sign)
+        // reject a type/key mismatch before prompting (parity with sign) and read the biometric flag
+        let requireBiometric: Bool
         do {
             let meta = try Self.loadKemMetadata(alias: alias)
             guard meta.type == type else { return call.reject("Key type mismatch", "E_TYPE_MISMATCH") }
+            requireBiometric = meta.requireBiometric
         } catch {
             return call.reject("Key not found", "E_KEY_NOT_FOUND")
         }
 
-        Self.authenticate(reason: "Authenticate to decrypt with your PQ key") { result in
-            switch result {
-            case .failure:
-                call.reject("Authentication failed", "E_AUTH_FAILED")
-            case .success(let context):
-                do {
-                    let key = try Self.loadKemKey(alias: alias, context: context)
-                    let kemCt = frame.subdata(in: frame.startIndex..<(frame.startIndex + ctLen))
-                    let aead = frame.subdata(in: (frame.startIndex + ctLen)..<frame.endIndex)
-                    let sharedSecret = try key.decapsulate(kemCt)
-                    let box = try ChaChaPoly.SealedBox(combined: aead)
-                    let plain = try ChaChaPoly.open(box, using: sharedSecret)
-                    call.resolve(["plaintext": plain.base64EncodedString()])
-                } catch PQSecureStorageError.keyNotFound {
-                    call.reject("Key not found", "E_KEY_NOT_FOUND")
-                } catch {
-                    os_log("decrypt failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
-                    call.reject("Decrypt failed", "E_DECRYPT")
+        let doDecrypt: (LAContext) -> Void = { context in
+            do {
+                let key = try Self.loadKemKey(alias: alias, context: context)
+                let kemCt = frame.subdata(in: frame.startIndex..<(frame.startIndex + ctLen))
+                let aead = frame.subdata(in: (frame.startIndex + ctLen)..<frame.endIndex)
+                let sharedSecret = try key.decapsulate(kemCt)
+                let box = try ChaChaPoly.SealedBox(combined: aead)
+                let plain = try ChaChaPoly.open(box, using: sharedSecret)
+                call.resolve(["plaintext": plain.base64EncodedString()])
+            } catch PQSecureStorageError.keyNotFound {
+                call.reject("Key not found", "E_KEY_NOT_FOUND")
+            } catch {
+                os_log("decrypt failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+                call.reject("Decrypt failed", "E_DECRYPT")
+            }
+        }
+
+        if requireBiometric {
+            Self.authenticate(reason: "Authenticate to decrypt with your PQ key") { result in
+                switch result {
+                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .success(let context): doDecrypt(context)
                 }
             }
+        } else {
+            doDecrypt(LAContext())
         }
     }
 
@@ -580,14 +596,17 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @available(iOS 26.0, *)
-    private static func makeSepAccessControl() throws -> SecAccessControl {
+    private static func makeSepAccessControl(requireBiometric: Bool) throws -> SecAccessControl {
         var accessError: Unmanaged<CFError>?
-        // this is the real gate: baked into the SEP key at generation time, enforced by the SEP
-        // itself on every `.signature(for:)` call regardless of how the persisted blob is stored
+        // the real gate, baked into the SEP key at generation time and enforced by the SEP on every
+        // `.signature(for:)`/decapsulate. With biometry the key needs a fresh match; without, it's
+        // usable while the device is unlocked (no prompt).
+        let flags: SecAccessControlCreateFlags =
+            requireBiometric ? [.privateKeyUsage, .biometryCurrentSet] : [.privateKeyUsage]
         guard let access = SecAccessControlCreateWithFlags(
             nil,
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            [.privateKeyUsage, .biometryCurrentSet],
+            flags,
             &accessError
         ) else {
             if let accessError = accessError {
@@ -604,6 +623,19 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     private struct KeyMetadata {
         let type: String
         let publicKey: Data
+        let requireBiometric: Bool
+    }
+
+    // the biometric flag rides with the type in the public entry's generic attr as "type:0|1". It's
+    // only a hint for whether to show a prompt; the SEP enforces the real gate regardless.
+    private static func encodeGeneric(type: String, requireBiometric: Bool) -> Data {
+        Data("\(type):\(requireBiometric ? "1" : "0")".utf8)
+    }
+    private static func decodeGeneric(_ data: Data) -> (type: String, requireBiometric: Bool)? {
+        guard let s = String(data: data, encoding: .utf8) else { return nil }
+        let parts = s.split(separator: ":", maxSplits: 1)
+        guard let type = parts.first else { return nil }
+        return (String(type), parts.count > 1 ? parts[1] == "1" : true) // old entries default to bio
     }
 
     private static func privateAccount(for alias: String) -> String { "\(alias).private" }
@@ -640,7 +672,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @available(iOS 26.0, *)
-    private static func persist(key: PQKey, type: String, alias: String) throws {
+    private static func persist(key: PQKey, type: String, alias: String, requireBiometric: Bool) throws {
         // write public first: aliasExists() checks the public account, so a failed private write
         // leaves a consistent state (alias reports exists) that heals on retry,
         // instead of an orphaned private that blocks the alias. dataRepresentation is SEP-wrapped
@@ -649,7 +681,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             account: publicAccount(for: alias),
             data: key.publicKeyBytes,
             attrs: [
-                kSecAttrGeneric as String: Data(type.utf8),
+                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric),
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
         )
@@ -675,10 +707,10 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let item = result as? [String: Any],
               let pubData = item[kSecValueData as String] as? Data,
               let typeData = item[kSecAttrGeneric as String] as? Data,
-              let type = String(data: typeData, encoding: .utf8) else {
+              let decoded = decodeGeneric(typeData) else {
             throw PQSecureStorageError.keyNotFound
         }
-        return KeyMetadata(type: type, publicKey: pubData)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric)
     }
 
     @available(iOS 26.0, *)
@@ -745,13 +777,13 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @available(iOS 26.0, *)
-    private static func persistKem(key: PQKemKey, type: String, alias: String) throws {
+    private static func persistKem(key: PQKemKey, type: String, alias: String, requireBiometric: Bool) throws {
         // public first (see persist): keeps a failed private write healable instead of orphaning
         let pubStatus = upsertKeychain(
             account: kemPublicAccount(for: alias),
             data: key.publicKeyBytes,
             attrs: [
-                kSecAttrGeneric as String: Data(type.utf8),
+                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric),
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
         )
@@ -776,10 +808,10 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let item = result as? [String: Any],
               let pubData = item[kSecValueData as String] as? Data,
               let typeData = item[kSecAttrGeneric as String] as? Data,
-              let type = String(data: typeData, encoding: .utf8) else {
+              let decoded = decodeGeneric(typeData) else {
             throw PQSecureStorageError.keyNotFound
         }
-        return KeyMetadata(type: type, publicKey: pubData)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric)
     }
 
     @available(iOS 26.0, *)

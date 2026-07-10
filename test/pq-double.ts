@@ -54,7 +54,7 @@ export class PQSecureStorageDouble {
     }
 
     // asymmetric ML-KEM
-    async generateKemKeyPair(o: { keyAlias: string; type: KemType }) {
+    async generateKemKeyPair(o: { keyAlias: string; type: KemType; requireBiometric?: boolean }) {
         const { publicKey, secretKey } = kemOf(o.type).keygen();
         this.kemKeys.set(o.keyAlias, { type: o.type, secretKey, publicKey });
         return { publicKey: b64(publicKey) };

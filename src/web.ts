@@ -129,7 +129,7 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         };
     }
 
-    async generateKeyPair(options: { keyAlias: string; type: SignatureType; overwrite?: boolean }): Promise<{ publicKey: string }> {
+    async generateKeyPair(options: { keyAlias: string; type: SignatureType; overwrite?: boolean; requireBiometric?: boolean }): Promise<{ publicKey: string }> {
         const alias = this.safeAlias(options.keyAlias);
         if (!options.overwrite && this.store.getItem(`pqss.sign.${alias}`) !== null) {
             throw this.unavailable('Alias already exists');
@@ -164,7 +164,7 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         return { plaintext: toB64(this.aesOpen(key, fromB64(options.data))) };
     }
 
-    async generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boolean }): Promise<{ publicKey: string }> {
+    async generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boolean; requireBiometric?: boolean }): Promise<{ publicKey: string }> {
         const alias = this.safeAlias(options.keyAlias);
         if (!options.overwrite && this.store.getItem(`pqss.kem.${alias}`) !== null) {
             throw this.unavailable('Alias already exists');
