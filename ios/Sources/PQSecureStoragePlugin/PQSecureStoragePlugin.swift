@@ -247,6 +247,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let alias = call.getString("keyAlias"), let type = call.getString("type") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
+        guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
         guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" else {
             return call.reject("Unsupported key type", "E_UNSUPPORTED")
@@ -280,13 +281,16 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 case .failure:
                     call.reject("Authentication failed", "E_AUTH_FAILED")
                 case .success(let ctx):
+                    // prove the biometric bound to the existing key when possible. If it's gone or
+                    // invalidated (half-written alias, or enrollment change), the sign throws --
+                    // still regenerate, since the user authenticated and the old key is unusable.
+                    // authenticate() already blocks a silent bridge caller (it can't pass biometry).
                     do {
                         _ = try Self.loadKey(alias: alias, context: ctx).sign(Data([0]))
-                        doGenerate()
                     } catch {
-                        os_log("overwrite auth failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
-                        call.reject("Authentication failed", "E_AUTH_FAILED")
+                        os_log("overwrite: existing key unusable, regenerating: %{private}@", log: vcpLog, type: .info, String(describing: error))
                     }
+                    doGenerate()
                 }
             }
         } else {
@@ -298,6 +302,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let alias = call.getString("keyAlias") else {
             return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         }
+        guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
         do {
             // reads the plain, non-gated public Keychain entry -- never touches the SEP key
@@ -316,6 +321,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let raw = Data(base64Encoded: dataStr) else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
+        guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
         guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" else {
             return call.reject("Unsupported key type", "E_UNSUPPORTED")
@@ -358,6 +364,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let raw = Data(base64Encoded: dataStr) else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
+        guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         do {
             let key = try Self.loadOrCreateAesKey(alias: alias)
             let sealed = try AES.GCM.seal(raw, using: key)
@@ -376,6 +383,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let raw = Data(base64Encoded: dataStr) else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
+        guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         do {
             let key = try Self.loadAesKey(alias: alias)
             let box = try AES.GCM.SealedBox(combined: raw)
@@ -395,6 +403,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let alias = call.getString("keyAlias"), let type = call.getString("type") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
+        guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
         guard type == "PQC_MLKEM_768" || type == "PQC_MLKEM_1024" else {
             return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
@@ -402,17 +411,33 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
 
         let overwrite = call.getBool("overwrite") ?? false
-        if !overwrite && Self.kemAliasExists(alias) {
+        let exists = Self.kemAliasExists(alias)
+        if !overwrite && exists {
             return call.reject("Alias already exists", "E_ALIAS_EXISTS")
         }
-        do {
-            let access = try Self.makeSepAccessControl()
-            let key = try PQKemKey.generate(type: type, accessControl: access)
-            try Self.persistKem(key: key, type: type, alias: alias, overwrite: overwrite)
-            call.resolve(["publicKey": key.publicKeyBytes.base64EncodedString()])
-        } catch {
-            os_log("generateKemKeyPair failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
-            call.reject("KEM key generation failed", "E_KEYGEN")
+        let doGenerate: () -> Void = {
+            do {
+                let access = try Self.makeSepAccessControl()
+                let key = try PQKemKey.generate(type: type, accessControl: access)
+                try Self.persistKem(key: key, type: type, alias: alias, overwrite: true)
+                call.resolve(["publicKey": key.publicKeyBytes.base64EncodedString()])
+            } catch {
+                os_log("generateKemKeyPair failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+                call.reject("KEM key generation failed", "E_KEYGEN")
+            }
+        }
+        if exists {
+            // destructive overwrite of a live KEM key: require a real biometric first, so a silent
+            // bridge caller can't replace it (every ciphertext addressed to the old key would become
+            // undecryptable). Mirrors the signing gate and Android's prompt-on-overwrite.
+            Self.authenticate(reason: "Authenticate to replace your key") { result in
+                switch result {
+                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .success: doGenerate()
+                }
+            }
+        } else {
+            doGenerate()
         }
     }
 
@@ -420,6 +445,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let alias = call.getString("keyAlias") else {
             return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         }
+        guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         do {
             let meta = try Self.loadKemMetadata(alias: alias)
             call.resolve(["publicKey": meta.publicKey.base64EncodedString()])
@@ -461,6 +487,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let frame = Data(base64Encoded: dataStr) else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
+        guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
         let ctLen: Int
         switch type {
@@ -529,6 +556,16 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 completion(.failure(.authFailed))
             }
         }
+    }
+
+    // same charset/length/reserved-prefix rule as Android's safeAlias. Dots are disallowed so a
+    // signing alias like "X.kem" can't collide with the KEM account for alias "X" (".pub"/".kem.pub"
+    // account suffixes), and so a caller can't squat internal ("__pq...") entries.
+    private static let aliasAllowed = CharacterSet(charactersIn:
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+    private static func validAlias(_ alias: String) -> Bool {
+        guard (1...64).contains(alias.count), !alias.hasPrefix("__pq") else { return false }
+        return alias.unicodeScalars.allSatisfy { aliasAllowed.contains($0) }
     }
 
     @available(iOS 26.0, *)
@@ -804,9 +841,11 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             if status == errSecSuccess { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
         }
 
-        // probe the existing item's tier WITHOUT prompting to decide whether a biometric is needed
+        // probe the existing item's tier WITHOUT prompting to decide whether a biometric is needed.
+        // UIFail (NOT UISkip) so a biometric item returns errSecInteractionNotAllowed instead of
+        // being silently skipped as errSecItemNotFound.
         var probe = matchQuery
-        probe[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        probe[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
         switch SecItemCopyMatching(probe as CFDictionary, nil) {
         case errSecItemNotFound:
             let status = SecItemAdd(addQuery as CFDictionary, nil)
@@ -865,34 +904,37 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let key = call.getString("key") else {
             call.reject("Missing key", "E_MISSING_PARAMS"); return
         }
-        // don't prompt for a no-op: metadata check (skip UI) tells us if the item is even there
-        let existsQuery: [String: Any] = [
+        // UIFail probe tells us the tier without prompting: NotFound = absent, Success = silent,
+        // InteractionNotAllowed = biometric
+        let probe: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
             kSecAttrAccount as String: key,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
-        if SecItemCopyMatching(existsQuery as CFDictionary, nil) == errSecItemNotFound {
-            call.resolve(); return
+        let del: () -> Void = {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: Self.ssService,
+                kSecAttrAccount as String: key,
+            ]
+            let status = SecItemDelete(query as CFDictionary)
+            if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Remove failed", "E_DECRYPT") }
         }
-        // destructive: confirm with biometrics so a malicious bridge caller can't delete in silence
-        Self.authenticate(reason: "Authenticate to delete your secret") { result in
-            switch result {
-            case .failure:
-                call.reject("Authentication failed", "E_AUTH_FAILED")
-            case .success:
-                let query: [String: Any] = [
-                    kSecClass as String: kSecClassGenericPassword,
-                    kSecAttrService as String: Self.ssService,
-                    kSecAttrAccount as String: key,
-                ]
-                let status = SecItemDelete(query as CFDictionary)
-                if status == errSecSuccess || status == errSecItemNotFound {
-                    call.resolve()
-                } else {
-                    call.reject("Remove failed", "E_DECRYPT")
+        switch SecItemCopyMatching(probe as CFDictionary, nil) {
+        case errSecItemNotFound:
+            call.resolve()
+        case errSecInteractionNotAllowed:
+            // biometric item: confirm so a silent bridge caller can't delete it
+            Self.authenticate(reason: "Authenticate to delete your secret") { result in
+                switch result {
+                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .success: del()
                 }
             }
+        default:
+            // silent item: delete without a prompt (matches Android / the @evva drop-in)
+            del()
         }
     }
 
@@ -900,14 +942,15 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let key = call.getString("key") else {
             call.reject("Missing key", "E_MISSING_PARAMS"); return
         }
-        // metadata-only, skip auth UI. A gated item that exists returns errSecInteractionNotAllowed
+        // metadata-only, no prompt. UIFail so a biometric item reports errSecInteractionNotAllowed
+        // (exists) rather than being silently skipped (UISkip would report it as absent).
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
             kSecAttrAccount as String: key,
             kSecReturnData as String: false,
             kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
         let status = SecItemCopyMatching(query as CFDictionary, nil)
         call.resolve(["exists": status == errSecSuccess || status == errSecInteractionNotAllowed])
@@ -933,32 +976,37 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func clear(_ call: CAPPluginCall) {
-        // nothing stored -> nothing to protect, don't prompt
-        let anyQuery: [String: Any] = [
+        let wipe: () -> Void = {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: Self.ssService,
+            ]
+            let status = SecItemDelete(query as CFDictionary)
+            if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Clear failed", "E_DECRYPT") }
+        }
+        // reading data with UIFail across the whole service reveals the tier mix WITHOUT prompting:
+        // NotFound = empty, InteractionNotAllowed = at least one biometric item, Success = all silent
+        let probe: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
-        if SecItemCopyMatching(anyQuery as CFDictionary, nil) == errSecItemNotFound {
-            call.resolve(); return
-        }
-        Self.authenticate(reason: "Authenticate to erase secure storage") { result in
-            switch result {
-            case .failure:
-                call.reject("Authentication failed", "E_AUTH_FAILED")
-            case .success:
-                let query: [String: Any] = [
-                    kSecClass as String: kSecClassGenericPassword,
-                    kSecAttrService as String: Self.ssService,
-                ]
-                let status = SecItemDelete(query as CFDictionary)
-                if status == errSecSuccess || status == errSecItemNotFound {
-                    call.resolve()
-                } else {
-                    call.reject("Clear failed", "E_DECRYPT")
+        switch SecItemCopyMatching(probe as CFDictionary, nil) {
+        case errSecItemNotFound:
+            call.resolve()
+        case errSecInteractionNotAllowed:
+            // at least one biometric item: prompt once before wiping
+            Self.authenticate(reason: "Authenticate to erase secure storage") { result in
+                switch result {
+                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .success: wipe()
                 }
             }
+        default:
+            // all silent (or unreadable): wipe without a prompt, so a no-biometric device isn't locked out
+            wipe()
         }
     }
 }

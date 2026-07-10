@@ -83,7 +83,11 @@ class PQSecureStoragePlugin : Plugin() {
         // KeyMint implements it (per-key attestation). See definitions.ts.
         val hw = secureHardwareAvailable()
         ret.put("hardwareBacked", hw)
-        ret.put("biometricGated", hw)
+        // biometricGated is about biometric availability/enrollment, not the TEE: a device can have
+        // secure hardware but no enrolled biometric
+        val bioAvail = BiometricManager.from(context)
+            .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
+        ret.put("biometricGated", bioAvail)
         ret.put("supportedVariants", if (ok) listOf("PQC_MLDSA_65", "PQC_MLDSA_87") else emptyList<String>())
         // ML-KEM works via software (BouncyCastle) on any API; the private key is wrapped by a
         // Keystore AES key. AndroidKeyStore does not expose ML-KEM to apps, so it is NOT in the SEP.
@@ -120,11 +124,17 @@ class PQSecureStoragePlugin : Plugin() {
         doGenerateSigningKey(alias, alg, call)
     }
 
+    @Volatile private var hwCache: Boolean? = null
+
     // generate a throwaway Keystore AES key and read its real security level: true only if the TEE
-    // (or StrongBox) actually backs it, false if KeyMint fell back to the software keystore
+    // (or StrongBox) actually backs it, false if KeyMint fell back to the software keystore. Cached
+    // and serialized: the answer never changes at runtime, so this is not a keygen on every call and
+    // two callers can't race the shared probe alias.
+    @Synchronized
     private fun secureHardwareAvailable(): Boolean {
+        hwCache?.let { return it }
         val probeAlias = "__pq_hw_probe__"
-        return try {
+        val hw = try {
             val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
             kg.init(
                 KeyGenParameterSpec.Builder(probeAlias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
@@ -137,17 +147,19 @@ class PQSecureStoragePlugin : Plugin() {
             val info = SecretKeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
                 .getKeySpec(key, KeyInfo::class.java) as KeyInfo
             // minSdk 34 -> securityLevel is always available (API 31+)
-            val hw = info.securityLevel != KeyProperties.SECURITY_LEVEL_SOFTWARE
+            info.securityLevel != KeyProperties.SECURITY_LEVEL_SOFTWARE
+        } catch (e: Exception) {
+            logd("hw probe failed", e)
+            false
+        } finally {
             try {
                 KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }.deleteEntry(probeAlias)
             } catch (e: Exception) {
                 logd("hw probe cleanup failed", e)
             }
-            hw
-        } catch (e: Exception) {
-            logd("hw probe failed", e)
-            false
         }
+        hwCache = hw
+        return hw
     }
 
     private fun doGenerateSigningKey(alias: String, alg: String, call: PluginCall) {
@@ -185,9 +197,15 @@ class PQSecureStoragePlugin : Plugin() {
         try {
             val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
             val priv = ks.getKey(alias, null) as? java.security.PrivateKey
-                ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
+                ?: return after() // no live key to protect (e.g. half-written alias) -> allow overwrite
             val signer = Signature.getInstance(priv.algorithm)
-            signer.initSign(priv)
+            try {
+                signer.initSign(priv)
+            } catch (e: KeyPermanentlyInvalidatedException) {
+                // old key already dead (enrollment changed): nothing to protect, allow the overwrite
+                logd("existing key invalidated, allowing overwrite for alias=$alias", e)
+                return after()
+            }
             val cryptoObject = BiometricPrompt.CryptoObject(signer)
             hostActivity.runOnUiThread {
                 val settled = AtomicBoolean(false)
@@ -198,6 +216,9 @@ class PQSecureStoragePlugin : Plugin() {
                             // a real op with the bound signer: a forged callback can't produce it
                             val s = result.cryptoObject!!.signature!!
                             s.update(byteArrayOf(0)); s.sign()
+                            after()
+                        } catch (e: KeyPermanentlyInvalidatedException) {
+                            logd("existing key invalidated mid-auth, allowing overwrite for alias=$alias", e)
                             after()
                         } catch (e: Exception) {
                             logd("overwrite auth failed for alias=$alias", e)
@@ -293,6 +314,9 @@ class PQSecureStoragePlugin : Plugin() {
                             val ret = JSObject()
                             ret.put("signature", Base64.encodeToString(boundSigner.sign(), Base64.NO_WRAP))
                             call.resolve(ret)
+                        } catch (e: KeyPermanentlyInvalidatedException) {
+                            logd("sign: key invalidated by enrollment change for alias=$alias", e)
+                            call.reject("Biometric enrollment changed; key invalidated", "E_KEY_INVALIDATED")
                         } catch (e: Exception) {
                             logd("sign failed for alias=$alias", e)
                             call.reject("Signing failed", "E_SIGN")
@@ -326,6 +350,9 @@ class PQSecureStoragePlugin : Plugin() {
                     }
                 }
             }
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            logd("sign setup: key invalidated by enrollment change for alias=$alias", e)
+            call.reject("Biometric enrollment changed; key invalidated", "E_KEY_INVALIDATED")
         } catch (e: Exception) {
             logd("sign setup failed for alias=$alias", e)
             call.reject("Signing failed", "E_SIGN")
@@ -893,6 +920,19 @@ class PQSecureStoragePlugin : Plugin() {
         val meta = storeMeta()
         val pubB64 = meta.getString("pub", null)
         if (meta.contains("priv") && pubB64 != null) {
+            // a bio write after a biometric enrollment change encapsulates to a keypair whose
+            // private can never be unwrapped again -> the item would be permanently unreadable.
+            // Detect the dead wrap key up front and reject instead of writing garbage.
+            try {
+                val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                (ks.getKey(ssMasterAlias, null) as? SecretKey)?.let {
+                    Cipher.getInstance("AES/GCM/NoPadding").init(Cipher.ENCRYPT_MODE, it)
+                }
+            } catch (e: KeyPermanentlyInvalidatedException) {
+                return call.reject("Biometric enrollment changed; store key invalidated", "E_KEY_INVALIDATED")
+            } catch (e: Exception) {
+                // other init errors (needs auth etc.) mean the key is still usable -> proceed
+            }
             try {
                 val rawPub = Base64.decode(pubB64, Base64.DEFAULT)
                 if (!verifyPubTag("ss:master", rawPub, meta.getString("tag", null))) {
@@ -1013,7 +1053,11 @@ class PQSecureStoragePlugin : Plugin() {
             // re-check under the gate in case another thread just provisioned
             val pb = meta.getString("pub_s", null)
             if (meta.contains("priv_s") && pb != null) {
-                return mlkemPublicFromRaw(Base64.decode(pb, Base64.DEFAULT), NISTObjectIdentifiers.id_alg_ml_kem_1024)
+                val rawPub = Base64.decode(pb, Base64.DEFAULT)
+                if (!verifyPubTag("ss:silent", rawPub, meta.getString("tag_s", null))) {
+                    call.reject("Store key integrity check failed", "E_TAMPERED"); return null
+                }
+                return mlkemPublicFromRaw(rawPub, NISTObjectIdentifiers.id_alg_ml_kem_1024)
             }
             val kpg = KeyPairGenerator.getInstance("ML-KEM", bc)
             kpg.initialize(MLKEMParameterSpec.ml_kem_1024, SecureRandom())
@@ -1141,7 +1185,7 @@ class PQSecureStoragePlugin : Plugin() {
         val item = parseStoreItem(key, stored)
         // silent or unreadable (corrupt) items delete without a prompt
         if (item == null || item.mode == "s") {
-            storeItems().edit().remove(key).apply(); call.resolve(); return
+            storeItems().edit().remove(key).commit(); call.resolve(); return
         }
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
@@ -1149,7 +1193,7 @@ class PQSecureStoragePlugin : Plugin() {
         val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
         val wrapKey = ks.getKey(ssMasterAlias, null) as? SecretKey
         if (privB64 == null || wrapKey == null) {
-            storeItems().edit().remove(key).apply(); call.resolve(); return
+            storeItems().edit().remove(key).commit(); call.resolve(); return
         }
         try {
             val privBlob = Base64.decode(privB64, Base64.DEFAULT)
@@ -1159,13 +1203,13 @@ class PQSecureStoragePlugin : Plugin() {
             authenticateCipher(hostActivity, cipher, "Authenticate to delete your secret", call) { boundCipher ->
                 // unwrap with the bound cipher so a forged callback can't trigger the delete
                 boundCipher.doFinal(wrapped)
-                storeItems().edit().remove(key).apply()
+                storeItems().edit().remove(key).commit()
                 call.resolve()
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
             // key already unusable, the value is unreadable anyway -> allow the delete
             logd("removeItem: store key invalidated, removing", e)
-            storeItems().edit().remove(key).apply()
+            storeItems().edit().remove(key).commit()
             call.resolve()
         } catch (e: Exception) {
             logd("removeItem failed for key=$key", e)
@@ -1228,8 +1272,10 @@ class PQSecureStoragePlugin : Plugin() {
     }
 
     private fun doClearWipe() {
-        storeItems().edit().clear().apply()
-        storeMeta().edit().clear().apply()
+        // commit() the prefs wipe BEFORE deleting the Keystore keys. apply() is async, so a crash
+        // could leave items on disk while the keys are already gone -> unreadable E_TAMPERED forever.
+        storeItems().edit().clear().commit()
+        storeMeta().edit().clear().commit()
         try {
             val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
             for (a in listOf(ssMasterAlias, ssSilentAlias, ssMacAlias)) {
