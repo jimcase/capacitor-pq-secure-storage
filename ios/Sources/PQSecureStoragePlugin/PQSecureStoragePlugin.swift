@@ -663,8 +663,11 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     // HMAC key for the public-key integrity tag. Load-or-create, silent, device-only. Unlike
     // Android (Keystore/hardware HMAC key), this key lives in the Keychain (readable in-process): the
     // tag defends against offline/backup tampering of the stored public key, not an in-process attacker.
-    private static func pubTagKey() throws -> SymmetricKey {
-        var query = baseQuery(account: "__pq_pubtag_hmac")
+    // load-or-create a 256-bit Keychain key (silent, device-only). Used for the internal HMAC/name
+    // keys. These live in the Keychain (readable in-process), so they defend against offline/backup
+    // tampering and disclosure, not an in-process attacker.
+    private static func symmetricKey(account: String) throws -> SymmetricKey {
+        var query = baseQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var out: AnyObject?
@@ -673,7 +676,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         let key = SymmetricKey(size: .bits256)
         let raw = key.withUnsafeBytes { Data($0) }
-        var add = baseQuery(account: "__pq_pubtag_hmac")
+        var add = baseQuery(account: account)
         add[kSecValueData as String] = raw
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(add as CFDictionary, nil)
@@ -681,7 +684,27 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         return key
     }
     private static func pubTag(_ pub: Data) throws -> Data {
-        Data(HMAC<SHA256>.authenticationCode(for: pub, using: try pubTagKey()))
+        Data(HMAC<SHA256>.authenticationCode(for: pub, using: try symmetricKey(account: "__pq_pubtag_hmac")))
+    }
+
+    // store item-name confidentiality (matches Android): the account is a keyed HMAC of the name so
+    // a Keychain dump reveals no names; encName is the AES-GCM-encrypted real name, kept in the
+    // item's generic attr so keys() can still enumerate the real names for the app.
+    static let nameEncAccount = "__pq_name_enc"
+    static let nameTagAccount = "__pq_nametag_hmac"
+    private static func nameTag(_ name: String) throws -> String {
+        Data(HMAC<SHA256>.authenticationCode(for: Data(name.utf8), using: try symmetricKey(account: nameTagAccount))).base64EncodedString()
+    }
+    private static func encName(_ name: String) throws -> Data {
+        let sealed = try AES.GCM.seal(Data(name.utf8), using: try symmetricKey(account: nameEncAccount))
+        guard let combined = sealed.combined else { throw PQSecureStorageError.badCiphertext }
+        return combined
+    }
+    private static func decName(_ blob: Data) throws -> String {
+        let box = try AES.GCM.SealedBox(combined: blob)
+        let plain = try AES.GCM.open(box, using: try symmetricKey(account: nameEncAccount))
+        guard let s = String(data: plain, encoding: .utf8) else { throw PQSecureStorageError.badCiphertext }
+        return s
     }
 
     private static func baseQuery(account: String) -> [String: Any] {
@@ -909,6 +932,16 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let data = value.data(using: .utf8) else {
             call.reject("Invalid value", "E_MISSING_PARAMS"); return
         }
+        // the account is a keyed HMAC of the name (a Keychain dump reveals no names); encName carries
+        // the encrypted real name so keys() can still enumerate them
+        let account: String
+        let encodedName: Data
+        do {
+            account = try Self.nameTag(key)
+            encodedName = try Self.encName(key)
+        } catch {
+            call.reject("Store failed", "E_ENCRYPT"); return
+        }
         // per-item: requireBiometric -> biometry ACL (reads prompt); else plain accessibility
         // (silent reads). Both use the caller's accessibility class (default WhenUnlockedThisDeviceOnly).
         let requireBiometric = call.getBool("requireBiometric") ?? false
@@ -931,10 +964,11 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         let matchQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
-            kSecAttrAccount as String: key,
+            kSecAttrAccount as String: account,
         ]
         var addQuery = matchQuery
         addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrGeneric as String] = encodedName
         for (k, v) in accessAttr { addQuery[k] = v }
 
         let create: () -> Void = {
@@ -994,12 +1028,15 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         // the biometry-gated read blocks on the system prompt, so run it off the main thread
         DispatchQueue.global(qos: .userInitiated).async {
+            guard let account = try? Self.nameTag(key) else {
+                call.reject("Read failed", "E_DECRYPT"); return
+            }
             let context = LAContext()
             context.localizedReason = "Authenticate to read your secret"
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: Self.ssService,
-                kSecAttrAccount as String: key,
+                kSecAttrAccount as String: account,
                 kSecReturnData as String: true,
                 kSecMatchLimit as String: kSecMatchLimitOne,
                 kSecUseAuthenticationContext as String: context,
@@ -1027,13 +1064,16 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let key = call.getString("key") else {
             call.reject("Missing key", "E_MISSING_PARAMS"); return
         }
+        guard let account = try? Self.nameTag(key) else {
+            call.reject("Remove failed", "E_DECRYPT"); return
+        }
         // UIFail + return-data probe tells us the tier without prompting: NotFound = absent,
         // Success = silent, InteractionNotAllowed = biometric. Data must be requested so the biometry
         // ACL is exercised (a metadata-only match could read as silent and delete a bio item silently).
         let probe: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
-            kSecAttrAccount as String: key,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
@@ -1043,7 +1083,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: Self.ssService,
-                kSecAttrAccount as String: key,
+                kSecAttrAccount as String: account,
             ]
             let status = SecItemDelete(query as CFDictionary)
             if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Remove failed", "E_DECRYPT") }
@@ -1072,12 +1112,15 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let key = call.getString("key") else {
             call.reject("Missing key", "E_MISSING_PARAMS"); return
         }
+        guard let account = try? Self.nameTag(key) else {
+            call.resolve(["exists": false]); return
+        }
         // metadata-only, no prompt. UIFail so a biometric item reports errSecInteractionNotAllowed
         // (exists) rather than being silently skipped (UISkip would report it as absent).
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
-            kSecAttrAccount as String: key,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: false,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
@@ -1099,7 +1142,10 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         var result: [String] = []
         if status == errSecSuccess, let items = out as? [[String: Any]] {
             for item in items {
-                if let acct = item[kSecAttrAccount as String] as? String { result.append(acct) }
+                // the account is the HMAC tag; the real name is the encrypted generic attr
+                if let enc = item[kSecAttrGeneric as String] as? Data, let name = try? Self.decName(enc) {
+                    result.append(name)
+                }
             }
         }
         call.resolve(["keys": result])
@@ -1112,6 +1158,10 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrService as String: Self.ssService,
             ]
             let status = SecItemDelete(query as CFDictionary)
+            // also drop the store's name keys (a later setItem regenerates them)
+            for acct in [Self.nameEncAccount, Self.nameTagAccount] {
+                SecItemDelete(Self.baseQuery(account: acct) as CFDictionary)
+            }
             if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Clear failed", "E_DECRYPT") }
         }
         // reading data with UIFail across the whole service reveals the tier mix WITHOUT prompting:

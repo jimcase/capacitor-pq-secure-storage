@@ -223,6 +223,11 @@ Document the choice in the security policy.
 - [ ] The at-rest key is a Secure Enclave key: querying it with `kSecReturnData` returns nothing (non-extractable), only `kSecReturnRef` works.
 - [ ] `getPublicKey`/`getKemPublicKey` reject `E_TAMPERED` if the stored public entry is modified out of band.
 
+## iOS item-name confidentiality (device)
+
+- [ ] `setItem("secret-name", ...)` then `getItem("secret-name")` round-trips; `keys()` returns "secret-name".
+- [ ] A raw Keychain dump (Keychain-dumper or `security` on a jailbroken/dev device) shows the `kSecAttrAccount` is an HMAC (base64), NOT the plaintext name.
+
 ## Acceptance Criteria
 
 - [ ] Android step 4: Attestation chain confirms StrongBox or TEE.

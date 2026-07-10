@@ -17,6 +17,8 @@ All notable changes to this project are documented here. The format is based on
 - Android: `getHardwareCapabilities` probes the real ML-DSA Keystore algorithm instead of gating on
   a fixed API level.
 - iOS: public keys carry an HMAC integrity tag, verified on read (`E_TAMPERED`), matching Android.
+- iOS: store item names are no longer stored in the clear; the Keychain account is a keyed HMAC of
+  the name (matching Android), with the real name kept encrypted so `keys()` still enumerates them.
 
 ### Changed
 
@@ -28,6 +30,8 @@ All notable changes to this project are documented here. The format is based on
 - iOS at-rest now uses a per-alias Secure Enclave P-256 key with ECIES; the blob format changed
   from AES-GCM combined. The private key is non-extractable in the enclave.
 - iOS public-key metadata attribute changed from `type:bio` to `type:bio:tag`.
+- iOS store items are keyed by an HMAC of the name (was the plain name), and carry the encrypted
+  name in the generic attr.
 
 ## [0.1.0] - 2026-07-07
 
