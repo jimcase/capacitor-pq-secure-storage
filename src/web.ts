@@ -201,9 +201,9 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         return { plaintext: toB64(plain) };
     }
 
-    // requireBiometric is accepted for API parity but ignored: the web fallback has no biometric,
-    // so reads are always silent regardless of the flag
-    async setItem(options: { key: string; value: string; requireBiometric?: boolean }): Promise<void> {
+    // requireBiometric/accessibility are accepted for API parity but ignored: the web fallback has
+    // no biometric or Keychain, so reads are always silent
+    async setItem(options: { key: string; value: string; requireBiometric?: boolean; accessibility?: string }): Promise<void> {
         // bind the item name as AEAD associated data so a value can't be moved to another key
         this.put(
             `pqss.store.${options.key}`,

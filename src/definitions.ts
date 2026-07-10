@@ -1,6 +1,19 @@
 export type SignatureType = 'PQC_MLDSA_65' | 'PQC_MLDSA_87';
 export type KemType = 'PQC_MLKEM_768' | 'PQC_MLKEM_1024';
 
+/**
+ * When a stored item is reachable, mapped to the iOS Keychain `kSecAttrAccessible*` classes.
+ * `*ThisDeviceOnly` values never leave the device (no backup/restore to another device).
+ * iOS honors this per item; on Android the store is always Keystore-backed and this-device-only,
+ * so the value is accepted but does not change per-item behavior (accessibility is an iOS concept).
+ */
+export type Accessibility =
+    | 'whenUnlocked'
+    | 'afterFirstUnlock'
+    | 'whenPasscodeSetThisDeviceOnly'
+    | 'whenUnlockedThisDeviceOnly'
+    | 'afterFirstUnlockThisDeviceOnly';
+
 export interface HardwareCapabilities {
     /** Whether post-quantum operations are available (hardware OR software fallback). */
     supportsPqc: boolean;
@@ -94,8 +107,19 @@ export interface PQSecureStoragePlugin {
      * WARNING: a silent item is readable by any code on the JS bridge after device unlock (no
      * prompt), so for seed-tier material (mnemonic, signing seed) pass `requireBiometric: true`.
      * The silent default exists for drop-in migration, not because silent is safe for secrets.
+     *
+     * `accessibility` (default `whenUnlockedThisDeviceOnly`) sets when the item is reachable. It is
+     * honored per item on iOS; on Android the store is always Keystore-backed this-device-only.
+     *
+     * On Android the item NAME is not stored in the clear: the prefs key is a keyed hash of the
+     * name, so a prefs reader sees neither the values nor the names.
      */
-    setItem(options: { key: string; value: string; requireBiometric?: boolean }): Promise<void>;
+    setItem(options: {
+        key: string;
+        value: string;
+        requireBiometric?: boolean;
+        accessibility?: Accessibility;
+    }): Promise<void>;
 
     /**
      * Read a stored secret. Prompts for biometrics only if the item was stored with

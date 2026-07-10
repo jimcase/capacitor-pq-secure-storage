@@ -391,7 +391,7 @@ Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics.
 ### setItem(...)
 
 ```typescript
-setItem(options: { key: string; value: string; requireBiometric?: boolean; }) => Promise<void>
+setItem(options: { key: string; value: string; requireBiometric?: boolean; accessibility?: Accessibility; }) => Promise<void>
 ```
 
 Store a secret string under a key. `value` is stored verbatim. Silent write.
@@ -407,9 +407,15 @@ WARNING: a silent item is readable by any code on the JS bridge after device unl
 prompt), so for seed-tier material (mnemonic, signing seed) pass `requireBiometric: true`.
 The silent default exists for drop-in migration, not because silent is safe for secrets.
 
-| Param         | Type                                                                     |
-| ------------- | ------------------------------------------------------------------------ |
-| **`options`** | <code>{ key: string; value: string; requireBiometric?: boolean; }</code> |
+`accessibility` (default `whenUnlockedThisDeviceOnly`) sets when the item is reachable. It is
+honored per item on iOS; on Android the store is always Keystore-backed this-device-only.
+
+On Android the item NAME is not stored in the clear: the prefs key is a keyed hash of the
+name, so a prefs reader sees neither the values nor the names.
+
+| Param         | Type                                                                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **`options`** | <code>{ key: string; value: string; requireBiometric?: boolean; accessibility?: <a href="#accessibility">Accessibility</a>; }</code> |
 
 --------------------
 
@@ -519,6 +525,16 @@ the store is already empty. Web fallback has no biometric, so silent.
 
 <code>'PQC_MLKEM_768' | 'PQC_MLKEM_1024'</code>
 
+
+#### Accessibility
+
+When a stored item is reachable, mapped to the iOS Keychain `kSecAttrAccessible*` classes.
+`*ThisDeviceOnly` values never leave the device (no backup/restore to another device).
+iOS honors this per item; on Android the store is always Keystore-backed and this-device-only,
+so the value is accepted but does not change per-item behavior (accessibility is an iOS concept).
+
+<code>'whenUnlocked' | 'afterFirstUnlock' | 'whenPasscodeSetThisDeviceOnly' | 'whenUnlockedThisDeviceOnly' | 'afterFirstUnlockThisDeviceOnly'</code>
+
 </docgen-api>
 
 ## Security notes
@@ -536,6 +552,13 @@ the store is already empty. Web fallback has no biometric, so silent.
   over its key name, biometric mode, and ciphertext, verified before decrypting. A prefs writer
   cannot inject a chosen value, move a value to another key, or downgrade a biometric item to
   silent; all reject with `E_TAMPERED`.
+- **Item-name confidentiality (Android).** The SharedPreferences key is a Keystore-keyed hash of
+  the item name, and the real name is stored AES-encrypted (Keystore key) inside the value. So a
+  prefs reader (root/backup) sees neither the values nor the names (e.g. `seed-phrase`); `keys()`
+  still lists real names via the in-TEE key. iOS keeps names in the Keychain, which encrypts them.
+- **Accessibility.** `setItem` takes an `accessibility` option (default `whenUnlockedThisDeviceOnly`)
+  mapped to the iOS `kSecAttrAccessible*` classes, per item. On Android the store is always
+  Keystore-backed and this-device-only, so the option is accepted but does not vary per item.
 - **Alias validation.** Key aliases are restricted to `[A-Za-z0-9_-]` and cannot start with the
   plugin's reserved prefix, so a caller cannot clobber the plugin's own internal Keystore entries
   (`E_BAD_ALIAS`).

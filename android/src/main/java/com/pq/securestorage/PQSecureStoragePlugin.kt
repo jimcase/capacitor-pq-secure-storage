@@ -718,6 +718,60 @@ class PQSecureStoragePlugin : Plugin() {
         return mac.doFinal()
     }
 
+    // ---- item-name confidentiality ----
+    // The SharedPreferences key is a keyed hash of the item name (not the plaintext), so a prefs
+    // reader never sees names like "seed-phrase". The real name is also stored AES-encrypted inside
+    // the value so keys() can still list them. Both keys live in the TEE.
+    private val ssNameKeyAlias = "__pq_ss_namekey__"
+
+    private fun getOrCreateStoreNameKey(): SecretKey {
+        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        (ks.getKey(ssNameKeyAlias, null) as? SecretKey)?.let { return it }
+        val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+        kg.init(
+            KeyGenParameterSpec.Builder(ssNameKeyAlias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+        )
+        return kg.generateKey()
+    }
+
+    // deterministic keyed hash -> the prefs key. Same name always maps to the same tag (so lookups
+    // work), but the TEE HMAC key means it can't be reversed or forged.
+    private fun nameTag(name: String): String {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(getOrCreateStoreMacKey())
+        macPut(mac, "name".toByteArray(Charsets.UTF_8)) // domain-separate from storeMac
+        macPut(mac, name.toByteArray(Charsets.UTF_8))
+        return Base64.encodeToString(mac.doFinal(), Base64.NO_WRAP)
+    }
+
+    private fun encName(name: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateStoreNameKey())
+        return Base64.encodeToString(cipher.iv + cipher.doFinal(name.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
+    }
+
+    private fun decName(encB64: String): String {
+        val blob = Base64.decode(encB64, Base64.DEFAULT)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, getOrCreateStoreNameKey(), GCMParameterSpec(128, blob.copyOfRange(0, 12)))
+        return String(cipher.doFinal(blob.copyOfRange(12, blob.size)), Charsets.UTF_8)
+    }
+
+    // extract the mode field without the name / MAC check (only used to decide whether clear() should
+    // prompt; the real integrity check is in parseStoreItem on read)
+    private fun storedMode(stored: String): String {
+        val parts = stored.split(".")
+        return when (parts.size) {
+            4 -> parts[1]
+            3 -> parts[0]
+            else -> "b"
+        }
+    }
+
     // reject aliases that could collide with the plugin's internal Keystore entries (they use a
     // "__pq" prefix and "." suffixes); dots are disallowed so a user alias can never equal an
     // internal suffixed entry like "$alias.aes"/"$alias.kemwrap".
@@ -864,6 +918,14 @@ class PQSecureStoragePlugin : Plugin() {
         val parts = stored.split(".")
         return try {
             when (parts.size) {
+                4 -> {
+                    // encName . mode . frame . mac  (encName is only for keys(); ignored here)
+                    val mode = parts[1]
+                    if (mode != "s" && mode != "b") return null
+                    val frame = Base64.decode(parts[2], Base64.DEFAULT)
+                    val mac = Base64.decode(parts[3], Base64.DEFAULT)
+                    if (MessageDigest.isEqual(mac, storeMac(key, mode, frame))) StoreItem(mode, frame) else null
+                }
                 3 -> {
                     val mode = parts[0]
                     if (mode != "s" && mode != "b") return null
@@ -1113,10 +1175,12 @@ class PQSecureStoragePlugin : Plugin() {
             sharedSecret.fill(0)
         }
         val frame = kemCt + nonce + aead
-        val stored = mode + "." +
+        // encName . mode . frame . mac, stored under a keyed hash of the name (not the name itself)
+        val stored = encName(key) + "." +
+            mode + "." +
             Base64.encodeToString(frame, Base64.NO_WRAP) + "." +
             Base64.encodeToString(storeMac(key, mode, frame), Base64.NO_WRAP)
-        storeItems().edit().putString(key, stored).apply()
+        storeItems().edit().putString(nameTag(key), stored).apply()
     }
 
     // decapsulate the ML-KEM ciphertext with the (already unwrapped) private and open the ChaCha frame
@@ -1145,7 +1209,7 @@ class PQSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun getItem(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
-        val stored = storeItems().getString(key, null)
+        val stored = storeItems().getString(nameTag(key), null)
         if (stored == null) {
             val ret = JSObject(); ret.put("value", JSONObject.NULL); call.resolve(ret); return
         }
@@ -1197,11 +1261,11 @@ class PQSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun removeItem(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
-        val stored = storeItems().getString(key, null) ?: run { call.resolve(); return }
+        val stored = storeItems().getString(nameTag(key), null) ?: run { call.resolve(); return }
         val item = parseStoreItem(key, stored)
         // silent or unreadable (corrupt) items delete without a prompt
         if (item == null || item.mode == "s") {
-            storeItems().edit().remove(key).commit(); call.resolve(); return
+            storeItems().edit().remove(nameTag(key)).commit(); call.resolve(); return
         }
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
@@ -1209,7 +1273,7 @@ class PQSecureStoragePlugin : Plugin() {
         val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
         val wrapKey = ks.getKey(ssMasterAlias, null) as? SecretKey
         if (privB64 == null || wrapKey == null) {
-            storeItems().edit().remove(key).commit(); call.resolve(); return
+            storeItems().edit().remove(nameTag(key)).commit(); call.resolve(); return
         }
         try {
             val privBlob = Base64.decode(privB64, Base64.DEFAULT)
@@ -1219,13 +1283,13 @@ class PQSecureStoragePlugin : Plugin() {
             authenticateCipher(hostActivity, cipher, "Authenticate to delete your secret", call) { boundCipher ->
                 // unwrap with the bound cipher so a forged callback can't trigger the delete
                 boundCipher.doFinal(wrapped)
-                storeItems().edit().remove(key).commit()
+                storeItems().edit().remove(nameTag(key)).commit()
                 call.resolve()
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
             // key already unusable, the value is unreadable anyway -> allow the delete
             logd("removeItem: store key invalidated, removing", e)
-            storeItems().edit().remove(key).commit()
+            storeItems().edit().remove(nameTag(key)).commit()
             call.resolve()
         } catch (e: Exception) {
             logd("removeItem failed for key=$key", e)
@@ -1237,14 +1301,23 @@ class PQSecureStoragePlugin : Plugin() {
     fun hasItem(call: PluginCall) {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
         val ret = JSObject()
-        ret.put("exists", storeItems().contains(key))
+        ret.put("exists", storeItems().contains(nameTag(key)))
         call.resolve(ret)
     }
 
     @PluginMethod
     fun keys(call: PluginCall) {
         val arr = JSArray()
-        for (k in storeItems().all.keys) arr.put(k)
+        // prefs keys are hashed; recover the real names from the encrypted encName field
+        for ((k, v) in storeItems().all) {
+            val stored = v as? String ?: continue
+            val parts = stored.split(".")
+            try {
+                if (parts.size == 4) arr.put(decName(parts[0])) else arr.put(k) // legacy plaintext key
+            } catch (e: Exception) {
+                logd("keys: skip undecodable entry", e)
+            }
+        }
         val ret = JSObject()
         ret.put("keys", arr)
         call.resolve(ret)
@@ -1252,9 +1325,10 @@ class PQSecureStoragePlugin : Plugin() {
 
     @PluginMethod
     fun clear(call: PluginCall) {
-        // prompt once only if the store holds at least one biometric item
-        val anyBio = storeItems().all.any { (k, v) ->
-            (v as? String)?.let { parseStoreItem(k, it)?.mode == "b" } ?: false
+        // prompt once only if the store holds at least one biometric item. The prefs key is a hash
+        // now, so read the mode field directly (this only decides whether to prompt; clear wipes all).
+        val anyBio = storeItems().all.any { (_, v) ->
+            (v as? String)?.let { storedMode(it) == "b" } ?: false
         }
         val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
         val privB64 = storeMeta().getString("priv", null)
@@ -1294,7 +1368,7 @@ class PQSecureStoragePlugin : Plugin() {
         storeMeta().edit().clear().commit()
         try {
             val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-            for (a in listOf(ssMasterAlias, ssSilentAlias, ssMacAlias)) {
+            for (a in listOf(ssMasterAlias, ssSilentAlias, ssMacAlias, ssNameKeyAlias)) {
                 if (ks.containsAlias(a)) ks.deleteEntry(a)
             }
         } catch (e: Exception) {

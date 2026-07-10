@@ -71,6 +71,12 @@ describe('secure storage', () => {
         expect((await ss.getItem({ key: 'seed' })).value).toBe('top-secret');
     });
 
+    it('accepts an accessibility option without breaking the round-trip', async () => {
+        const ss = new SecureStorageDouble();
+        await ss.setItem({ key: 'k', value: 'v', accessibility: 'afterFirstUnlockThisDeviceOnly' });
+        expect((await ss.getItem({ key: 'k' })).value).toBe('v');
+    });
+
     it('silent and biometric items coexist under separate keypairs', async () => {
         const ss = new SecureStorageDouble();
         await ss.setItem({ key: 'silent', value: 'plain', requireBiometric: false });

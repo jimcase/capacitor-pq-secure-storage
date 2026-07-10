@@ -568,6 +568,17 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         return alias.unicodeScalars.allSatisfy { aliasAllowed.contains($0) }
     }
 
+    // map the JS accessibility string to a Keychain protection class (default: strictest)
+    private static func accessibilityClass(_ s: String?) -> CFString {
+        switch s {
+        case "whenUnlocked": return kSecAttrAccessibleWhenUnlocked
+        case "afterFirstUnlock": return kSecAttrAccessibleAfterFirstUnlock
+        case "whenPasscodeSetThisDeviceOnly": return kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly
+        case "afterFirstUnlockThisDeviceOnly": return kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        default: return kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        }
+    }
+
     @available(iOS 26.0, *)
     private static func makeSepAccessControl() throws -> SecAccessControl {
         var accessError: Unmanaged<CFError>?
@@ -809,15 +820,16 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let data = value.data(using: .utf8) else {
             call.reject("Invalid value", "E_MISSING_PARAMS"); return
         }
-        // per-item: requireBiometric -> biometry ACL (reads prompt); else plain ThisDeviceOnly
-        // accessibility (silent reads). Chosen at write time.
+        // per-item: requireBiometric -> biometry ACL (reads prompt); else plain accessibility
+        // (silent reads). Both use the caller's accessibility class (default WhenUnlockedThisDeviceOnly).
         let requireBiometric = call.getBool("requireBiometric") ?? false
+        let protection = Self.accessibilityClass(call.getString("accessibility"))
         var accessAttr: [String: Any] = [:]
         if requireBiometric {
             var aclError: Unmanaged<CFError>?
             guard let access = SecAccessControlCreateWithFlags(
                 nil,
-                kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                protection,
                 .biometryCurrentSet,
                 &aclError
             ) else {
@@ -825,7 +837,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             }
             accessAttr[kSecAttrAccessControl as String] = access
         } else {
-            accessAttr[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            accessAttr[kSecAttrAccessible as String] = protection
         }
         let matchQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
