@@ -73,6 +73,8 @@ class PQSecureStoragePlugin : Plugin() {
         else -> null
     }
 
+    private fun keystore(): KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+
     @PluginMethod
     fun getHardwareCapabilities(call: PluginCall) {
         val ok = Build.VERSION.SDK_INT >= api17
@@ -103,7 +105,7 @@ class PQSecureStoragePlugin : Plugin() {
         val alg = algOf(call.getString("type")) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
         val overwrite = call.getBoolean("overwrite") ?: false
         val ks = try {
-            KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            keystore()
         } catch (e: Exception) {
             logd("generateKeyPair keystore load failed for alias=$alias", e)
             return call.reject("Key generation failed", "E_KEYGEN")
@@ -153,7 +155,7 @@ class PQSecureStoragePlugin : Plugin() {
             false
         } finally {
             try {
-                KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }.deleteEntry(probeAlias)
+                keystore().deleteEntry(probeAlias)
             } catch (e: Exception) {
                 logd("hw probe cleanup failed", e)
             }
@@ -195,8 +197,7 @@ class PQSecureStoragePlugin : Plugin() {
     // THAT key, GHSA-safe), then run [after]. Gates destructive overwrite of an identity key.
     private fun authForExistingSign(hostActivity: FragmentActivity, alias: String, call: PluginCall, after: () -> Unit) {
         try {
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-            val priv = ks.getKey(alias, null) as? java.security.PrivateKey
+            val priv = keystore().getKey(alias, null) as? java.security.PrivateKey
                 ?: return after() // no live key to protect (e.g. half-written alias) -> allow overwrite
             val signer = Signature.getInstance(priv.algorithm)
             try {
@@ -206,44 +207,12 @@ class PQSecureStoragePlugin : Plugin() {
                 logd("existing key invalidated, allowing overwrite for alias=$alias", e)
                 return after()
             }
-            val cryptoObject = BiometricPrompt.CryptoObject(signer)
-            hostActivity.runOnUiThread {
-                val settled = AtomicBoolean(false)
-                val callback = object : BiometricPrompt.AuthenticationCallback() {
-                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                        if (!settled.compareAndSet(false, true)) return
-                        try {
-                            // a real op with the bound signer: a forged callback can't produce it
-                            val s = result.cryptoObject!!.signature!!
-                            s.update(byteArrayOf(0)); s.sign()
-                            after()
-                        } catch (e: KeyPermanentlyInvalidatedException) {
-                            logd("existing key invalidated mid-auth, allowing overwrite for alias=$alias", e)
-                            after()
-                        } catch (e: Exception) {
-                            logd("overwrite auth failed for alias=$alias", e)
-                            call.reject("Authentication failed", "E_AUTH_FAILED")
-                        }
-                    }
-                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                        if (!settled.compareAndSet(false, true)) return
-                        call.reject("Authentication failed", "E_AUTH_FAILED")
-                    }
-                    override fun onAuthenticationFailed() {}
-                }
-                val promptInfo = BiometricPrompt.PromptInfo.Builder()
-                    .setTitle("Authorize key replacement")
-                    .setNegativeButtonText("Cancel")
-                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-                    .build()
-                try {
-                    BiometricPrompt(hostActivity, cryptoExecutor, callback).authenticate(promptInfo, cryptoObject)
-                } catch (e: Exception) {
-                    if (settled.compareAndSet(false, true)) {
-                        logd("overwrite prompt failed to start", e)
-                        call.reject("Authentication failed", "E_AUTH_FAILED")
-                    }
-                }
+            // a real op with the bound signer proves the biometric; a forged callback can't produce
+            // it. A mid-auth invalidation surfaces as E_KEY_INVALIDATED here; a retry then hits the
+            // initSign check above and allows the overwrite.
+            authenticateSignature(hostActivity, signer, "Authorize key replacement", null, call) { boundSigner ->
+                boundSigner.update(byteArrayOf(0)); boundSigner.sign()
+                after()
             }
         } catch (e: Exception) {
             logd("overwrite auth setup failed for alias=$alias", e)
@@ -256,7 +225,7 @@ class PQSecureStoragePlugin : Plugin() {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         if (!safeAlias(call, alias)) return
         try {
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val ks = keystore()
             val cert = ks.getCertificate(alias) ?: return call.reject("Key not found", "E_PUBKEY")
             val ret = JSObject()
             ret.put("publicKey", Base64.encodeToString(rawFromSpki(cert.publicKey.encoded), Base64.NO_WRAP))
@@ -284,7 +253,7 @@ class PQSecureStoragePlugin : Plugin() {
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
 
         try {
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val ks = keystore()
             val priv = ks.getKey(alias, null) as? java.security.PrivateKey ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
 
             // initSign() here does NOT unlock the key -- it just prepares the Signature object.
@@ -292,63 +261,13 @@ class PQSecureStoragePlugin : Plugin() {
             // only for the exact Signature instance a real biometric match was bound to below.
             val signer = Signature.getInstance(alg)
             signer.initSign(priv)
-            val cryptoObject = BiometricPrompt.CryptoObject(signer)
-
-            // Plugin methods run off the main thread in Capacitor; BiometricPrompt has to be
-            // built and started on the UI thread.
-            hostActivity.runOnUiThread {
-                // guards against onAuthenticationFailed firing more than once (the OS lets the
-                // user retry a misread biometric without dismissing the prompt) and then a later
-                // callback trying to settle the same call again
-                val settled = AtomicBoolean(false)
-                val callback = object : BiometricPrompt.AuthenticationCallback() {
-                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                        if (!settled.compareAndSet(false, true)) return
-                        try {
-                            // the SAME Signature the Keystore just hardware-unlocked for this one
-                            // authenticated match -- signing with anything else (e.g. a Signature
-                            // built after a hooked/forged onAuthenticationSucceeded callback)
-                            // throws, because that key was never released
-                            val boundSigner = result.cryptoObject!!.signature!!
-                            boundSigner.update(Base64.decode(data, Base64.DEFAULT))
-                            val ret = JSObject()
-                            ret.put("signature", Base64.encodeToString(boundSigner.sign(), Base64.NO_WRAP))
-                            call.resolve(ret)
-                        } catch (e: KeyPermanentlyInvalidatedException) {
-                            logd("sign: key invalidated by enrollment change for alias=$alias", e)
-                            call.reject("Biometric enrollment changed; key invalidated", "E_KEY_INVALIDATED")
-                        } catch (e: Exception) {
-                            logd("sign failed for alias=$alias", e)
-                            call.reject("Signing failed", "E_SIGN")
-                        }
-                    }
-
-                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                        if (!settled.compareAndSet(false, true)) return
-                        call.reject("Authentication failed", "E_AUTH_FAILED")
-                    }
-
-                    override fun onAuthenticationFailed() {
-                        // Biometric attempt did not match, but the prompt stays open for retry.
-                        // Only onAuthenticationError and onAuthenticationSucceeded settle the call.
-                    }
-                }
-
-                val promptInfo = BiometricPrompt.PromptInfo.Builder()
-                    .setTitle("Authorize signature")
-                    .apply { if (description != null) setSubtitle(description) }
-                    .setNegativeButtonText("Cancel")
-                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-                    .build()
-
-                try {
-                    BiometricPrompt(hostActivity, cryptoExecutor, callback).authenticate(promptInfo, cryptoObject)
-                } catch (e: Exception) {
-                    if (settled.compareAndSet(false, true)) {
-                        logd("biometric prompt failed to start", e)
-                        call.reject("Authentication failed", "E_AUTH_FAILED")
-                    }
-                }
+            // the SAME Signature the Keystore hardware-unlocks for this one match -- signing with
+            // anything built after a hooked/forged callback throws, because that key was never released
+            authenticateSignature(hostActivity, signer, "Authorize signature", description, call) { boundSigner ->
+                boundSigner.update(Base64.decode(data, Base64.DEFAULT))
+                val ret = JSObject()
+                ret.put("signature", Base64.encodeToString(boundSigner.sign(), Base64.NO_WRAP))
+                call.resolve(ret)
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
             logd("sign setup: key invalidated by enrollment change for alias=$alias", e)
@@ -388,7 +307,7 @@ class PQSecureStoragePlugin : Plugin() {
         if (!safeAlias(call, alias)) return
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         try {
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val ks = keystore()
             val key = ks.getKey(atRestAlias(alias), null) as? SecretKey
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val frame = Base64.decode(data, Base64.DEFAULT)
@@ -465,7 +384,7 @@ class PQSecureStoragePlugin : Plugin() {
                 if (committed) {
                     if (oldVer >= 0) {
                         try {
-                            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                            val ks = keystore()
                             if (ks.containsAlias(kemWrapAlias(alias, oldVer))) ks.deleteEntry(kemWrapAlias(alias, oldVer))
                         } catch (e: Exception) {
                             logd("kem wrap rotate cleanup failed", e)
@@ -513,22 +432,8 @@ class PQSecureStoragePlugin : Plugin() {
         try {
             // the peer sends a raw public key; rebuild the SPKI wrapper JCA needs to parse it
             val pubKey = mlkemPublicFromRaw(Base64.decode(pubStr, Base64.DEFAULT), oid)
-            // encapsulate (software, no alias/biometric) -> (kemCt, sharedSecret)
-            val kg = KeyGenerator.getInstance("ML-KEM", bc)
-            kg.init(KEMGenerateSpec(pubKey, "AES"), SecureRandom())
-            val enc = kg.generateKey() as SecretKeyWithEncapsulation
-            val kemCt = enc.encapsulation
-            val sharedSecret = enc.encoded // 32 bytes
-            val nonce = ByteArray(12).also { SecureRandom().nextBytes(it) }
-            val aead = try {
-                val cipher = Cipher.getInstance("ChaCha20-Poly1305")
-                cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(sharedSecret, "ChaCha20"),
-                    javax.crypto.spec.IvParameterSpec(nonce))
-                cipher.doFinal(Base64.decode(data, Base64.DEFAULT))
-            } finally {
-                sharedSecret.fill(0)
-            }
-            val frame = kemCt + nonce + aead // kemCt || nonce(12) || aeadCt(+tag16)
+            // encapsulate (software, no alias/biometric) -> frame = kemCt || nonce(12) || aead(+tag)
+            val frame = encapAndSeal(pubKey, Base64.decode(data, Base64.DEFAULT))
             val ret = JSObject()
             ret.put("ciphertext", Base64.encodeToString(frame, Base64.NO_WRAP))
             call.resolve(ret)
@@ -565,28 +470,14 @@ class PQSecureStoragePlugin : Plugin() {
 
             val wrapIv = privBlob.copyOfRange(0, 12)
             val wrapped = privBlob.copyOfRange(12, privBlob.size)
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val ks = keystore()
             val wrapKey = ks.getKey(kemWrapAlias(alias, ver), null) as? SecretKey
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val unwrapCipher = Cipher.getInstance("AES/GCM/NoPadding")
             unwrapCipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, wrapIv))
 
             authenticateCipher(hostActivity, unwrapCipher, "Authenticate to decrypt with your PQ key", call) { boundCipher ->
-                val privBytes = boundCipher.doFinal(wrapped)
-                val privKey = KeyFactory.getInstance("ML-KEM", bc).generatePrivate(PKCS8EncodedKeySpec(privBytes))
-                val kemCt = frame.copyOfRange(0, ctLen)
-                val nonce = frame.copyOfRange(ctLen, ctLen + 12)
-                val aead = frame.copyOfRange(ctLen + 12, frame.size)
-                val kg = KeyGenerator.getInstance("ML-KEM", bc)
-                kg.init(KEMExtractSpec(privKey, kemCt, "AES"))
-                val dec = kg.generateKey() as SecretKeyWithEncapsulation
-                val sharedSecret = dec.encoded
-                val cipher = Cipher.getInstance("ChaCha20-Poly1305")
-                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(sharedSecret, "ChaCha20"),
-                    javax.crypto.spec.IvParameterSpec(nonce))
-                val plain = cipher.doFinal(aead)
-                privBytes.fill(0)
-                sharedSecret.fill(0)
+                val plain = decapsulate(boundCipher.doFinal(wrapped), frame, ctLen)
                 val ret = JSObject()
                 ret.put("plaintext", Base64.encodeToString(plain, Base64.NO_WRAP))
                 call.resolve(ret)
@@ -645,16 +536,11 @@ class PQSecureStoragePlugin : Plugin() {
     // to it. The context string pins a tag to one entry so it can't be moved between aliases.
     private val pubTagKeyAlias = "__pq_pub_tag_hmac__"
 
-    private fun getOrCreatePubTagKey(): SecretKey {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        (ks.getKey(pubTagKeyAlias, null) as? SecretKey)?.let { return it }
+    // get-or-create a non-exportable HMAC-SHA256 Keystore key under an alias
+    private fun getOrCreateHmacKey(alias: String): SecretKey {
+        (keystore().getKey(alias, null) as? SecretKey)?.let { return it }
         val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, KEYSTORE_PROVIDER)
-        kg.init(
-            KeyGenParameterSpec.Builder(
-                pubTagKeyAlias,
-                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
-            ).build()
-        )
+        kg.init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY).build())
         return kg.generateKey()
     }
 
@@ -668,7 +554,7 @@ class PQSecureStoragePlugin : Plugin() {
 
     private fun pubTag(context: String, rawPub: ByteArray): String {
         val mac = Mac.getInstance("HmacSHA256")
-        mac.init(getOrCreatePubTagKey())
+        mac.init(getOrCreateHmacKey(pubTagKeyAlias))
         macPut(mac, context.toByteArray(Charsets.UTF_8))
         macPut(mac, rawPub)
         return Base64.encodeToString(mac.doFinal(), Base64.NO_WRAP)
@@ -688,32 +574,13 @@ class PQSecureStoragePlugin : Plugin() {
     // key, and binds the value to its key name. Verified before decrypting.
     private val ssMacAlias = "__pq_ss_mac__"
 
-    private fun getOrCreateStoreMacKey(): SecretKey {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        (ks.getKey(ssMacAlias, null) as? SecretKey)?.let { return it }
-        val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, KEYSTORE_PROVIDER)
-        kg.init(
-            KeyGenParameterSpec.Builder(ssMacAlias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY).build()
-        )
-        return kg.generateKey()
-    }
-
     // MAC binds the item to its key name AND its biometric mode, so a prefs writer can't move a
     // value between keys or downgrade a bio item to silent.
     private fun storeMac(itemKey: String, mode: String, frame: ByteArray): ByteArray {
         val mac = Mac.getInstance("HmacSHA256")
-        mac.init(getOrCreateStoreMacKey())
+        mac.init(getOrCreateHmacKey(ssMacAlias))
         macPut(mac, itemKey.toByteArray(Charsets.UTF_8))
         macPut(mac, mode.toByteArray(Charsets.UTF_8))
-        macPut(mac, frame)
-        return mac.doFinal()
-    }
-
-    // legacy items were written before the mode existed (2-part "frame.mac"); treated as bio
-    private fun storeMacLegacy(itemKey: String, frame: ByteArray): ByteArray {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(getOrCreateStoreMacKey())
-        macPut(mac, itemKey.toByteArray(Charsets.UTF_8))
         macPut(mac, frame)
         return mac.doFinal()
     }
@@ -724,25 +591,13 @@ class PQSecureStoragePlugin : Plugin() {
     // the value so keys() can still list them. Both keys live in the TEE.
     private val ssNameKeyAlias = "__pq_ss_namekey__"
 
-    private fun getOrCreateStoreNameKey(): SecretKey {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        (ks.getKey(ssNameKeyAlias, null) as? SecretKey)?.let { return it }
-        val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        kg.init(
-            KeyGenParameterSpec.Builder(ssNameKeyAlias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build()
-        )
-        return kg.generateKey()
-    }
+    private fun getOrCreateStoreNameKey(): SecretKey = getOrCreateAesKey(ssNameKeyAlias, false)
 
     // deterministic keyed hash -> the prefs key. Same name always maps to the same tag (so lookups
     // work), but the TEE HMAC key means it can't be reversed or forged.
     private fun nameTag(name: String): String {
         val mac = Mac.getInstance("HmacSHA256")
-        mac.init(getOrCreateStoreMacKey())
+        mac.init(getOrCreateHmacKey(ssMacAlias))
         macPut(mac, "name".toByteArray(Charsets.UTF_8)) // domain-separate from storeMac
         macPut(mac, name.toByteArray(Charsets.UTF_8))
         return Base64.encodeToString(mac.doFinal(), Base64.NO_WRAP)
@@ -761,15 +616,11 @@ class PQSecureStoragePlugin : Plugin() {
         return String(cipher.doFinal(blob.copyOfRange(12, blob.size)), Charsets.UTF_8)
     }
 
-    // extract the mode field without the name / MAC check (only used to decide whether clear() should
-    // prompt; the real integrity check is in parseStoreItem on read)
+    // extract the mode field ('s'/'b') without the name / MAC check (only decides whether clear()
+    // prompts; the real integrity check is parseStoreItem on read). Unparseable -> treat as bio.
     private fun storedMode(stored: String): String {
         val parts = stored.split(".")
-        return when (parts.size) {
-            4 -> parts[1]
-            3 -> parts[0]
-            else -> "b"
-        }
+        return if (parts.size == 4 && (parts[1] == "s" || parts[1] == "b")) parts[1] else "b"
     }
 
     // reject aliases that could collide with the plugin's internal Keystore entries (they use a
@@ -794,28 +645,29 @@ class PQSecureStoragePlugin : Plugin() {
     private fun kemTypeKey(alias: String) = "$alias.type"
     private fun kemTagKey(alias: String) = "$alias.tag"
 
-    private fun getOrCreateAtRestKey(alias: String): SecretKey {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        (ks.getKey(atRestAlias(alias), null) as? SecretKey)?.let { return it }
+    // get-or-create an AES-256-GCM Keystore key. authRequired binds it to a per-op strong biometric.
+    private fun getOrCreateAesKey(alias: String, authRequired: Boolean): SecretKey {
+        (keystore().getKey(alias, null) as? SecretKey)?.let { return it }
         val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        kg.init(
-            KeyGenParameterSpec.Builder(
-                atRestAlias(alias),
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build()
-        )
+        val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+        if (authRequired) {
+            spec.setUserAuthenticationRequired(true)
+                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+        }
+        kg.init(spec.build())
         return kg.generateKey()
     }
+
+    private fun getOrCreateAtRestKey(alias: String): SecretKey = getOrCreateAesKey(atRestAlias(alias), false)
 
     private fun createKemWrapKey(alias: String, ver: Int): SecretKey {
         // a fresh wrap key per generation (versioned alias). On overwrite the old version is
         // deleted after the new keypair is persisted, so a restored pre-rotation wrapped-private
         // can no longer be unwrapped. Clear any orphan at this version first (cancelled attempt).
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        val ks = keystore()
         if (ks.containsAlias(kemWrapAlias(alias, ver))) ks.deleteEntry(kemWrapAlias(alias, ver))
         val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
         kg.init(
@@ -894,6 +746,59 @@ class PQSecureStoragePlugin : Plugin() {
         }
     }
 
+    // same GHSA-safe BiometricPrompt flow as authenticateCipher, but bound to a Signature (for the
+    // signing key). onSuccess runs the real sign op with the hardware-unlocked signer.
+    private fun authenticateSignature(
+        hostActivity: FragmentActivity,
+        signer: Signature,
+        title: String,
+        subtitle: String?,
+        call: PluginCall,
+        onSuccess: (Signature) -> Unit
+    ) {
+        val cryptoObject = BiometricPrompt.CryptoObject(signer)
+        hostActivity.runOnUiThread {
+            val settled = AtomicBoolean(false)
+            val callback = object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    if (!settled.compareAndSet(false, true)) return
+                    try {
+                        onSuccess(result.cryptoObject!!.signature!!)
+                    } catch (e: KeyPermanentlyInvalidatedException) {
+                        logd("signature op: key invalidated by enrollment change", e)
+                        call.reject("Biometric enrollment changed; key invalidated", "E_KEY_INVALIDATED")
+                    } catch (e: Exception) {
+                        logd("signature op failed", e)
+                        call.reject("Signing failed", "E_SIGN")
+                    }
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    if (!settled.compareAndSet(false, true)) return
+                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                }
+
+                override fun onAuthenticationFailed() {
+                    // biometric mismatch, prompt stays open for retry -- don't settle
+                }
+            }
+            try {
+                val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                    .setTitle(title)
+                    .apply { if (subtitle != null) setSubtitle(subtitle) }
+                    .setNegativeButtonText("Cancel")
+                    .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                    .build()
+                BiometricPrompt(hostActivity, cryptoExecutor, callback).authenticate(promptInfo, cryptoObject)
+            } catch (e: Exception) {
+                if (settled.compareAndSet(false, true)) {
+                    logd("biometric prompt failed to start", e)
+                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                }
+            }
+        }
+    }
+
     // ==== secure storage (self-addressed ML-KEM-1024 envelope, silent write / gated read) ====
     //
     // The store owns one ML-KEM-1024 keypair. setItem encapsulates to its public key (software,
@@ -912,34 +817,17 @@ class PQSecureStoragePlugin : Plugin() {
 
     private class StoreItem(val mode: String, val frame: ByteArray)
 
-    // parse "mode.frame.mac" (new) or legacy "frame.mac" (=bio); verify the MAC. null = corrupt/forged.
+    // parse "encName.mode.frame.mac"; verify the MAC over (name, mode, frame). null = corrupt/forged.
     // base64 NO_WRAP never contains '.', so splitting on it is unambiguous.
     private fun parseStoreItem(key: String, stored: String): StoreItem? {
         val parts = stored.split(".")
         return try {
-            when (parts.size) {
-                4 -> {
-                    // encName . mode . frame . mac  (encName is only for keys(); ignored here)
-                    val mode = parts[1]
-                    if (mode != "s" && mode != "b") return null
-                    val frame = Base64.decode(parts[2], Base64.DEFAULT)
-                    val mac = Base64.decode(parts[3], Base64.DEFAULT)
-                    if (MessageDigest.isEqual(mac, storeMac(key, mode, frame))) StoreItem(mode, frame) else null
-                }
-                3 -> {
-                    val mode = parts[0]
-                    if (mode != "s" && mode != "b") return null
-                    val frame = Base64.decode(parts[1], Base64.DEFAULT)
-                    val mac = Base64.decode(parts[2], Base64.DEFAULT)
-                    if (MessageDigest.isEqual(mac, storeMac(key, mode, frame))) StoreItem(mode, frame) else null
-                }
-                2 -> {
-                    val frame = Base64.decode(parts[0], Base64.DEFAULT)
-                    val mac = Base64.decode(parts[1], Base64.DEFAULT)
-                    if (MessageDigest.isEqual(mac, storeMacLegacy(key, frame))) StoreItem("b", frame) else null
-                }
-                else -> null
-            }
+            if (parts.size != 4) return null
+            val mode = parts[1] // parts[0] is the encrypted name, only used by keys()
+            if (mode != "s" && mode != "b") return null
+            val frame = Base64.decode(parts[2], Base64.DEFAULT)
+            val mac = Base64.decode(parts[3], Base64.DEFAULT)
+            if (MessageDigest.isEqual(mac, storeMac(key, mode, frame))) StoreItem(mode, frame) else null
         } catch (e: Exception) {
             null
         }
@@ -990,7 +878,7 @@ class PQSecureStoragePlugin : Plugin() {
             // path; if it's invalidated, rotate to a fresh bio keypair (old bio items were already
             // unreadable, so nothing extra is lost) instead of bricking every future bio write.
             val invalidated = try {
-                val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                val ks = keystore()
                 (ks.getKey(ssMasterAlias, null) as? SecretKey)?.let {
                     Cipher.getInstance("AES/GCM/NoPadding").init(Cipher.ENCRYPT_MODE, it)
                 }
@@ -1017,7 +905,7 @@ class PQSecureStoragePlugin : Plugin() {
             // dead bio tier: drop the invalidated wrap key + stale meta, then fall through to
             // re-provision a fresh keypair below
             try {
-                val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                val ks = keystore()
                 if (ks.containsAlias(ssMasterAlias)) ks.deleteEntry(ssMasterAlias)
             } catch (e: Exception) {
                 logd("setItem(bio) rotate: delete failed", e)
@@ -1069,7 +957,7 @@ class PQSecureStoragePlugin : Plugin() {
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         val privB64 = storeMeta().getString("priv", null)
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        val ks = keystore()
         val wrapKey = ks.getKey(ssMasterAlias, null) as? SecretKey
         if (privB64 == null || wrapKey == null) {
             return call.reject("Store key missing", "E_KEY_NOT_FOUND")
@@ -1159,7 +1047,8 @@ class PQSecureStoragePlugin : Plugin() {
         }
     }
 
-    private fun persistItem(key: String, value: String, pub: PublicKey, mode: String) {
+    // ML-KEM encapsulate to pub + ChaCha20-Poly1305 seal -> frame = kemCt || nonce(12) || aead(+tag)
+    private fun encapAndSeal(pub: PublicKey, plaintext: ByteArray): ByteArray {
         val kg = KeyGenerator.getInstance("ML-KEM", bc)
         kg.init(KEMGenerateSpec(pub, "AES"), SecureRandom())
         val enc = kg.generateKey() as SecretKeyWithEncapsulation
@@ -1170,11 +1059,15 @@ class PQSecureStoragePlugin : Plugin() {
             val cipher = Cipher.getInstance("ChaCha20-Poly1305")
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(sharedSecret, "ChaCha20"),
                 javax.crypto.spec.IvParameterSpec(nonce))
-            cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+            cipher.doFinal(plaintext)
         } finally {
             sharedSecret.fill(0)
         }
-        val frame = kemCt + nonce + aead
+        return kemCt + nonce + aead
+    }
+
+    private fun persistItem(key: String, value: String, pub: PublicKey, mode: String) {
+        val frame = encapAndSeal(pub, value.toByteArray(Charsets.UTF_8))
         // encName . mode . frame . mac, stored under a keyed hash of the name (not the name itself)
         val stored = encName(key) + "." +
             mode + "." +
@@ -1183,8 +1076,9 @@ class PQSecureStoragePlugin : Plugin() {
         storeItems().edit().putString(nameTag(key), stored).apply()
     }
 
-    // decapsulate the ML-KEM ciphertext with the (already unwrapped) private and open the ChaCha frame
-    private fun decapsAndDecrypt(privBytes: ByteArray, frame: ByteArray, ctLen: Int): String {
+    // decapsulate the frame with the (already unwrapped) private. Wipes privBytes + shared secret
+    // (best-effort: JVM copies in SecretKeySpec/GC still linger).
+    private fun decapsulate(privBytes: ByteArray, frame: ByteArray, ctLen: Int): ByteArray {
         val priv = KeyFactory.getInstance("ML-KEM", bc).generatePrivate(PKCS8EncodedKeySpec(privBytes))
         val kemCt = frame.copyOfRange(0, ctLen)
         val nonce = frame.copyOfRange(ctLen, ctLen + 12)
@@ -1197,14 +1091,15 @@ class PQSecureStoragePlugin : Plugin() {
             val cipher = Cipher.getInstance("ChaCha20-Poly1305")
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(shared, "ChaCha20"),
                 javax.crypto.spec.IvParameterSpec(nonce))
-            return String(cipher.doFinal(aead), Charsets.UTF_8)
+            return cipher.doFinal(aead)
         } finally {
-            // best-effort wipe of the raw private and shared secret from the heap (JVM copies in
-            // SecretKeySpec/GC still linger; the plaintext String is immutable and can't be wiped)
             shared.fill(0)
             privBytes.fill(0)
         }
     }
+
+    private fun decapsAndDecrypt(privBytes: ByteArray, frame: ByteArray, ctLen: Int): String =
+        String(decapsulate(privBytes, frame, ctLen), Charsets.UTF_8)
 
     @PluginMethod
     fun getItem(call: PluginCall) {
@@ -1226,7 +1121,7 @@ class PQSecureStoragePlugin : Plugin() {
             val privBlob = Base64.decode(privB64, Base64.DEFAULT)
             val wrapIv = privBlob.copyOfRange(0, 12)
             val wrapped = privBlob.copyOfRange(12, privBlob.size)
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val ks = keystore()
             val wrapKey = ks.getKey(wrapAlias, null) as? SecretKey
                 ?: return call.reject("Store key missing", "E_KEY_NOT_FOUND")
             val unwrapCipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -1270,7 +1165,7 @@ class PQSecureStoragePlugin : Plugin() {
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         val privB64 = storeMeta().getString("priv", null)
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        val ks = keystore()
         val wrapKey = ks.getKey(ssMasterAlias, null) as? SecretKey
         if (privB64 == null || wrapKey == null) {
             storeItems().edit().remove(nameTag(key)).commit(); call.resolve(); return
@@ -1309,11 +1204,11 @@ class PQSecureStoragePlugin : Plugin() {
     fun keys(call: PluginCall) {
         val arr = JSArray()
         // prefs keys are hashed; recover the real names from the encrypted encName field
-        for ((k, v) in storeItems().all) {
-            val stored = v as? String ?: continue
-            val parts = stored.split(".")
+        for ((_, v) in storeItems().all) {
+            val parts = (v as? String)?.split(".") ?: continue
+            if (parts.size != 4) continue
             try {
-                if (parts.size == 4) arr.put(decName(parts[0])) else arr.put(k) // legacy plaintext key
+                arr.put(decName(parts[0]))
             } catch (e: Exception) {
                 logd("keys: skip undecodable entry", e)
             }
@@ -1330,7 +1225,7 @@ class PQSecureStoragePlugin : Plugin() {
         val anyBio = storeItems().all.any { (_, v) ->
             (v as? String)?.let { storedMode(it) == "b" } ?: false
         }
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        val ks = keystore()
         val privB64 = storeMeta().getString("priv", null)
         val wrapKey = ks.getKey(ssMasterAlias, null) as? SecretKey
         if (!anyBio || privB64 == null || wrapKey == null) {
@@ -1367,7 +1262,7 @@ class PQSecureStoragePlugin : Plugin() {
         storeItems().edit().clear().commit()
         storeMeta().edit().clear().commit()
         try {
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+            val ks = keystore()
             for (a in listOf(ssMasterAlias, ssSilentAlias, ssMacAlias, ssNameKeyAlias)) {
                 if (ks.containsAlias(a)) ks.deleteEntry(a)
             }
@@ -1376,41 +1271,9 @@ class PQSecureStoragePlugin : Plugin() {
         }
     }
 
-    private fun getOrCreateSsMasterWrapKey(): SecretKey {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        (ks.getKey(ssMasterAlias, null) as? SecretKey)?.let { return it }
-        val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        kg.init(
-            KeyGenParameterSpec.Builder(
-                ssMasterAlias,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .setUserAuthenticationRequired(true)
-                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
-                .build()
-        )
-        return kg.generateKey()
-    }
+    private fun getOrCreateSsMasterWrapKey(): SecretKey = getOrCreateAesKey(ssMasterAlias, true)
 
     // silent tier wrap key: same AES-256-GCM in the TEE but NO auth requirement, so the silent
     // private can be unwrapped without a biometric prompt
-    private fun getOrCreateSsSilentWrapKey(): SecretKey {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        (ks.getKey(ssSilentAlias, null) as? SecretKey)?.let { return it }
-        val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        kg.init(
-            KeyGenParameterSpec.Builder(
-                ssSilentAlias,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build()
-        )
-        return kg.generateKey()
-    }
+    private fun getOrCreateSsSilentWrapKey(): SecretKey = getOrCreateAesKey(ssSilentAlias, false)
 }

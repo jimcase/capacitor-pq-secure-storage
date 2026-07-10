@@ -265,7 +265,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             do {
                 let access = try Self.makeSepAccessControl()
                 let key = try PQKey.generate(type: type, accessControl: access)
-                try Self.persist(key: key, type: type, alias: alias, overwrite: true)
+                try Self.persist(key: key, type: type, alias: alias)
                 call.resolve(["publicKey": key.publicKeyBytes.base64EncodedString()])
             } catch {
                 os_log("generateKeyPair failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
@@ -419,7 +419,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             do {
                 let access = try Self.makeSepAccessControl()
                 let key = try PQKemKey.generate(type: type, accessControl: access)
-                try Self.persistKem(key: key, type: type, alias: alias, overwrite: true)
+                try Self.persistKem(key: key, type: type, alias: alias)
                 call.resolve(["publicKey": key.publicKeyBytes.base64EncodedString()])
             } catch {
                 os_log("generateKemKeyPair failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
@@ -626,23 +626,23 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         return status == errSecSuccess || status == errSecInteractionNotAllowed
     }
 
-    // add, or update in place when overwriting. Never delete-then-add (a failed add would
-    // leave the old key destroyed). Duplicate without overwrite returns errSecDuplicateItem.
-    private static func upsertKeychain(account: String, data: Data, attrs: [String: Any], overwrite: Bool) -> OSStatus {
+    // add, or update in place when the account already exists (callers always want upsert). Never
+    // delete-then-add -- a failed re-add would leave the old key destroyed.
+    private static func upsertKeychain(account: String, data: Data, attrs: [String: Any]) -> OSStatus {
         var addQuery = baseQuery(account: account)
         addQuery[kSecValueData as String] = data
         for (k, v) in attrs { addQuery[k] = v }
         let status = SecItemAdd(addQuery as CFDictionary, nil)
-        guard status == errSecDuplicateItem, overwrite else { return status }
+        guard status == errSecDuplicateItem else { return status }
         var update: [String: Any] = [kSecValueData as String: data]
         for (k, v) in attrs { update[k] = v }
         return SecItemUpdate(baseQuery(account: account) as CFDictionary, update as CFDictionary)
     }
 
     @available(iOS 26.0, *)
-    private static func persist(key: PQKey, type: String, alias: String, overwrite: Bool) throws {
+    private static func persist(key: PQKey, type: String, alias: String) throws {
         // write public first: aliasExists() checks the public account, so a failed private write
-        // leaves a consistent state (alias reports exists) that heals on retry with overwrite,
+        // leaves a consistent state (alias reports exists) that heals on retry,
         // instead of an orphaned private that blocks the alias. dataRepresentation is SEP-wrapped
         // ciphertext, so device-only/unlocked-only protection is enough.
         let pubStatus = upsertKeychain(
@@ -651,16 +651,14 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             attrs: [
                 kSecAttrGeneric as String: Data(type.utf8),
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            ],
-            overwrite: overwrite
+            ]
         )
         guard pubStatus == errSecSuccess else { throw PQSecureStorageError.keychain(pubStatus) }
 
         let privStatus = upsertKeychain(
             account: privateAccount(for: alias),
             data: key.dataRepresentation,
-            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly],
-            overwrite: overwrite
+            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
         )
         guard privStatus == errSecSuccess else { throw PQSecureStorageError.keychain(privStatus) }
     }
@@ -747,7 +745,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @available(iOS 26.0, *)
-    private static func persistKem(key: PQKemKey, type: String, alias: String, overwrite: Bool) throws {
+    private static func persistKem(key: PQKemKey, type: String, alias: String) throws {
         // public first (see persist): keeps a failed private write healable instead of orphaning
         let pubStatus = upsertKeychain(
             account: kemPublicAccount(for: alias),
@@ -755,16 +753,14 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             attrs: [
                 kSecAttrGeneric as String: Data(type.utf8),
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            ],
-            overwrite: overwrite
+            ]
         )
         guard pubStatus == errSecSuccess else { throw PQSecureStorageError.keychain(pubStatus) }
 
         let privStatus = upsertKeychain(
             account: kemPrivateAccount(for: alias),
             data: key.dataRepresentation,
-            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly],
-            overwrite: overwrite
+            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
         )
         guard privStatus == errSecSuccess else { throw PQSecureStorageError.keychain(privStatus) }
     }
