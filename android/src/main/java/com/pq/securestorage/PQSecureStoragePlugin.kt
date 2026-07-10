@@ -53,6 +53,7 @@ class PQSecureStoragePlugin : Plugin() {
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
         private const val MAX_STORE_KEY_LEN = 512
         private const val MAX_STORE_VALUE_LEN = 256 * 1024
+        private const val MAX_CRYPTO_INPUT = 10 * 1024 * 1024 // decoded-byte cap on crypto ops
     }
 
 
@@ -278,6 +279,8 @@ class PQSecureStoragePlugin : Plugin() {
         // optional host-supplied prompt text (NOT a consent guarantee, see definitions.ts). Cap the
         // length so a caller can't push a giant string or shove real content off-screen.
         val description = call.getString("description")?.take(200)
+        val input = Base64.decode(data, Base64.DEFAULT)
+        if (input.size > MAX_CRYPTO_INPUT) return call.reject("Input too large", "E_INPUT_TOO_LARGE")
 
         try {
             val priv = keystore().getKey(alias, null) as? java.security.PrivateKey
@@ -291,14 +294,14 @@ class PQSecureStoragePlugin : Plugin() {
                 val hostActivity = activity as? FragmentActivity
                     ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
                 authenticateSignature(hostActivity, signer, "Authorize signature", description, call) { boundSigner ->
-                    boundSigner.update(Base64.decode(data, Base64.DEFAULT))
+                    boundSigner.update(input)
                     val ret = JSObject()
                     ret.put("signature", Base64.encodeToString(boundSigner.sign(), Base64.NO_WRAP))
                     call.resolve(ret)
                 }
             } else {
                 // silent key: sign directly, no prompt
-                signer.update(Base64.decode(data, Base64.DEFAULT))
+                signer.update(input)
                 val ret = JSObject()
                 ret.put("signature", Base64.encodeToString(signer.sign(), Base64.NO_WRAP))
                 call.resolve(ret)
@@ -319,12 +322,14 @@ class PQSecureStoragePlugin : Plugin() {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         if (!safeAlias(call, alias)) return
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
+        val input = Base64.decode(data, Base64.DEFAULT)
+        if (input.size > MAX_CRYPTO_INPUT) return call.reject("Input too large", "E_INPUT_TOO_LARGE")
         try {
             val key = getOrCreateAtRestKey(alias)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, key)
             val iv = cipher.iv // 12 bytes
-            val ct = cipher.doFinal(Base64.decode(data, Base64.DEFAULT)) // includes tag
+            val ct = cipher.doFinal(input) // includes tag
             val frame = iv + ct // nonce(12) || aeadCt(+tag16)
             val ret = JSObject()
             ret.put("ciphertext", Base64.encodeToString(frame, Base64.NO_WRAP))
@@ -345,6 +350,7 @@ class PQSecureStoragePlugin : Plugin() {
             val key = ks.getKey(atRestAlias(alias), null) as? SecretKey
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val frame = Base64.decode(data, Base64.DEFAULT)
+            if (frame.size > MAX_CRYPTO_INPUT) return call.reject("Input too large", "E_INPUT_TOO_LARGE")
             val iv = frame.copyOfRange(0, 12)
             val ct = frame.copyOfRange(12, frame.size)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -516,11 +522,13 @@ class PQSecureStoragePlugin : Plugin() {
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         val oid = mlkemOidOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
+        val input = Base64.decode(data, Base64.DEFAULT)
+        if (input.size > MAX_CRYPTO_INPUT) return call.reject("Input too large", "E_INPUT_TOO_LARGE")
         try {
             // the peer sends a raw public key; rebuild the SPKI wrapper JCA needs to parse it
             val pubKey = mlkemPublicFromRaw(Base64.decode(pubStr, Base64.DEFAULT), oid)
             // encapsulate (software, no alias/biometric) -> frame = kemCt || nonce(12) || aead(+tag)
-            val frame = encapAndSeal(pubKey, Base64.decode(data, Base64.DEFAULT))
+            val frame = encapAndSeal(pubKey, input)
             val ret = JSObject()
             ret.put("ciphertext", Base64.encodeToString(frame, Base64.NO_WRAP))
             call.resolve(ret)
@@ -551,6 +559,7 @@ class PQSecureStoragePlugin : Plugin() {
             if (ver < 0) return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val privBlob = Base64.decode(privStr, Base64.DEFAULT)
             val frame = Base64.decode(data, Base64.DEFAULT)
+            if (frame.size > MAX_CRYPTO_INPUT) return call.reject("Input too large", "E_INPUT_TOO_LARGE")
             if (frame.size <= ctLen + 12) return call.reject("Malformed ciphertext", "E_BAD_CIPHERTEXT")
 
             val wrapIv = privBlob.copyOfRange(0, 12)

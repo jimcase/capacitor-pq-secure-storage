@@ -84,6 +84,15 @@ describe('web software fallback', () => {
         expect((await pq.keys()).keys).toEqual([]);
     });
 
+    it('rejects oversized crypto input', async () => {
+        const pq = web();
+        await pq.generateKeyPair({ keyAlias: 'big', type: 'PQC_MLDSA_65' });
+        const huge = Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64');
+        await expect(pq.sign({ keyAlias: 'big', data: huge, type: 'PQC_MLDSA_65' })).rejects.toThrow(
+            /too large/i,
+        );
+    });
+
     it('rejects reserved or invalid aliases', async () => {
         const pq = web();
         await expect(pq.generateKeyPair({ keyAlias: 'pqss.evil', type: 'PQC_MLDSA_65' })).rejects.toThrow();

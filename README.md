@@ -276,7 +276,8 @@ Sign data with the aliased ML-DSA key. Prompts for biometrics only if the key wa
 with `requireBiometric: true` (the default); a silent key signs with no prompt. WARNING: the
 signature covers the raw `data` bytes as-is and `description` is only prompt text (the caller
 controls both), so this is NOT a WYSIWYG consent guarantee. A host app that signs untrusted
-payloads must show its own confirmation; `description` is truncated for the prompt.
+payloads must show its own confirmation; `description` is truncated for the prompt. Rejects
+`E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
 
 | Param         | Type                                                                                                                     |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------ |
@@ -293,7 +294,7 @@ payloads must show its own confirmation; `description` is truncated for the prom
 encryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ ciphertext: string; }>
 ```
 
-Encrypt data with an AES-256-GCM key (TEE/Keychain on device, localStorage on web). Returns the blob to store.
+Encrypt data with an AES-256-GCM key (TEE/Keychain on device, localStorage on web). Returns the blob to store. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
 
 | Param         | Type                                             |
 | ------------- | ------------------------------------------------ |
@@ -310,7 +311,7 @@ Encrypt data with an AES-256-GCM key (TEE/Keychain on device, localStorage on we
 decryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ plaintext: string; }>
 ```
 
-Decrypt a blob produced by `encryptAtRest` under the same alias.
+Decrypt a blob produced by `encryptAtRest` under the same alias. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
 
 | Param         | Type                                             |
 | ------------- | ------------------------------------------------ |
@@ -364,6 +365,7 @@ encryptTo(options: { recipientPublicKey: string; type: KemType; data: string; })
 ```
 
 Encrypt data to a recipient's raw ML-KEM public key. Pure software, no alias or biometrics.
+Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
 
 | Param         | Type                                                                                             |
 | ------------- | ------------------------------------------------------------------------------------------------ |
@@ -380,7 +382,7 @@ Encrypt data to a recipient's raw ML-KEM public key. Pure software, no alias or 
 decrypt(options: { keyAlias: string; type: KemType; data: string; }) => Promise<{ plaintext: string; }>
 ```
 
-Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics only if the key requires it.
+Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics only if the key requires it. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
 
 | Param         | Type                                                                                   |
 | ------------- | -------------------------------------------------------------------------------------- |

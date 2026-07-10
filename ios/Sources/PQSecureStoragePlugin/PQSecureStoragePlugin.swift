@@ -326,6 +326,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" else {
             return call.reject("Unsupported key type", "E_UNSUPPORTED")
         }
+        guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         // optional host-supplied text shown in the prompt so the user sees what they authorize
         // prompt text only, not a consent guarantee (see definitions.ts). Cap so a caller can't
         // push a giant string or shove real content off-screen.
@@ -373,6 +374,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
+        guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
             let key = try Self.loadOrCreateAesKey(alias: alias)
             let sealed = try AES.GCM.seal(raw, using: key)
@@ -392,6 +394,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
+        guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
             let key = try Self.loadAesKey(alias: alias)
             let box = try AES.GCM.SealedBox(combined: raw)
@@ -474,6 +477,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard type == "PQC_MLKEM_768" || type == "PQC_MLKEM_1024" else {
             return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         }
+        guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
             let (kemCt, sharedSecret) = try PQKemKey.encapsulate(type: type, recipientPublicKey: pub)
             let sealed = try ChaChaPoly.seal(raw, using: sharedSecret)
@@ -497,6 +501,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
+        guard frame.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         let ctLen: Int
         switch type {
         case "PQC_MLKEM_768": ctLen = 1088
@@ -835,6 +840,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     // (AES-256, quantum-safe) and the biometric gating on read. Writes are silent (the ACL is
     // not evaluated on SecItemAdd).
 
+    private static let maxCryptoInput = 10 * 1024 * 1024 // decoded-byte cap on crypto ops
     private static let ssService = "pq.securestorage"
 
     @objc func setItem(_ call: CAPPluginCall) {

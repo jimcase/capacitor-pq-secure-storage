@@ -29,6 +29,7 @@ const kemOf = (t: KemType) => {
 };
 
 const STORE_KEY = 'pqss.storekey'; // internal store master AES key, unreachable via a caller alias
+const MAX_CRYPTO_INPUT = 10 * 1024 * 1024; // cap decoded input on the crypto ops (memory DoS guard)
 
 const utf8 = new TextEncoder();
 const utf8d = new TextDecoder();
@@ -149,13 +150,17 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         const kp = this.getKeypair('pqss.sign', this.safeAlias(options.keyAlias));
         if (!kp) throw this.unavailable('Key not found');
         if (kp.type !== options.type) throw this.unavailable('Key type mismatch');
-        const sig = dsaOf(options.type).sign(fromB64(options.data), kp.sk);
+        const msg = fromB64(options.data);
+        if (msg.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
+        const sig = dsaOf(options.type).sign(msg, kp.sk);
         return { signature: toB64(sig) };
     }
 
     async encryptAtRest(options: { keyAlias: string; data: string }): Promise<{ ciphertext: string }> {
         const key = this.getOrCreateAes(this.safeAlias(options.keyAlias));
-        return { ciphertext: toB64(this.aesSeal(key, fromB64(options.data))) };
+        const input = fromB64(options.data);
+        if (input.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
+        return { ciphertext: toB64(this.aesSeal(key, input)) };
     }
 
     async decryptAtRest(options: { keyAlias: string; data: string }): Promise<{ plaintext: string }> {
@@ -181,9 +186,11 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
     }
 
     async encryptTo(options: { recipientPublicKey: string; type: KemType; data: string }): Promise<{ ciphertext: string }> {
+        const input = fromB64(options.data);
+        if (input.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
         const { cipherText, sharedSecret } = kemOf(options.type).encapsulate(fromB64(options.recipientPublicKey));
         const nonce = randomBytes(12);
-        const aead = chacha20poly1305(sharedSecret, nonce).encrypt(fromB64(options.data));
+        const aead = chacha20poly1305(sharedSecret, nonce).encrypt(input);
         return { ciphertext: toB64(concat(cipherText, nonce, aead)) };
     }
 
@@ -194,6 +201,7 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         const ctLen = KEM_CT_LEN[options.type];
         if (ctLen === undefined) throw this.unavailable('Unsupported KEM type');
         const buf = fromB64(options.data);
+        if (buf.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
         if (buf.length <= ctLen + 12) throw this.unavailable('Malformed ciphertext');
         const sharedSecret = kemOf(options.type).decapsulate(buf.subarray(0, ctLen), kp.sk);
         const nonce = buf.subarray(ctLen, ctLen + 12);
