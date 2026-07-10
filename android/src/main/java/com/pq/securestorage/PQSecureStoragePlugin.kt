@@ -55,7 +55,6 @@ class PQSecureStoragePlugin : Plugin() {
         private const val MAX_STORE_VALUE_LEN = 256 * 1024
     }
 
-    private val api17 = 37 // confirm against Android 17 SDK
 
     // delivers BiometricPrompt callbacks off the UI thread, so the crypto in them doesn't block it
     private val cryptoExecutor = Executors.newSingleThreadExecutor()
@@ -77,7 +76,7 @@ class PQSecureStoragePlugin : Plugin() {
 
     @PluginMethod
     fun getHardwareCapabilities(call: PluginCall) {
-        val ok = Build.VERSION.SDK_INT >= api17
+        val ok = pqcSigningSupported()
         val ret = JSObject()
         ret.put("supportsPqc", ok)
         // probe the real Keystore security level instead of assuming. NOTE: this reflects the TEE
@@ -164,6 +163,23 @@ class PQSecureStoragePlugin : Plugin() {
         }
         hwCache = hw
         return hw
+    }
+
+    @Volatile private var pqcCache: Boolean? = null
+
+    // whether AndroidKeyStore actually exposes ML-DSA keygen on this device. Probe it, don't guess an
+    // API level: Keystore ML-DSA depends on KeyMint, not just the OS version. getInstance resolves the
+    // algorithm without generating a key, so it is cheap and side-effect free.
+    private fun pqcSigningSupported(): Boolean {
+        pqcCache?.let { return it }
+        val ok = try {
+            KeyPairGenerator.getInstance("ML-DSA-65", KEYSTORE_PROVIDER)
+            true
+        } catch (e: Exception) {
+            logd("ML-DSA keystore probe failed", e); false
+        }
+        pqcCache = ok
+        return ok
     }
 
     // whether a Keystore key was created with per-op user authentication (biometric). This is the
@@ -370,62 +386,105 @@ class PQSecureStoragePlugin : Plugin() {
         val requireBiometric = call.getBoolean("requireBiometric") ?: true
         if (!kemGenerating.add(alias)) return call.reject("Key generation in progress, retry", "E_BUSY")
         try {
-            if (!overwrite && kemPrefs().contains(kemPubKeyKey(alias))) {
+            val exists = kemPrefs().contains(kemPubKeyKey(alias))
+            if (!overwrite && exists) {
                 kemGenerating.remove(alias)
                 return call.reject("Alias already exists", "E_ALIAS_EXISTS")
             }
-            val kpg = KeyPairGenerator.getInstance("ML-KEM", bc)
-            kpg.initialize(spec, SecureRandom())
-            val kp = kpg.generateKeyPair()
-            val privBytes = kp.private.encoded // PKCS8
-            val rawPub = rawFromSpki(kp.public.encoded) // raw FIPS-203 bytes
 
-            val oldVer = kemPrefs().getInt(kemWrapVerKey(alias), -1)
-            val newVer = oldVer + 1
-            val wrapKey = createKemWrapKey(alias, newVer, requireBiometric)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
+            // the heavy path: generate the keypair, wrap the private, rotate the wrap key
+            val runGeneration: () -> Unit = {
+                try {
+                    val kpg = KeyPairGenerator.getInstance("ML-KEM", bc)
+                    kpg.initialize(spec, SecureRandom())
+                    val kp = kpg.generateKeyPair()
+                    val privBytes = kp.private.encoded // PKCS8
+                    val rawPub = rawFromSpki(kp.public.encoded) // raw FIPS-203 bytes
 
-            // wrap the private + rotate. commit() is synchronous+durable, so the old wrap key is
-            // retired ONLY after the new state is on disk (a crash can't point prefs at a deleted key)
-            val persist = { c: Cipher ->
-                val wrapped = c.iv + c.doFinal(privBytes)
-                privBytes.fill(0)
-                val committed = kemPrefs().edit()
-                    .putString(kemPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
-                    .putString(kemPubKeyKey(alias), Base64.encodeToString(rawPub, Base64.NO_WRAP))
-                    .putString(kemTagKey(alias), pubTag("kem:$alias", rawPub))
-                    .putString(kemTypeKey(alias), type)
-                    .putInt(kemWrapVerKey(alias), newVer)
-                    .commit()
-                if (committed && oldVer >= 0) {
-                    try {
-                        val ks = keystore()
-                        if (ks.containsAlias(kemWrapAlias(alias, oldVer))) ks.deleteEntry(kemWrapAlias(alias, oldVer))
-                    } catch (e: Exception) {
-                        logd("kem wrap rotate cleanup failed", e)
+                    val oldVer = kemPrefs().getInt(kemWrapVerKey(alias), -1)
+                    val newVer = oldVer + 1
+                    val wrapKey = createKemWrapKey(alias, newVer, requireBiometric)
+                    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                    cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
+
+                    // wrap the private + rotate. commit() is synchronous+durable, so the old wrap key is
+                    // retired ONLY after the new state is on disk (a crash can't point prefs at a deleted key)
+                    val persist = { c: Cipher ->
+                        val wrapped = c.iv + c.doFinal(privBytes)
+                        privBytes.fill(0)
+                        val committed = kemPrefs().edit()
+                            .putString(kemPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
+                            .putString(kemPubKeyKey(alias), Base64.encodeToString(rawPub, Base64.NO_WRAP))
+                            .putString(kemTagKey(alias), pubTag("kem:$alias", rawPub))
+                            .putString(kemTypeKey(alias), type)
+                            .putInt(kemWrapVerKey(alias), newVer)
+                            .commit()
+                        if (committed && oldVer >= 0) {
+                            try {
+                                val ks = keystore()
+                                if (ks.containsAlias(kemWrapAlias(alias, oldVer))) ks.deleteEntry(kemWrapAlias(alias, oldVer))
+                            } catch (e: Exception) {
+                                logd("kem wrap rotate cleanup failed", e)
+                            }
+                        }
+                        kemGenerating.remove(alias)
+                        if (committed) {
+                            val ret = JSObject()
+                            ret.put("publicKey", Base64.encodeToString(rawPub, Base64.NO_WRAP))
+                            call.resolve(ret)
+                        } else {
+                            call.reject("KEM key generation failed", "E_KEYGEN")
+                        }
                     }
-                }
-                kemGenerating.remove(alias)
-                if (committed) {
-                    val ret = JSObject()
-                    ret.put("publicKey", Base64.encodeToString(rawPub, Base64.NO_WRAP))
-                    call.resolve(ret)
-                } else {
+
+                    if (requireBiometric) {
+                        val hostActivity = activity as? FragmentActivity
+                        if (hostActivity == null) {
+                            kemGenerating.remove(alias)
+                            call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+                        } else {
+                            authenticateCipher(hostActivity, cipher, "Authenticate to create your PQ key", call,
+                                onError = { kemGenerating.remove(alias) }) { boundCipher -> persist(boundCipher) }
+                        }
+                    } else {
+                        persist(cipher) // no-auth wrap key: wrap silently, no prompt
+                    }
+                } catch (e: Exception) {
+                    kemGenerating.remove(alias)
+                    logd("generateKemKeyPair failed for alias=$alias", e)
                     call.reject("KEM key generation failed", "E_KEYGEN")
                 }
             }
 
-            if (requireBiometric) {
+            // gate the overwrite behind a biometric ONLY when the existing KEM key is itself biometric,
+            // same rule as generateKeyPair for signing. Without this, overwrite:true silently destroys
+            // and downgrades a biometric KEM private (runGeneration retires the old wrap key).
+            val existingVer = kemPrefs().getInt(kemWrapVerKey(alias), -1)
+            val existingWrap = if (exists && existingVer >= 0) {
+                keystore().getKey(kemWrapAlias(alias, existingVer), null) as? SecretKey
+            } else null
+            if (existingWrap != null && secretKeyRequiresAuth(existingWrap)) {
                 val hostActivity = activity as? FragmentActivity
                 if (hostActivity == null) {
                     kemGenerating.remove(alias)
                     return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
                 }
-                authenticateCipher(hostActivity, cipher, "Authenticate to create your PQ key", call,
-                    onError = { kemGenerating.remove(alias) }) { boundCipher -> persist(boundCipher) }
+                val gateCipher = Cipher.getInstance("AES/GCM/NoPadding")
+                try {
+                    gateCipher.init(Cipher.ENCRYPT_MODE, existingWrap)
+                } catch (e: KeyPermanentlyInvalidatedException) {
+                    // old key already dead (enrollment changed): nothing to protect, allow overwrite
+                    logd("existing kem wrap invalidated, allowing overwrite for alias=$alias", e)
+                    runGeneration()
+                    return
+                }
+                authenticateCipher(hostActivity, gateCipher, "Authorize key replacement", call,
+                    onError = { kemGenerating.remove(alias) }) { boundCipher ->
+                    boundCipher.doFinal(byteArrayOf(0)) // prove a real biometric released the existing key
+                    runGeneration()
+                }
             } else {
-                persist(cipher) // no-auth wrap key: wrap silently, no prompt
+                runGeneration()
             }
         } catch (e: Exception) {
             kemGenerating.remove(alias)
@@ -841,12 +900,13 @@ class PQSecureStoragePlugin : Plugin() {
     private fun unlockRequiredFor(accessibility: String?): Boolean =
         accessibility != "afterFirstUnlock" && accessibility != "afterFirstUnlockThisDeviceOnly"
 
+    // on probe failure assume auth required (fail safe), same as keyRequiresAuth/secretKeyRequiresAuth
     private fun isAuthRequired(key: SecretKey): Boolean = try {
         val info = SecretKeyFactory.getInstance(key.algorithm, KEYSTORE_PROVIDER)
             .getKeySpec(key, KeyInfo::class.java) as KeyInfo
         info.isUserAuthenticationRequired
     } catch (e: Exception) {
-        false
+        logd("isAuthRequired probe failed", e); true
     }
 
     // create (replacing any existing) the per-item AES-256-GCM key: StrongBox-backed where available,
