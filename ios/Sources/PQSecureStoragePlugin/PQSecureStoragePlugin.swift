@@ -802,6 +802,10 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let key = call.getString("key"), let value = call.getString("value") else {
             call.reject("Missing key or value", "E_MISSING_PARAMS"); return
         }
+        // bound key/value (matches Android) so a caller can't flood the Keychain
+        guard !key.isEmpty, key.count <= 512, value.count <= 256 * 1024 else {
+            call.reject("Key or value out of bounds", "E_INVALID_ARGS"); return
+        }
         guard let data = value.data(using: .utf8) else {
             call.reject("Invalid value", "E_MISSING_PARAMS"); return
         }
@@ -842,11 +846,15 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
 
         // probe the existing item's tier WITHOUT prompting to decide whether a biometric is needed.
-        // UIFail (NOT UISkip) so a biometric item returns errSecInteractionNotAllowed instead of
-        // being silently skipped as errSecItemNotFound.
+        // Request DATA so the biometry ACL (which gates data, not metadata) is actually exercised;
+        // with UIFail a bio item then returns errSecInteractionNotAllowed instead of a metadata-only
+        // errSecSuccess that would be misread as silent and silently downgraded.
         var probe = matchQuery
+        probe[kSecReturnData as String] = true
+        probe[kSecMatchLimit as String] = kSecMatchLimitOne
         probe[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
-        switch SecItemCopyMatching(probe as CFDictionary, nil) {
+        var probeOut: CFTypeRef?
+        switch SecItemCopyMatching(probe as CFDictionary, &probeOut) {
         case errSecItemNotFound:
             let status = SecItemAdd(addQuery as CFDictionary, nil)
             if status == errSecSuccess { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
@@ -859,9 +867,12 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 case .success: writeItem()
                 }
             }
-        default:
-            // current item is silent (or absent-by-race): overwrite; delete+add applies the new tier
+        case errSecSuccess:
+            // current item is silent: overwrite; delete+add applies the new tier
             writeItem()
+        default:
+            // unexpected status (e.g. errSecParam): fail closed instead of blindly overwriting
+            call.reject("Store failed", "E_ENCRYPT")
         }
     }
 
@@ -904,14 +915,18 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let key = call.getString("key") else {
             call.reject("Missing key", "E_MISSING_PARAMS"); return
         }
-        // UIFail probe tells us the tier without prompting: NotFound = absent, Success = silent,
-        // InteractionNotAllowed = biometric
+        // UIFail + return-data probe tells us the tier without prompting: NotFound = absent,
+        // Success = silent, InteractionNotAllowed = biometric. Data must be requested so the biometry
+        // ACL is exercised (a metadata-only match could read as silent and delete a bio item silently).
         let probe: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
             kSecAttrAccount as String: key,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
+        var probeOut: CFTypeRef?
         let del: () -> Void = {
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
@@ -921,7 +936,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             let status = SecItemDelete(query as CFDictionary)
             if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Remove failed", "E_DECRYPT") }
         }
-        switch SecItemCopyMatching(probe as CFDictionary, nil) {
+        switch SecItemCopyMatching(probe as CFDictionary, &probeOut) {
         case errSecItemNotFound:
             call.resolve()
         case errSecInteractionNotAllowed:
@@ -932,9 +947,12 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 case .success: del()
                 }
             }
-        default:
+        case errSecSuccess:
             // silent item: delete without a prompt (matches Android / the @evva drop-in)
             del()
+        default:
+            // unexpected status: fail closed rather than deleting an item we couldn't classify
+            call.reject("Remove failed", "E_DECRYPT")
         }
     }
 
@@ -993,7 +1011,8 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             kSecMatchLimit as String: kSecMatchLimitAll,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
-        switch SecItemCopyMatching(probe as CFDictionary, nil) {
+        var probeOut: CFTypeRef?
+        switch SecItemCopyMatching(probe as CFDictionary, &probeOut) {
         case errSecItemNotFound:
             call.resolve()
         case errSecInteractionNotAllowed:
@@ -1004,9 +1023,12 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 case .success: wipe()
                 }
             }
-        default:
-            // all silent (or unreadable): wipe without a prompt, so a no-biometric device isn't locked out
+        case errSecSuccess:
+            // all silent: wipe without a prompt, so a no-biometric device isn't locked out
             wipe()
+        default:
+            // unexpected status: fail closed rather than wiping past an unclassified store
+            call.reject("Clear failed", "E_DECRYPT")
         }
     }
 }

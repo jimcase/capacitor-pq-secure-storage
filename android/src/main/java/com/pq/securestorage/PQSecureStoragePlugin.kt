@@ -520,11 +520,14 @@ class PQSecureStoragePlugin : Plugin() {
             val kemCt = enc.encapsulation
             val sharedSecret = enc.encoded // 32 bytes
             val nonce = ByteArray(12).also { SecureRandom().nextBytes(it) }
-            val cipher = Cipher.getInstance("ChaCha20-Poly1305")
-            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(sharedSecret, "ChaCha20"),
-                javax.crypto.spec.IvParameterSpec(nonce))
-            val aead = cipher.doFinal(Base64.decode(data, Base64.DEFAULT))
-            sharedSecret.fill(0)
+            val aead = try {
+                val cipher = Cipher.getInstance("ChaCha20-Poly1305")
+                cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(sharedSecret, "ChaCha20"),
+                    javax.crypto.spec.IvParameterSpec(nonce))
+                cipher.doFinal(Base64.decode(data, Base64.DEFAULT))
+            } finally {
+                sharedSecret.fill(0)
+            }
             val frame = kemCt + nonce + aead // kemCt || nonce(12) || aeadCt(+tag16)
             val ret = JSObject()
             ret.put("ciphertext", Base64.encodeToString(frame, Base64.NO_WRAP))
@@ -920,31 +923,44 @@ class PQSecureStoragePlugin : Plugin() {
         val meta = storeMeta()
         val pubB64 = meta.getString("pub", null)
         if (meta.contains("priv") && pubB64 != null) {
-            // a bio write after a biometric enrollment change encapsulates to a keypair whose
-            // private can never be unwrapped again -> the item would be permanently unreadable.
-            // Detect the dead wrap key up front and reject instead of writing garbage.
-            try {
+            // a bio write after a biometric enrollment change encapsulates to a keypair whose private
+            // can never be unwrapped again. Detect the dead wrap key: if it's alive, take the fast
+            // path; if it's invalidated, rotate to a fresh bio keypair (old bio items were already
+            // unreadable, so nothing extra is lost) instead of bricking every future bio write.
+            val invalidated = try {
                 val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
                 (ks.getKey(ssMasterAlias, null) as? SecretKey)?.let {
                     Cipher.getInstance("AES/GCM/NoPadding").init(Cipher.ENCRYPT_MODE, it)
                 }
+                false
             } catch (e: KeyPermanentlyInvalidatedException) {
-                return call.reject("Biometric enrollment changed; store key invalidated", "E_KEY_INVALIDATED")
+                true
             } catch (e: Exception) {
-                // other init errors (needs auth etc.) mean the key is still usable -> proceed
+                false // other init errors (needs auth etc.) mean the key is still usable
             }
-            try {
-                val rawPub = Base64.decode(pubB64, Base64.DEFAULT)
-                if (!verifyPubTag("ss:master", rawPub, meta.getString("tag", null))) {
-                    return call.reject("Store key integrity check failed", "E_TAMPERED")
+            if (!invalidated) {
+                try {
+                    val rawPub = Base64.decode(pubB64, Base64.DEFAULT)
+                    if (!verifyPubTag("ss:master", rawPub, meta.getString("tag", null))) {
+                        return call.reject("Store key integrity check failed", "E_TAMPERED")
+                    }
+                    persistItem(key, value, mlkemPublicFromRaw(rawPub, NISTObjectIdentifiers.id_alg_ml_kem_1024), "b")
+                    call.resolve()
+                } catch (e: Exception) {
+                    logd("setItem(bio) failed for key=$key", e)
+                    call.reject("Store failed", "E_ENCRYPT")
                 }
-                persistItem(key, value, mlkemPublicFromRaw(rawPub, NISTObjectIdentifiers.id_alg_ml_kem_1024), "b")
-                call.resolve()
-            } catch (e: Exception) {
-                logd("setItem(bio) failed for key=$key", e)
-                call.reject("Store failed", "E_ENCRYPT")
+                return
             }
-            return
+            // dead bio tier: drop the invalidated wrap key + stale meta, then fall through to
+            // re-provision a fresh keypair below
+            try {
+                val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                if (ks.containsAlias(ssMasterAlias)) ks.deleteEntry(ssMasterAlias)
+            } catch (e: Exception) {
+                logd("setItem(bio) rotate: delete failed", e)
+            }
+            meta.edit().remove("priv").remove("pub").remove("tag").commit()
         }
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
