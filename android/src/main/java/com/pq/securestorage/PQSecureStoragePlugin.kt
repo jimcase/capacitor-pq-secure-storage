@@ -75,6 +75,15 @@ class PQSecureStoragePlugin : Plugin() {
 
     private fun keystore(): KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
 
+    // reject an oversized input before decoding it (the base64 string bounds the decoded size), then
+    // confirm the decoded size. Returns null and rejects the call on either check.
+    private fun decodeCapped(call: PluginCall, data: String): ByteArray? {
+        if (data.length > MAX_CRYPTO_INPUT * 2) { call.reject("Input too large", "E_INPUT_TOO_LARGE"); return null }
+        val bytes = Base64.decode(data, Base64.DEFAULT)
+        if (bytes.size > MAX_CRYPTO_INPUT) { call.reject("Input too large", "E_INPUT_TOO_LARGE"); return null }
+        return bytes
+    }
+
     @PluginMethod
     fun getHardwareCapabilities(call: PluginCall) {
         val ok = pqcSigningSupported()
@@ -279,8 +288,7 @@ class PQSecureStoragePlugin : Plugin() {
         // optional host-supplied prompt text (NOT a consent guarantee, see definitions.ts). Cap the
         // length so a caller can't push a giant string or shove real content off-screen.
         val description = call.getString("description")?.take(200)
-        val input = Base64.decode(data, Base64.DEFAULT)
-        if (input.size > MAX_CRYPTO_INPUT) return call.reject("Input too large", "E_INPUT_TOO_LARGE")
+        val input = decodeCapped(call, data) ?: return
 
         try {
             val priv = keystore().getKey(alias, null) as? java.security.PrivateKey
@@ -322,8 +330,7 @@ class PQSecureStoragePlugin : Plugin() {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         if (!safeAlias(call, alias)) return
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
-        val input = Base64.decode(data, Base64.DEFAULT)
-        if (input.size > MAX_CRYPTO_INPUT) return call.reject("Input too large", "E_INPUT_TOO_LARGE")
+        val input = decodeCapped(call, data) ?: return
         try {
             val key = getOrCreateAtRestKey(alias)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -349,8 +356,7 @@ class PQSecureStoragePlugin : Plugin() {
             val ks = keystore()
             val key = ks.getKey(atRestAlias(alias), null) as? SecretKey
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
-            val frame = Base64.decode(data, Base64.DEFAULT)
-            if (frame.size > MAX_CRYPTO_INPUT) return call.reject("Input too large", "E_INPUT_TOO_LARGE")
+            val frame = decodeCapped(call, data) ?: return
             val iv = frame.copyOfRange(0, 12)
             val ct = frame.copyOfRange(12, frame.size)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -529,8 +535,7 @@ class PQSecureStoragePlugin : Plugin() {
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         val oid = mlkemOidOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
-        val input = Base64.decode(data, Base64.DEFAULT)
-        if (input.size > MAX_CRYPTO_INPUT) return call.reject("Input too large", "E_INPUT_TOO_LARGE")
+        val input = decodeCapped(call, data) ?: return
         try {
             // the peer sends a raw public key; rebuild the SPKI wrapper JCA needs to parse it
             val pubKey = mlkemPublicFromRaw(Base64.decode(pubStr, Base64.DEFAULT), oid)
@@ -565,8 +570,7 @@ class PQSecureStoragePlugin : Plugin() {
             val ver = kemPrefs().getInt(kemWrapVerKey(alias), -1)
             if (ver < 0) return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val privBlob = Base64.decode(privStr, Base64.DEFAULT)
-            val frame = Base64.decode(data, Base64.DEFAULT)
-            if (frame.size > MAX_CRYPTO_INPUT) return call.reject("Input too large", "E_INPUT_TOO_LARGE")
+            val frame = decodeCapped(call, data) ?: return
             if (frame.size <= ctLen + 12) return call.reject("Malformed ciphertext", "E_BAD_CIPHERTEXT")
 
             val wrapIv = privBlob.copyOfRange(0, 12)
