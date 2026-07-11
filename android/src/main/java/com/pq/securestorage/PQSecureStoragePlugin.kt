@@ -386,6 +386,8 @@ class PQSecureStoragePlugin : Plugin() {
     // only one biometric prompt shows at a time (no prompt spam / stacking)
     private val storeWriting = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val authInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    // serialize creation of the shared internal keys (HMAC/name/at-rest); the getKey hit stays lock-free
+    private val keyCreateLock = Any()
 
     @PluginMethod
     fun generateKemKeyPair(call: PluginCall) {
@@ -647,9 +649,12 @@ class PQSecureStoragePlugin : Plugin() {
     // get-or-create a non-exportable HMAC-SHA256 Keystore key under an alias
     private fun getOrCreateHmacKey(alias: String): SecretKey {
         (keystore().getKey(alias, null) as? SecretKey)?.let { return it }
-        val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, KEYSTORE_PROVIDER)
-        kg.init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY).build())
-        return kg.generateKey()
+        return synchronized(keyCreateLock) {
+            (keystore().getKey(alias, null) as? SecretKey)?.let { return@synchronized it }
+            val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_HMAC_SHA256, KEYSTORE_PROVIDER)
+            kg.init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY).build())
+            kg.generateKey()
+        }
     }
 
     // 4-byte length prefix per field so concatenated inputs can't be reinterpreted (a 2-byte
@@ -738,17 +743,20 @@ class PQSecureStoragePlugin : Plugin() {
     // get-or-create an AES-256-GCM Keystore key. authRequired binds it to a per-op strong biometric.
     private fun getOrCreateAesKey(alias: String, authRequired: Boolean): SecretKey {
         (keystore().getKey(alias, null) as? SecretKey)?.let { return it }
-        val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-        if (authRequired) {
-            spec.setUserAuthenticationRequired(true)
-                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+        return synchronized(keyCreateLock) {
+            (keystore().getKey(alias, null) as? SecretKey)?.let { return@synchronized it }
+            val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
+            val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+            if (authRequired) {
+                spec.setUserAuthenticationRequired(true)
+                    .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+            }
+            kg.init(spec.build())
+            kg.generateKey()
         }
-        kg.init(spec.build())
-        return kg.generateKey()
     }
 
     private fun getOrCreateAtRestKey(alias: String): SecretKey = getOrCreateAesKey(atRestAlias(alias), false)
@@ -986,12 +994,15 @@ class PQSecureStoragePlugin : Plugin() {
         val newBio = call.getBoolean("requireBiometric") ?: false
         val alias = itemKeyAlias(key)
         val existing = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
+        // an item's tier is fixed at creation; a change must go through removeItem. Enforce it even
+        // when the key was invalidated by an enrollment change (isAuthRequired reads metadata, still
+        // valid on an invalidated key), so a bio item can't be silently recreated as silent. Only
+        // when a real item exists -- an orphan key from a cancelled write shouldn't block a fresh one.
+        if (existing != null && storeItems().contains(nameTag(key)) && isAuthRequired(existing) != newBio) {
+            done()
+            return call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
+        }
         val itemKey: SecretKey = if (existing != null && !invalidated(existing)) {
-            // an item's tier is fixed at creation; changing requireBiometric must go through removeItem
-            if (isAuthRequired(existing) != newBio) {
-                done()
-                return call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
-            }
             existing // reuse (an accessibility change on overwrite is ignored -- set at creation)
         } else {
             try {
