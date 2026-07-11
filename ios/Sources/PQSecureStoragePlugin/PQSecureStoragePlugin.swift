@@ -308,7 +308,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             // reads the plain, non-gated public Keychain entry -- never touches the SEP key
             // handle, so this never triggers a biometric prompt
             let meta = try Self.loadMetadata(alias: alias)
-            guard let tag = meta.tag, try Self.pubTag(meta.publicKey) == tag else {
+            guard let tag = meta.tag, Self.verifyPubTag(type: meta.type, requireBiometric: meta.requireBiometric, pub: meta.publicKey, tag: tag) else {
                 return call.reject("Public key integrity check failed", "E_TAMPERED")
             }
             call.resolve(["publicKey": meta.publicKey.base64EncodedString()])
@@ -466,7 +466,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         do {
             let meta = try Self.loadKemMetadata(alias: alias)
-            guard let tag = meta.tag, try Self.pubTag(meta.publicKey) == tag else {
+            guard let tag = meta.tag, Self.verifyPubTag(type: meta.type, requireBiometric: meta.requireBiometric, pub: meta.publicKey, tag: tag) else {
                 return call.reject("Public key integrity check failed", "E_TAMPERED")
             }
             call.resolve(["publicKey": meta.publicKey.base64EncodedString()])
@@ -683,8 +683,57 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard status == errSecSuccess else { throw PQSecureStorageError.keychain(status) }
         return key
     }
-    private static func pubTag(_ pub: Data) throws -> Data {
-        Data(HMAC<SHA256>.authenticationCode(for: pub, using: try symmetricKey(account: "__pq_pubtag_hmac")))
+    // SEP-signed integrity tag over the public entry (type, bio flag, key bytes). The signing key is
+    // a non-extractable Secure Enclave P-256 key, so a keychain reader can't recompute the tag (an
+    // HMAC key would sit in the keychain, readable). Silent, device-only.
+    private static let pubSigAlgo: SecKeyAlgorithm = .ecdsaSignatureMessageX962SHA256
+    private static func pubSigKey() throws -> SecKey {
+        let tag = Data("pq.pubsig".utf8)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: tag,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecReturnRef as String: true,
+        ]
+        var out: CFTypeRef?
+        if SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let ref = out {
+            return ref as! SecKey
+        }
+        guard let access = SecAccessControlCreateWithFlags(
+            nil, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, .privateKeyUsage, nil
+        ) else { throw PQSecureStorageError.accessControlFailed }
+        let attrs: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeySizeInBits as String: 256,
+            kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+            kSecPrivateKeyAttrs as String: [
+                kSecAttrIsPermanent as String: true,
+                kSecAttrApplicationTag as String: tag,
+                kSecAttrAccessControl as String: access,
+            ],
+        ]
+        guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, nil) else {
+            throw PQSecureStorageError.badCiphertext
+        }
+        return key
+    }
+    private static func pubSignedInput(type: String, requireBiometric: Bool, pub: Data) -> Data {
+        var d = Data("\(type):\(requireBiometric ? "1" : "0"):".utf8)
+        d.append(pub)
+        return d
+    }
+    private static func pubTag(type: String, requireBiometric: Bool, pub: Data) throws -> Data {
+        var err: Unmanaged<CFError>?
+        guard let sig = SecKeyCreateSignature(try pubSigKey(), pubSigAlgo,
+            pubSignedInput(type: type, requireBiometric: requireBiometric, pub: pub) as CFData, &err) as Data? else {
+            throw PQSecureStorageError.badCiphertext
+        }
+        return sig
+    }
+    private static func verifyPubTag(type: String, requireBiometric: Bool, pub: Data, tag: Data) -> Bool {
+        guard let key = try? pubSigKey(), let pub256 = SecKeyCopyPublicKey(key) else { return false }
+        return SecKeyVerifySignature(pub256, pubSigAlgo,
+            pubSignedInput(type: type, requireBiometric: requireBiometric, pub: pub) as CFData, tag as CFData, nil)
     }
 
     // store item-name confidentiality (matches Android): the account is a keyed HMAC of the name so
@@ -747,7 +796,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             account: publicAccount(for: alias),
             data: key.publicKeyBytes,
             attrs: [
-                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: try pubTag(key.publicKeyBytes)),
+                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: try pubTag(type: type, requireBiometric: requireBiometric, pub: key.publicKeyBytes)),
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
         )
@@ -866,7 +915,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             account: kemPublicAccount(for: alias),
             data: key.publicKeyBytes,
             attrs: [
-                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: try pubTag(key.publicKeyBytes)),
+                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: try pubTag(type: type, requireBiometric: requireBiometric, pub: key.publicKeyBytes)),
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
         )

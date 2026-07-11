@@ -19,6 +19,14 @@ All notable changes to this project are documented here. The format is based on
 - iOS: public keys carry an HMAC integrity tag, verified on read (`E_TAMPERED`), matching Android.
 - iOS: store item names are no longer stored in the clear; the Keychain account is a keyed HMAC of
   the name (matching Android), with the real name kept encrypted so `keys()` still enumerates them.
+- iOS: the public-key integrity tag is now a Secure Enclave ECDSA signature over the type, biometric
+  flag, and key bytes (was an HMAC with a Keychain-resident key), so a keychain reader can no longer
+  forge it, and the tag now also covers type and requireBiometric.
+- Android: `setItem` enforces the fixed item tier even when the key was invalidated by a biometric
+  enrollment change, so a biometric item can't be silently recreated as silent.
+- Android: creation of the shared internal HMAC/name/at-rest keys is now serialized, so concurrent
+  first use can't regenerate a shared key and orphan stored items.
+- web: `decryptAtRest` now enforces the 10 MiB input cap like the other crypto ops.
 
 ### Changed
 
