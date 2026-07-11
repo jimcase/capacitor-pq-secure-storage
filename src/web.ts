@@ -166,7 +166,9 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
     async decryptAtRest(options: { keyAlias: string; data: string }): Promise<{ plaintext: string }> {
         const key = this.get(`pqss.aes.${this.safeAlias(options.keyAlias)}`);
         if (!key) throw this.unavailable('Key not found');
-        return { plaintext: toB64(this.aesOpen(key, fromB64(options.data))) };
+        const input = fromB64(options.data);
+        if (input.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
+        return { plaintext: toB64(this.aesOpen(key, input)) };
     }
 
     async generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boolean; requireBiometric?: boolean }): Promise<{ publicKey: string }> {
