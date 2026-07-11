@@ -347,7 +347,7 @@ exists unless `overwrite` is true. `requireBiometric` (default `true`) is baked 
 getKemPublicKey(options: { keyAlias: string; }) => Promise<{ publicKey: string; }>
 ```
 
-Return the raw ML-KEM public key for an alias. On Android a failed HMAC integrity-tag check rejects it; iOS/web have no such tag.
+Return the raw ML-KEM public key for an alias. Android and iOS verify an integrity tag over the stored key (a keyed HMAC on Android, a Secure Enclave signature on iOS) and reject `E_TAMPERED` on a mismatch; the web fallback has no such tag.
 
 | Param         | Type                               |
 | ------------- | ---------------------------------- |

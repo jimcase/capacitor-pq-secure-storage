@@ -71,6 +71,14 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         return alias;
     }
 
+    // reject an oversized input before decoding it (the base64 string bounds the decoded size)
+    private decodeCapped(b64: string): Uint8Array {
+        if (b64.length > MAX_CRYPTO_INPUT * 2) throw this.unavailable('Input too large');
+        const u = fromB64(b64);
+        if (u.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
+        return u;
+    }
+
     private get(k: string): Uint8Array | null {
         const v = this.store.getItem(k);
         return v === null ? null : fromB64(v);
@@ -150,24 +158,21 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         const kp = this.getKeypair('pqss.sign', this.safeAlias(options.keyAlias));
         if (!kp) throw this.unavailable('Key not found');
         if (kp.type !== options.type) throw this.unavailable('Key type mismatch');
-        const msg = fromB64(options.data);
-        if (msg.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
+        const msg = this.decodeCapped(options.data);
         const sig = dsaOf(options.type).sign(msg, kp.sk);
         return { signature: toB64(sig) };
     }
 
     async encryptAtRest(options: { keyAlias: string; data: string }): Promise<{ ciphertext: string }> {
         const key = this.getOrCreateAes(this.safeAlias(options.keyAlias));
-        const input = fromB64(options.data);
-        if (input.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
+        const input = this.decodeCapped(options.data);
         return { ciphertext: toB64(this.aesSeal(key, input)) };
     }
 
     async decryptAtRest(options: { keyAlias: string; data: string }): Promise<{ plaintext: string }> {
         const key = this.get(`pqss.aes.${this.safeAlias(options.keyAlias)}`);
         if (!key) throw this.unavailable('Key not found');
-        const input = fromB64(options.data);
-        if (input.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
+        const input = this.decodeCapped(options.data);
         return { plaintext: toB64(this.aesOpen(key, input)) };
     }
 
@@ -188,8 +193,7 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
     }
 
     async encryptTo(options: { recipientPublicKey: string; type: KemType; data: string }): Promise<{ ciphertext: string }> {
-        const input = fromB64(options.data);
-        if (input.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
+        const input = this.decodeCapped(options.data);
         const { cipherText, sharedSecret } = kemOf(options.type).encapsulate(fromB64(options.recipientPublicKey));
         const nonce = randomBytes(12);
         const aead = chacha20poly1305(sharedSecret, nonce).encrypt(input);
@@ -202,8 +206,7 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
         if (kp.type !== options.type) throw this.unavailable('Key type mismatch');
         const ctLen = KEM_CT_LEN[options.type];
         if (ctLen === undefined) throw this.unavailable('Unsupported KEM type');
-        const buf = fromB64(options.data);
-        if (buf.length > MAX_CRYPTO_INPUT) throw this.unavailable('Input too large');
+        const buf = this.decodeCapped(options.data);
         if (buf.length <= ctLen + 12) throw this.unavailable('Malformed ciphertext');
         const sharedSecret = kemOf(options.type).decapsulate(buf.subarray(0, ctLen), kp.sk);
         const nonce = buf.subarray(ctLen, ctLen + 12);
@@ -214,6 +217,10 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
     // requireBiometric/accessibility are accepted for API parity but ignored: the web fallback has
     // no biometric or Keychain, so reads are always silent
     async setItem(options: { key: string; value: string; requireBiometric?: boolean; accessibility?: string }): Promise<void> {
+        // same bounds as native so the fallback can't be flooded either
+        if (options.key.length === 0 || options.key.length > 512 || options.value.length > 256 * 1024) {
+            throw this.unavailable('Key or value out of bounds');
+        }
         // bind the item name as AEAD associated data so a value can't be moved to another key
         this.put(
             `pqss.store.${options.key}`,
