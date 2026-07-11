@@ -228,6 +228,10 @@ Document the choice in the security policy.
 - [ ] `setItem("secret-name", ...)` then `getItem("secret-name")` round-trips; `keys()` returns "secret-name".
 - [ ] A raw Keychain dump (Keychain-dumper or `security` on a jailbroken/dev device) shows the `kSecAttrAccount` is an HMAC (base64), NOT the plaintext name.
 
+## iOS destructive-gate binding (needs device design)
+
+- [ ] KNOWN LIMITATION (audit 2, B2): the store's overwrite/removeItem/clear biometric gates and the key-overwrite gate use a bare `LAContext.evaluatePolicy`, not a crypto op bound to the item's key (Android binds via a CryptoObject). Under a hooked LAContext (jailbreak) a destructive op can proceed without a real match. Under the primary threat (malicious JS on the bridge, no jailbreak) the real prompt still protects. Tightening it (require a real key op to succeed before destroying) must be designed and tested on-device: the invalidated-key rotation flow (sign fails because biometry re-enrolled) must stay distinguishable from a forged-auth failure, or key rotation breaks. Do NOT ship a blind change.
+
 ## Acceptance Criteria
 
 - [ ] Android step 4: Attestation chain confirms StrongBox or TEE.

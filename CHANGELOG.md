@@ -27,6 +27,13 @@ All notable changes to this project are documented here. The format is based on
 - Android: creation of the shared internal HMAC/name/at-rest keys is now serialized, so concurrent
   first use can't regenerate a shared key and orphan stored items.
 - web: `decryptAtRest` now enforces the 10 MiB input cap like the other crypto ops.
+- All crypto ops reject an oversized input by its base64 length before decoding it, so a huge payload
+  is not fully decoded before the cap check.
+- web: `setItem` enforces the same 512 / 256 KiB key/value bounds as the native backends.
+- iOS: store values are always device-bound; a non-ThisDeviceOnly accessibility maps to its
+  ThisDeviceOnly equivalent so a value can't land in a device backup (matches Android).
+- iOS: `clear()` classifies each item's tier individually instead of a batch data read, so a mixed
+  store can't be wiped past a biometric item without a prompt.
 
 ### Changed
 

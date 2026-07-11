@@ -320,8 +320,11 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func sign(_ call: CAPPluginCall) {
         guard let alias = call.getString("keyAlias"),
               let dataStr = call.getString("data"),
-              let type = call.getString("type"),
-              let raw = Data(base64Encoded: dataStr) else {
+              let type = call.getString("type") else {
+            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        }
+        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard let raw = Data(base64Encoded: dataStr) else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
@@ -372,8 +375,11 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func encryptAtRest(_ call: CAPPluginCall) {
         guard let alias = call.getString("keyAlias"),
-              let dataStr = call.getString("data"),
-              let raw = Data(base64Encoded: dataStr) else {
+              let dataStr = call.getString("data") else {
+            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        }
+        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard let raw = Data(base64Encoded: dataStr) else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
@@ -394,8 +400,11 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func decryptAtRest(_ call: CAPPluginCall) {
         guard let alias = call.getString("keyAlias"),
-              let dataStr = call.getString("data"),
-              let raw = Data(base64Encoded: dataStr) else {
+              let dataStr = call.getString("data") else {
+            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        }
+        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard let raw = Data(base64Encoded: dataStr) else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
@@ -479,8 +488,11 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let pubStr = call.getString("recipientPublicKey"),
               let type = call.getString("type"),
               let dataStr = call.getString("data"),
-              let pub = Data(base64Encoded: pubStr),
-              let raw = Data(base64Encoded: dataStr) else {
+              let pub = Data(base64Encoded: pubStr) else {
+            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        }
+        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard let raw = Data(base64Encoded: dataStr) else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
@@ -505,8 +517,11 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func decrypt(_ call: CAPPluginCall) {
         guard let alias = call.getString("keyAlias"),
               let type = call.getString("type"),
-              let dataStr = call.getString("data"),
-              let frame = Data(base64Encoded: dataStr) else {
+              let dataStr = call.getString("data") else {
+            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        }
+        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard let frame = Data(base64Encoded: dataStr) else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
@@ -600,12 +615,13 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     // map the JS accessibility string to a Keychain protection class (default: strictest)
+    // store values are always device-bound (matches Android, where every value is Keystore-bound);
+    // the class only picks the unlock timing, so the non-ThisDeviceOnly variants map to their
+    // ThisDeviceOnly equivalent instead of becoming backup-exportable.
     private static func accessibilityClass(_ s: String?) -> CFString {
         switch s {
-        case "whenUnlocked": return kSecAttrAccessibleWhenUnlocked
-        case "afterFirstUnlock": return kSecAttrAccessibleAfterFirstUnlock
+        case "afterFirstUnlock", "afterFirstUnlockThisDeviceOnly": return kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         case "whenPasscodeSetThisDeviceOnly": return kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly
-        case "afterFirstUnlockThisDeviceOnly": return kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         default: return kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         }
     }
@@ -968,6 +984,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     // not evaluated on SecItemAdd).
 
     private static let maxCryptoInput = 10 * 1024 * 1024 // decoded-byte cap on crypto ops
+    private static let maxCryptoInputB64 = maxCryptoInput * 2 // reject before decoding (base64 bounds it)
     private static let ssService = "pq.securestorage"
 
     @objc func setItem(_ call: CAPPluginCall) {
@@ -1213,33 +1230,50 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             }
             if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Clear failed", "E_DECRYPT") }
         }
-        // reading data with UIFail across the whole service reveals the tier mix WITHOUT prompting:
-        // NotFound = empty, InteractionNotAllowed = at least one biometric item, Success = all silent
-        let probe: [String: Any] = [
+        // enumerate accounts without prompting (metadata read, the biometry ACL gates data not
+        // metadata), then probe each item individually for its tier. A batch data read across a
+        // mixed store has ill-defined semantics and could report all-silent and wipe a bio item.
+        let listQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
-            kSecReturnData as String: true,
+            kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
         ]
-        var probeOut: CFTypeRef?
-        switch SecItemCopyMatching(probe as CFDictionary, &probeOut) {
-        case errSecItemNotFound:
-            call.resolve()
-        case errSecInteractionNotAllowed:
-            // at least one biometric item: prompt once before wiping
+        var listOut: CFTypeRef?
+        let listStatus = SecItemCopyMatching(listQuery as CFDictionary, &listOut)
+        if listStatus == errSecItemNotFound { return call.resolve() }
+        guard listStatus == errSecSuccess, let items = listOut as? [[String: Any]] else {
+            return call.reject("Clear failed", "E_DECRYPT")
+        }
+        var hasBiometric = false
+        for item in items {
+            guard let account = item[kSecAttrAccount as String] as? String else {
+                return call.reject("Clear failed", "E_DECRYPT") // unclassifiable -> fail closed
+            }
+            let probe: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: Self.ssService,
+                kSecAttrAccount as String: account,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne,
+                kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+            ]
+            switch SecItemCopyMatching(probe as CFDictionary, nil) {
+            case errSecInteractionNotAllowed: hasBiometric = true
+            case errSecSuccess, errSecItemNotFound: break
+            default: return call.reject("Clear failed", "E_DECRYPT") // fail closed on unexpected
+            }
+        }
+        if hasBiometric {
             Self.authenticate(reason: "Authenticate to erase secure storage") { result in
                 switch result {
                 case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
                 case .success: wipe()
                 }
             }
-        case errSecSuccess:
-            // all silent: wipe without a prompt, so a no-biometric device isn't locked out
+        } else {
             wipe()
-        default:
-            // unexpected status: fail closed rather than wiping past an unclassified store
-            call.reject("Clear failed", "E_DECRYPT")
         }
     }
 }
