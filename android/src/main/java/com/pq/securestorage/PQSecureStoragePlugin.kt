@@ -67,10 +67,37 @@ class PQSecureStoragePlugin : Plugin() {
         if (e != null) Log.d(TAG, msg, e) else Log.d(TAG, msg)
     }
 
-    private fun algOf(type: String?): String? = when (type) {
-        "PQC_MLDSA_65" -> "ML-DSA-65"
-        "PQC_MLDSA_87" -> "ML-DSA-87"
+    // signature algorithm registry: JCA keypair algo, JCA signature algo, and whether it is EC
+    // (EC needs the curve spec on keygen and DER->raw + point compression on the wire).
+    private data class SigAlg(val keyPairAlgo: String, val signatureAlgo: String, val isEc: Boolean)
+    private fun sigAlgOf(type: String?): SigAlg? = when (type) {
+        "PQC_MLDSA_65" -> SigAlg("ML-DSA-65", "ML-DSA-65", false)
+        "PQC_MLDSA_87" -> SigAlg("ML-DSA-87", "ML-DSA-87", false)
+        "ECDSA_256R1" -> SigAlg("EC", "SHA256withECDSA", true)
         else -> null
+    }
+
+    // compressed SEC1 point (33B: 0x02/0x03 || X) for an EC public key -- the CESR form
+    private fun compressEcPoint(pub: java.security.PublicKey): ByteArray {
+        val w = (pub as java.security.interfaces.ECPublicKey).w
+        val prefix = if (w.affineY.testBit(0)) 0x03.toByte() else 0x02.toByte()
+        return byteArrayOf(prefix) + toFixed(w.affineX, 32)
+    }
+    // big-endian fixed-length bytes (strips the sign byte / left-pads short values)
+    private fun toFixed(v: java.math.BigInteger, len: Int): ByteArray {
+        val b = v.toByteArray()
+        if (b.size == len) return b
+        val out = ByteArray(len)
+        if (b.size == len + 1 && b[0] == 0.toByte()) System.arraycopy(b, 1, out, 0, len)
+        else System.arraycopy(b, 0, out, len - b.size, b.size)
+        return out
+    }
+    // DER ECDSA signature -> raw r||s (64B)
+    private fun ecdsaDerToRaw(der: ByteArray): ByteArray {
+        val seq = org.bouncycastle.asn1.ASN1Sequence.getInstance(der)
+        val r = (seq.getObjectAt(0) as org.bouncycastle.asn1.ASN1Integer).positiveValue
+        val s = (seq.getObjectAt(1) as org.bouncycastle.asn1.ASN1Integer).positiveValue
+        return toFixed(r, 32) + toFixed(s, 32)
     }
 
     private fun keystore(): KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
@@ -99,7 +126,10 @@ class PQSecureStoragePlugin : Plugin() {
         val bioAvail = BiometricManager.from(context)
             .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
         ret.put("biometricGated", bioAvail)
-        ret.put("supportedVariants", if (ok) listOf("PQC_MLDSA_65", "PQC_MLDSA_87") else emptyList<String>())
+        // ECDSA P-256 is always available in AndroidKeyStore; ML-DSA only if KeyMint implements it
+        val variants = mutableListOf("ECDSA_256R1")
+        if (ok) { variants.add("PQC_MLDSA_65"); variants.add("PQC_MLDSA_87") }
+        ret.put("supportedVariants", variants)
         // ML-KEM works via software (BouncyCastle) on any API; the private key is wrapped by a
         // Keystore AES key. AndroidKeyStore does not expose ML-KEM to apps, so it is NOT in the SEP.
         ret.put("supportedKem", listOf("PQC_MLKEM_768", "PQC_MLKEM_1024"))
@@ -111,7 +141,7 @@ class PQSecureStoragePlugin : Plugin() {
     fun generateKeyPair(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         if (!safeAlias(call, alias)) return
-        val alg = algOf(call.getString("type")) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
+        val sa = sigAlgOf(call.getString("type")) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
         val overwrite = call.getBoolean("overwrite") ?: false
         val requireBiometric = call.getBoolean("requireBiometric") ?: true
         val ks = try {
@@ -131,10 +161,10 @@ class PQSecureStoragePlugin : Plugin() {
         if (existingBio) {
             val hostActivity = activity as? FragmentActivity
                 ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-            authForExistingSign(hostActivity, alias, call) { doGenerateSigningKey(alias, alg, requireBiometric, call) }
+            authForExistingSign(hostActivity, alias, call) { doGenerateSigningKey(alias, sa, requireBiometric, call) }
             return
         }
-        doGenerateSigningKey(alias, alg, requireBiometric, call)
+        doGenerateSigningKey(alias, sa, requireBiometric, call)
     }
 
     @Volatile private var hwCache: Boolean? = null
@@ -208,7 +238,7 @@ class PQSecureStoragePlugin : Plugin() {
         logd("secretKeyRequiresAuth probe failed", e); true
     }
 
-    private fun doGenerateSigningKey(alias: String, alg: String, requireBiometric: Boolean, call: PluginCall) {
+    private fun doGenerateSigningKey(alias: String, sa: SigAlg, requireBiometric: Boolean, call: PluginCall) {
         try {
             // no pre-delete. Generating to an existing alias replaces it; a failed keygen
             // leaves the old key intact instead of destroying it first.
@@ -216,8 +246,12 @@ class PQSecureStoragePlugin : Plugin() {
             // AndroidKeyStore does NOT guarantee TEE/StrongBox placement -- if KeyMint doesn't
             // implement ML-DSA in hardware on this device it silently falls back to the software
             // keystore. getHardwareCapabilities probes the real security level instead of assuming.
-            val kpg = KeyPairGenerator.getInstance(alg, KEYSTORE_PROVIDER)
+            val kpg = KeyPairGenerator.getInstance(sa.keyPairAlgo, KEYSTORE_PROVIDER)
             val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
+            if (sa.isEc) {
+                spec.setAlgorithmParameterSpec(java.security.spec.ECGenParameterSpec("secp256r1"))
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+            }
             if (requireBiometric) {
                 // Per-operation auth: timeout 0 means the key never sits unlocked. Every use needs a
                 // fresh biometric bound to the specific Signature (see sign()) -- closes GHSA-vx5f.
@@ -226,8 +260,9 @@ class PQSecureStoragePlugin : Plugin() {
             }
             kpg.initialize(spec.build())
             val kp = kpg.generateKeyPair()
+            val pubRaw = if (sa.isEc) compressEcPoint(kp.public) else rawFromSpki(kp.public.encoded)
             val ret = JSObject()
-            ret.put("publicKey", Base64.encodeToString(rawFromSpki(kp.public.encoded), Base64.NO_WRAP))
+            ret.put("publicKey", Base64.encodeToString(pubRaw, Base64.NO_WRAP))
             call.resolve(ret)
         } catch (e: Exception) {
             logd("generateKeyPair failed for alias=$alias", e)
@@ -269,8 +304,10 @@ class PQSecureStoragePlugin : Plugin() {
         try {
             val ks = keystore()
             val cert = ks.getCertificate(alias) ?: return call.reject("Key not found", "E_PUBKEY")
+            val pub = cert.publicKey
+            val pubRaw = if (pub is java.security.interfaces.ECPublicKey) compressEcPoint(pub) else rawFromSpki(pub.encoded)
             val ret = JSObject()
-            ret.put("publicKey", Base64.encodeToString(rawFromSpki(cert.publicKey.encoded), Base64.NO_WRAP))
+            ret.put("publicKey", Base64.encodeToString(pubRaw, Base64.NO_WRAP))
             call.resolve(ret)
         } catch (e: Exception) {
             logd("getPublicKey failed for alias=$alias", e)
@@ -284,7 +321,7 @@ class PQSecureStoragePlugin : Plugin() {
         if (!safeAlias(call, alias)) return
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
-        val alg = algOf(type) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
+        val sa = sigAlgOf(type) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
         // optional host-supplied prompt text (NOT a consent guarantee, see definitions.ts). Cap the
         // length so a caller can't push a giant string or shove real content off-screen.
         val description = call.getString("description")?.take(200)
@@ -295,8 +332,10 @@ class PQSecureStoragePlugin : Plugin() {
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
             // initSign() does NOT unlock the key -- the Keystore only releases material inside
             // sign()/update(), and (for a biometric key) only for the Signature a real match bound.
-            val signer = Signature.getInstance(alg)
+            val signer = Signature.getInstance(sa.signatureAlgo)
             signer.initSign(priv)
+            // EC yields a DER signature; CESR/the wire want raw r||s
+            val encodeSig = { raw: ByteArray -> Base64.encodeToString(if (sa.isEc) ecdsaDerToRaw(raw) else raw, Base64.NO_WRAP) }
             if (keyRequiresAuth(priv)) {
                 // Capacitor's BridgeActivity is a FragmentActivity, needed to host BiometricPrompt
                 val hostActivity = activity as? FragmentActivity
@@ -304,14 +343,14 @@ class PQSecureStoragePlugin : Plugin() {
                 authenticateSignature(hostActivity, signer, "Authorize signature", description, call) { boundSigner ->
                     boundSigner.update(input)
                     val ret = JSObject()
-                    ret.put("signature", Base64.encodeToString(boundSigner.sign(), Base64.NO_WRAP))
+                    ret.put("signature", encodeSig(boundSigner.sign()))
                     call.resolve(ret)
                 }
             } else {
                 // silent key: sign directly, no prompt
                 signer.update(input)
                 val ret = JSObject()
-                ret.put("signature", Base64.encodeToString(signer.sign(), Base64.NO_WRAP))
+                ret.put("signature", encodeSig(signer.sign()))
                 call.resolve(ret)
             }
         } catch (e: KeyPermanentlyInvalidatedException) {

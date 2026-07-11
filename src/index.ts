@@ -7,4 +7,5 @@ const PQSecureStorage = registerPlugin<PQSecureStoragePlugin>('PQSecureStorage',
 });
 
 export * from './definitions.js';
+export * from './algorithms.js';
 export { PQSecureStorage };

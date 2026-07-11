@@ -1,4 +1,4 @@
-export type SignatureType = 'PQC_MLDSA_65' | 'PQC_MLDSA_87';
+export type SignatureType = 'PQC_MLDSA_65' | 'PQC_MLDSA_87' | 'ECDSA_256R1';
 export type KemType = 'PQC_MLKEM_768' | 'PQC_MLKEM_1024';
 
 /**

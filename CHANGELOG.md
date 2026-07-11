@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Extensible signature algorithm registry (`SIGNATURE_ALGORITHMS`) with per-algorithm tier
+  (`hardware` / `wrapped`), raw key/signature sizes, and the CESR primitive codes each maps to.
+- ECDSA P-256 (secp256r1) hardware-backed signing on iOS (Secure Enclave) and Android (Keystore),
+  with the software fallback on web. Compressed 33-byte public keys and raw 64-byte r||s signatures
+  (CESR-aligned); `getHardwareCapabilities` lists `ECDSA_256R1`.
+
 ### Security
 
 - Cap decoded input at 10 MiB on `sign`/`encryptAtRest`/`decryptAtRest`/`encryptTo`/`decrypt`

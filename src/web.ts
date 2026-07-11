@@ -2,6 +2,7 @@ import { WebPlugin } from '@capacitor/core';
 
 import { ml_dsa65, ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ml_kem768, ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
+import { p256 } from '@noble/curves/nist.js';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
@@ -16,10 +17,20 @@ import type { PQSecureStoragePlugin, SignatureType, KemType, HardwareCapabilitie
 // stops accidental value swaps.
 
 const KEM_CT_LEN: Record<KemType, number> = { PQC_MLKEM_768: 1088, PQC_MLKEM_1024: 1568 };
+// ECDSA P-256 normalized to the same {keygen, sign} shape as the ML-DSA objects. Compressed public
+// key (33B) and raw r||s signature (64B) to match CESR; prehash signs SHA-256(msg) like SHA256withECDSA.
+const p256Dsa = {
+    keygen: () => {
+        const secretKey = p256.utils.randomSecretKey();
+        return { secretKey, publicKey: p256.getPublicKey(secretKey, true) };
+    },
+    sign: (msg: Uint8Array, sk: Uint8Array) => p256.sign(msg, sk, { prehash: true }),
+};
 // throw on any unknown type instead of silently falling through to the second variant
 const dsaOf = (t: SignatureType) => {
     if (t === 'PQC_MLDSA_65') return ml_dsa65;
     if (t === 'PQC_MLDSA_87') return ml_dsa87;
+    if (t === 'ECDSA_256R1') return p256Dsa;
     throw new Error('Unsupported key type');
 };
 const kemOf = (t: KemType) => {
@@ -132,7 +143,7 @@ export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlug
             supportsPqc: true,
             hardwareBacked: false, // localStorage, not a TEE
             biometricGated: false,
-            supportedVariants: ['PQC_MLDSA_65', 'PQC_MLDSA_87'],
+            supportedVariants: ['PQC_MLDSA_65', 'PQC_MLDSA_87', 'ECDSA_256R1'],
             supportedKem: ['PQC_MLKEM_768', 'PQC_MLKEM_1024'],
             kemInSecureEnclave: false,
         };

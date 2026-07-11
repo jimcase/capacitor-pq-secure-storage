@@ -51,11 +51,14 @@ private let vcpLog = OSLog(subsystem: "com.pq.securestorage", category: "PQSecur
 enum PQKey {
     case v65(SecureEnclave.MLDSA65.PrivateKey)
     case v87(SecureEnclave.MLDSA87.PrivateKey)
+    case p256(SecureEnclave.P256.Signing.PrivateKey)
 
     var publicKeyBytes: Data {
         switch self {
         case .v65(let k): return k.publicKey.rawRepresentation
         case .v87(let k): return k.publicKey.rawRepresentation
+        // compressed SEC1 point (33B), the CESR form for ECDSA secp256r1
+        case .p256(let k): return k.publicKey.compressedRepresentation
         }
     }
 
@@ -64,6 +67,7 @@ enum PQKey {
         switch self {
         case .v65(let k): return k.dataRepresentation
         case .v87(let k): return k.dataRepresentation
+        case .p256(let k): return k.dataRepresentation
         }
     }
 
@@ -76,6 +80,8 @@ enum PQKey {
             return .v65(try SecureEnclave.MLDSA65.PrivateKey(accessControl: accessControl))
         case "PQC_MLDSA_87":
             return .v87(try SecureEnclave.MLDSA87.PrivateKey(accessControl: accessControl))
+        case "ECDSA_256R1":
+            return .p256(try SecureEnclave.P256.Signing.PrivateKey(accessControl: accessControl))
         default:
             throw PQSecureStorageError.unsupportedType
         }
@@ -91,6 +97,8 @@ enum PQKey {
             self = .v65(try SecureEnclave.MLDSA65.PrivateKey(dataRepresentation: data, authenticationContext: context))
         case "PQC_MLDSA_87":
             self = .v87(try SecureEnclave.MLDSA87.PrivateKey(dataRepresentation: data, authenticationContext: context))
+        case "ECDSA_256R1":
+            self = .p256(try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data, authenticationContext: context))
         default:
             throw PQSecureStorageError.unsupportedType
         }
@@ -100,6 +108,8 @@ enum PQKey {
         switch self {
         case .v65(let k): return try k.signature(for: data)
         case .v87(let k): return try k.signature(for: data)
+        // raw r||s (64B), not DER, to match CESR
+        case .p256(let k): return try k.signature(for: data).rawRepresentation
         }
     }
 }
@@ -227,7 +237,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 "supportsPqc": hw,
                 "hardwareBacked": hw,
                 "biometricGated": hw,
-                "supportedVariants": hw ? ["PQC_MLDSA_65", "PQC_MLDSA_87"] : [],
+                "supportedVariants": hw ? ["ECDSA_256R1", "PQC_MLDSA_65", "PQC_MLDSA_87"] : [],
                 "supportedKem": hw ? ["PQC_MLKEM_768", "PQC_MLKEM_1024"] : [],
                 "kemInSecureEnclave": hw
             ])
@@ -249,7 +259,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
-        guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" else {
+        guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" || type == "ECDSA_256R1" else {
             return call.reject("Unsupported key type", "E_UNSUPPORTED")
         }
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
@@ -329,7 +339,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
-        guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" else {
+        guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" || type == "ECDSA_256R1" else {
             return call.reject("Unsupported key type", "E_UNSUPPORTED")
         }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
