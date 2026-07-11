@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { p256 } from '@noble/curves/nist.js';
+import { ed25519 } from '@noble/curves/ed25519.js';
 import { PQSecureStorageWeb } from '../src/web';
 
 class MemoryStorage implements Storage {
@@ -54,6 +55,16 @@ describe('web software fallback', () => {
         const { signature } = await pq.sign({ keyAlias: 'p256', data: msg, type: 'ECDSA_256R1' });
         expect(bytes(signature).length).toBe(64);
         expect(p256.verify(bytes(signature), bytes(msg), bytes(publicKey), { prehash: true })).toBe(true);
+    });
+
+    it('signs with a real Ed25519 key that verifies (32B pubkey, 64B sig)', async () => {
+        const pq = web();
+        const { publicKey } = await pq.generateKeyPair({ keyAlias: 'ed', type: 'ED25519' });
+        expect(bytes(publicKey).length).toBe(32);
+        const msg = b64('sign me');
+        const { signature } = await pq.sign({ keyAlias: 'ed', data: msg, type: 'ED25519' });
+        expect(bytes(signature).length).toBe(64);
+        expect(ed25519.verify(bytes(signature), bytes(msg), bytes(publicKey))).toBe(true);
     });
 
     it('rejects a second keypair without overwrite', async () => {

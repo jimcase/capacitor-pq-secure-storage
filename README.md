@@ -524,7 +524,7 @@ the store is already empty. Web fallback has no biometric, so silent.
 
 #### SignatureType
 
-<code>'PQC_MLDSA_65' | 'PQC_MLDSA_87' | 'ECDSA_256R1'</code>
+<code>'PQC_MLDSA_65' | 'PQC_MLDSA_87' | 'ECDSA_256R1' | 'ED25519'</code>
 
 
 #### KemType

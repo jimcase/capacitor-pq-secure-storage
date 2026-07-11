@@ -237,7 +237,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 "supportsPqc": hw,
                 "hardwareBacked": hw,
                 "biometricGated": hw,
-                "supportedVariants": hw ? ["ECDSA_256R1", "PQC_MLDSA_65", "PQC_MLDSA_87"] : [],
+                "supportedVariants": hw ? ["ECDSA_256R1", "ED25519", "PQC_MLDSA_65", "PQC_MLDSA_87"] : [],
                 "supportedKem": hw ? ["PQC_MLKEM_768", "PQC_MLKEM_1024"] : [],
                 "kemInSecureEnclave": hw
             ])
@@ -259,13 +259,16 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
-        guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" || type == "ECDSA_256R1" else {
+        guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" || type == "ECDSA_256R1" || type == "ED25519" else {
             return call.reject("Unsupported key type", "E_UNSUPPORTED")
         }
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
 
         let overwrite = call.getBool("overwrite") ?? false
         let requireBiometric = call.getBool("requireBiometric") ?? true
+        if type == "ED25519" {
+            return wrappedGenerate(alias: alias, type: type, overwrite: overwrite, requireBiometric: requireBiometric, call: call)
+        }
         let exists = Self.aliasExists(alias)
         if !overwrite && exists {
             // alias may back a live identity already -- refuse to silently clobber it
@@ -315,6 +318,13 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
         do {
+            // wrapped (software) signing keys keep their public entry under a separate account
+            if let wmeta = try? Self.loadWrapMetadata(alias: alias) {
+                guard let tag = wmeta.tag, Self.verifyPubTag(type: wmeta.type, requireBiometric: wmeta.requireBiometric, pub: wmeta.publicKey, tag: tag) else {
+                    return call.reject("Public key integrity check failed", "E_TAMPERED")
+                }
+                return call.resolve(["publicKey": wmeta.publicKey.base64EncodedString()])
+            }
             // reads the plain, non-gated public Keychain entry -- never touches the SEP key
             // handle, so this never triggers a biometric prompt
             let meta = try Self.loadMetadata(alias: alias)
@@ -339,7 +349,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
-        guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" || type == "ECDSA_256R1" else {
+        guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" || type == "ECDSA_256R1" || type == "ED25519" else {
             return call.reject("Unsupported key type", "E_UNSUPPORTED")
         }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
@@ -347,12 +357,15 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         // prompt text only, not a consent guarantee (see definitions.ts). Cap so a caller can't
         // push a giant string or shove real content off-screen.
         let reason = String((call.getString("description") ?? "Authenticate to sign with your PQ key").prefix(200))
+        if type == "ED25519" {
+            return wrappedSign(alias: alias, reason: reason, msg: raw, call: call)
+        }
 
         let doSign: (LAContext) -> Void = { context in
             do {
                 let key = try Self.loadKey(alias: alias, context: context)
                 switch (type, key) {
-                case ("PQC_MLDSA_65", .v65), ("PQC_MLDSA_87", .v87):
+                case ("PQC_MLDSA_65", .v65), ("PQC_MLDSA_87", .v87), ("ECDSA_256R1", .p256):
                     break
                 default:
                     return call.reject("Key type mismatch", "E_TYPE_MISMATCH")
@@ -871,6 +884,118 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         // hands the evaluated `context` to the SEP so it can check the access-control policy
         // baked in at generation time (`.biometryCurrentSet`) without prompting again
         return try PQKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
+    }
+
+    // MARK: - Wrapped (software) signing keys (Ed25519)
+    //
+    // Ed25519 is not a Secure Enclave key type, so the 32-byte private lives in the Keychain behind a
+    // biometry access control (tier=wrapped): protected at rest by the device keybag, gated on read.
+    // The public entry carries the SEP-signed integrity tag, like the SEP keys.
+
+    private static func wrapPrivAccount(_ alias: String) -> String { "\(alias).sigwrap.priv" }
+    private static func wrapPubAccount(_ alias: String) -> String { "\(alias).sigwrap.pub" }
+
+    private static func loadWrapMetadata(alias: String) throws -> KeyMetadata {
+        var query = baseQuery(account: wrapPubAccount(alias))
+        query[kSecReturnData as String] = true
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let item = result as? [String: Any],
+              let pubData = item[kSecValueData as String] as? Data,
+              let typeData = item[kSecAttrGeneric as String] as? Data,
+              let decoded = decodeGeneric(typeData) else { throw PQSecureStorageError.keyNotFound }
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag)
+    }
+
+    private static func persistWrapped(alias: String, type: String, requireBiometric: Bool, priv: Data, pub: Data) throws {
+        let tag = try pubTag(type: type, requireBiometric: requireBiometric, pub: pub)
+        let pubStatus = upsertKeychain(account: wrapPubAccount(alias), data: pub, attrs: [
+            kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: tag),
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        ])
+        guard pubStatus == errSecSuccess else { throw PQSecureStorageError.keychain(pubStatus) }
+        var privAttrs: [String: Any] = [:]
+        if requireBiometric {
+            guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .biometryCurrentSet, nil) else {
+                throw PQSecureStorageError.accessControlFailed
+            }
+            privAttrs[kSecAttrAccessControl as String] = access
+        } else {
+            privAttrs[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        }
+        // deterministic ACL: delete-then-add (the overwrite is gated at the call site)
+        SecItemDelete(baseQuery(account: wrapPrivAccount(alias)) as CFDictionary)
+        var add = baseQuery(account: wrapPrivAccount(alias))
+        add[kSecValueData as String] = priv
+        for (k, v) in privAttrs { add[k] = v }
+        let privStatus = SecItemAdd(add as CFDictionary, nil)
+        guard privStatus == errSecSuccess else { throw PQSecureStorageError.keychain(privStatus) }
+    }
+
+    private func wrappedGenerate(alias: String, type: String, overwrite: Bool, requireBiometric: Bool, call: CAPPluginCall) {
+        let exists = (try? Self.loadWrapMetadata(alias: alias)) != nil
+        if !overwrite && exists {
+            return call.reject("Alias already exists", "E_ALIAS_EXISTS")
+        }
+        let doGenerate: () -> Void = {
+            do {
+                let priv = Curve25519.Signing.PrivateKey()
+                let pub = priv.publicKey.rawRepresentation
+                try Self.persistWrapped(alias: alias, type: type, requireBiometric: requireBiometric, priv: priv.rawRepresentation, pub: pub)
+                call.resolve(["publicKey": pub.base64EncodedString()])
+            } catch {
+                os_log("wrappedGenerate failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+                call.reject("Key generation failed", "E_KEYGEN")
+            }
+        }
+        // gate overwrite of an existing biometric wrapped key (bare evaluatePolicy -- see B2 note)
+        let existingBio = exists && ((try? Self.loadWrapMetadata(alias: alias).requireBiometric) ?? true)
+        if existingBio {
+            Self.authenticate(reason: "Authenticate to replace your key") { result in
+                switch result {
+                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .success: doGenerate()
+                }
+            }
+        } else {
+            doGenerate()
+        }
+    }
+
+    private func wrappedSign(alias: String, reason: String, msg: Data, call: CAPPluginCall) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let meta = try Self.loadWrapMetadata(alias: alias)
+                guard let tag = meta.tag, Self.verifyPubTag(type: meta.type, requireBiometric: meta.requireBiometric, pub: meta.publicKey, tag: tag) else {
+                    return call.reject("Public key integrity check failed", "E_TAMPERED")
+                }
+                let context = LAContext()
+                context.localizedReason = reason
+                var q = Self.baseQuery(account: Self.wrapPrivAccount(alias))
+                q[kSecReturnData as String] = true
+                q[kSecMatchLimit as String] = kSecMatchLimitOne
+                q[kSecUseAuthenticationContext as String] = context
+                var out: CFTypeRef?
+                switch SecItemCopyMatching(q as CFDictionary, &out) {
+                case errSecSuccess:
+                    guard let privRaw = out as? Data else { return call.reject("Signing failed", "E_SIGN") }
+                    let priv = try Curve25519.Signing.PrivateKey(rawRepresentation: privRaw)
+                    let sig = try priv.signature(for: msg)
+                    call.resolve(["signature": sig.base64EncodedString()])
+                case errSecItemNotFound:
+                    call.reject("Key not found", "E_KEY_NOT_FOUND")
+                case errSecUserCanceled, errSecAuthFailed:
+                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                default:
+                    call.reject("Signing failed", "E_SIGN")
+                }
+            } catch {
+                os_log("wrappedSign failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+                call.reject("Signing failed", "E_SIGN")
+            }
+        }
     }
 
     // MARK: - At-rest key (per-alias Secure Enclave P-256, ECIES)

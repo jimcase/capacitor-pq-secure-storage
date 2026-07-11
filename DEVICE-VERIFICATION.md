@@ -232,6 +232,11 @@ Document the choice in the security policy.
 
 - [ ] KNOWN LIMITATION (audit 2, B2): the store's overwrite/removeItem/clear biometric gates and the key-overwrite gate use a bare `LAContext.evaluatePolicy`, not a crypto op bound to the item's key (Android binds via a CryptoObject). Under a hooked LAContext (jailbreak) a destructive op can proceed without a real match. Under the primary threat (malicious JS on the bridge, no jailbreak) the real prompt still protects. Tightening it (require a real key op to succeed before destroying) must be designed and tested on-device: the invalidated-key rotation flow (sign fails because biometry re-enrolled) must stay distinguishable from a forged-auth failure, or key rotation breaks. Do NOT ship a blind change.
 
+## Signature algorithms (device)
+
+- [ ] ECDSA P-256: generateKeyPair + sign; the 64-byte r||s signature verifies off-device against the 33-byte compressed public key; biometric prompts per sign when `requireBiometric`.
+- [ ] Ed25519 (wrapped): generateKeyPair + sign; the 64-byte signature verifies off-device against the 32-byte public key; the biometric gates the unwrap-to-sign; a raw Keychain/prefs dump never shows the Ed25519 private in the clear.
+
 ## Acceptance Criteria
 
 - [ ] Android step 4: Attestation chain confirms StrongBox or TEE.

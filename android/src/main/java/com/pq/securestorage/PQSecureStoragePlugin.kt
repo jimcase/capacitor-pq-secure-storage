@@ -69,12 +69,161 @@ class PQSecureStoragePlugin : Plugin() {
 
     // signature algorithm registry: JCA keypair algo, JCA signature algo, and whether it is EC
     // (EC needs the curve spec on keygen and DER->raw + point compression on the wire).
-    private data class SigAlg(val keyPairAlgo: String, val signatureAlgo: String, val isEc: Boolean)
+    private data class SigAlg(val keyPairAlgo: String, val signatureAlgo: String, val isEc: Boolean, val wrapped: Boolean)
     private fun sigAlgOf(type: String?): SigAlg? = when (type) {
-        "PQC_MLDSA_65" -> SigAlg("ML-DSA-65", "ML-DSA-65", false)
-        "PQC_MLDSA_87" -> SigAlg("ML-DSA-87", "ML-DSA-87", false)
-        "ECDSA_256R1" -> SigAlg("EC", "SHA256withECDSA", true)
+        "PQC_MLDSA_65" -> SigAlg("ML-DSA-65", "ML-DSA-65", false, false)
+        "PQC_MLDSA_87" -> SigAlg("ML-DSA-87", "ML-DSA-87", false, false)
+        "ECDSA_256R1" -> SigAlg("EC", "SHA256withECDSA", true, false)
+        "ED25519" -> SigAlg("Ed25519", "Ed25519", false, true)
         else -> null
+    }
+
+    // Ed25519 keygen/sign in software (BouncyCastle); the private seed is wrapped by a Keystore key
+    // at rest (this is the tier=wrapped path). Returns (seed32, pub32).
+    private fun ed25519Keygen(): Pair<ByteArray, ByteArray> {
+        val kpg = org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator()
+        kpg.init(org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters(SecureRandom()))
+        val kp = kpg.generateKeyPair()
+        val seed = (kp.private as org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters).encoded
+        val pub = (kp.public as org.bouncycastle.crypto.params.Ed25519PublicKeyParameters).encoded
+        return seed to pub
+    }
+    private fun ed25519Sign(seed: ByteArray, msg: ByteArray): ByteArray {
+        val signer = org.bouncycastle.crypto.signers.Ed25519Signer()
+        signer.init(true, org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters(seed, 0))
+        signer.update(msg, 0, msg.size)
+        return signer.generateSignature()
+    }
+
+    private fun sigPrefs() = context.getSharedPreferences("pq_sig", android.content.Context.MODE_PRIVATE)
+    private fun sigWrapAlias(alias: String) = "__pq_sigwrap_$alias"
+    private fun sigPrivKey(alias: String) = "$alias.priv"
+    private fun sigPubKey(alias: String) = "$alias.pub"
+    private fun sigTypeKey(alias: String) = "$alias.type"
+    private fun sigTagKey(alias: String) = "$alias.tag"
+
+    // wrapped signing key generation: software keypair, private seed wrapped by a per-alias Keystore
+    // AES key (auth-required if biometric), stored in prefs. Mirrors generateKemKeyPair incl. the
+    // biometric overwrite gate.
+    private fun generateWrappedSigningKey(alias: String, type: String, overwrite: Boolean, requireBiometric: Boolean, call: PluginCall) {
+        if (!sigGenerating.add(alias)) return call.reject("Key generation in progress, retry", "E_BUSY")
+        try {
+            val exists = sigPrefs().contains(sigPubKey(alias))
+            if (!overwrite && exists) {
+                sigGenerating.remove(alias)
+                return call.reject("Alias already exists", "E_ALIAS_EXISTS")
+            }
+            val runGeneration: () -> Unit = {
+                try {
+                    val (seed, pub) = ed25519Keygen()
+                    val ks = keystore()
+                    if (ks.containsAlias(sigWrapAlias(alias))) ks.deleteEntry(sigWrapAlias(alias))
+                    val wrapKey = getOrCreateAesKey(sigWrapAlias(alias), requireBiometric)
+                    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                    cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
+                    val persist = { c: Cipher ->
+                        val wrapped = c.iv + c.doFinal(seed)
+                        seed.fill(0)
+                        val committed = sigPrefs().edit()
+                            .putString(sigPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
+                            .putString(sigPubKey(alias), Base64.encodeToString(pub, Base64.NO_WRAP))
+                            .putString(sigTypeKey(alias), type)
+                            .putString(sigTagKey(alias), pubTag("sig:$alias", pub))
+                            .commit()
+                        sigGenerating.remove(alias)
+                        if (committed) {
+                            val ret = JSObject()
+                            ret.put("publicKey", Base64.encodeToString(pub, Base64.NO_WRAP))
+                            call.resolve(ret)
+                        } else {
+                            call.reject("Key generation failed", "E_KEYGEN")
+                        }
+                    }
+                    if (requireBiometric) {
+                        val host = activity as? FragmentActivity
+                        if (host == null) {
+                            sigGenerating.remove(alias)
+                            call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+                        } else {
+                            authenticateCipher(host, cipher, "Authenticate to create your key", call,
+                                onError = { sigGenerating.remove(alias) }) { boundCipher -> persist(boundCipher) }
+                        }
+                    } else {
+                        persist(cipher)
+                    }
+                } catch (e: Exception) {
+                    sigGenerating.remove(alias)
+                    logd("generateWrappedSigningKey failed for alias=$alias", e)
+                    call.reject("Key generation failed", "E_KEYGEN")
+                }
+            }
+            val existingWrap = if (exists) (try { keystore().getKey(sigWrapAlias(alias), null) as? SecretKey } catch (e: Exception) { null }) else null
+            if (existingWrap != null && secretKeyRequiresAuth(existingWrap)) {
+                val host = activity as? FragmentActivity
+                if (host == null) {
+                    sigGenerating.remove(alias)
+                    return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+                }
+                val gateCipher = Cipher.getInstance("AES/GCM/NoPadding")
+                try {
+                    gateCipher.init(Cipher.ENCRYPT_MODE, existingWrap)
+                } catch (e: KeyPermanentlyInvalidatedException) {
+                    logd("existing sig wrap invalidated, allowing overwrite for alias=$alias", e)
+                    runGeneration()
+                    return
+                }
+                authenticateCipher(host, gateCipher, "Authorize key replacement", call,
+                    onError = { sigGenerating.remove(alias) }) { boundCipher ->
+                    boundCipher.doFinal(byteArrayOf(0))
+                    runGeneration()
+                }
+            } else {
+                runGeneration()
+            }
+        } catch (e: Exception) {
+            sigGenerating.remove(alias)
+            logd("generateWrappedSigningKey failed for alias=$alias", e)
+            call.reject("Key generation failed", "E_KEYGEN")
+        }
+    }
+
+    // sign with a wrapped (software) key: unwrap the seed inside the biometric-bound cipher, sign,
+    // and zeroize the seed
+    private fun signWrapped(alias: String, description: String?, input: ByteArray, call: PluginCall) {
+        try {
+            val privB64 = sigPrefs().getString(sigPrivKey(alias), null)
+                ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
+            val wrapped = Base64.decode(privB64, Base64.DEFAULT)
+            val iv = wrapped.copyOfRange(0, 12)
+            val ct = wrapped.copyOfRange(12, wrapped.size)
+            val wrapKey = keystore().getKey(sigWrapAlias(alias), null) as? SecretKey
+                ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, iv))
+            val doSign = { c: Cipher ->
+                val seed = c.doFinal(ct)
+                try {
+                    val ret = JSObject()
+                    ret.put("signature", Base64.encodeToString(ed25519Sign(seed, input), Base64.NO_WRAP))
+                    call.resolve(ret)
+                } finally {
+                    seed.fill(0)
+                }
+            }
+            if (secretKeyRequiresAuth(wrapKey)) {
+                val host = activity as? FragmentActivity
+                    ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
+                authenticateCipher(host, cipher, description ?: "Authorize signature", call) { boundCipher -> doSign(boundCipher) }
+            } else {
+                doSign(cipher)
+            }
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            logd("signWrapped: key invalidated for alias=$alias", e)
+            call.reject("Biometric enrollment changed; key invalidated", "E_KEY_INVALIDATED")
+        } catch (e: Exception) {
+            logd("signWrapped failed for alias=$alias", e)
+            call.reject("Signing failed", "E_SIGN")
+        }
     }
 
     // compressed SEC1 point (33B: 0x02/0x03 || X) for an EC public key -- the CESR form
@@ -126,8 +275,9 @@ class PQSecureStoragePlugin : Plugin() {
         val bioAvail = BiometricManager.from(context)
             .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
         ret.put("biometricGated", bioAvail)
-        // ECDSA P-256 is always available in AndroidKeyStore; ML-DSA only if KeyMint implements it
-        val variants = mutableListOf("ECDSA_256R1")
+        // ECDSA P-256 always available; Ed25519 always available in software (wrapped); ML-DSA only
+        // if KeyMint implements it
+        val variants = mutableListOf("ECDSA_256R1", "ED25519")
         if (ok) { variants.add("PQC_MLDSA_65"); variants.add("PQC_MLDSA_87") }
         ret.put("supportedVariants", variants)
         // ML-KEM works via software (BouncyCastle) on any API; the private key is wrapped by a
@@ -141,9 +291,11 @@ class PQSecureStoragePlugin : Plugin() {
     fun generateKeyPair(call: PluginCall) {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         if (!safeAlias(call, alias)) return
-        val sa = sigAlgOf(call.getString("type")) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
+        val type = call.getString("type")
+        val sa = sigAlgOf(type) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
         val overwrite = call.getBoolean("overwrite") ?: false
         val requireBiometric = call.getBoolean("requireBiometric") ?: true
+        if (sa.wrapped) return generateWrappedSigningKey(alias, type!!, overwrite, requireBiometric, call)
         val ks = try {
             keystore()
         } catch (e: Exception) {
@@ -302,6 +454,17 @@ class PQSecureStoragePlugin : Plugin() {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         if (!safeAlias(call, alias)) return
         try {
+            // wrapped signing keys live in prefs, not the Keystore
+            val sigPub = sigPrefs().getString(sigPubKey(alias), null)
+            if (sigPub != null) {
+                val tag = sigPrefs().getString(sigTagKey(alias), null)
+                if (tag == null || !verifyPubTag("sig:$alias", Base64.decode(sigPub, Base64.DEFAULT), tag)) {
+                    return call.reject("Public key integrity check failed", "E_TAMPERED")
+                }
+                val ret = JSObject()
+                ret.put("publicKey", sigPub)
+                return call.resolve(ret)
+            }
             val ks = keystore()
             val cert = ks.getCertificate(alias) ?: return call.reject("Key not found", "E_PUBKEY")
             val pub = cert.publicKey
@@ -326,6 +489,7 @@ class PQSecureStoragePlugin : Plugin() {
         // length so a caller can't push a giant string or shove real content off-screen.
         val description = call.getString("description")?.take(200)
         val input = decodeCapped(call, data) ?: return
+        if (sa.wrapped) return signWrapped(alias, description, input, call)
 
         try {
             val priv = keystore().getKey(alias, null) as? java.security.PrivateKey
@@ -430,6 +594,7 @@ class PQSecureStoragePlugin : Plugin() {
     // per-key guard so two setItem on the same key can't race the item-key create; global latch so
     // only one biometric prompt shows at a time (no prompt spam / stacking)
     private val storeWriting = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val sigGenerating = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val authInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
     // serialize creation of the shared internal keys (HMAC/name/at-rest); the getKey hit stays lock-free
     private val keyCreateLock = Any()

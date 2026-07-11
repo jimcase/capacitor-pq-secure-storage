@@ -13,6 +13,14 @@ All notable changes to this project are documented here. The format is based on
 - ECDSA P-256 (secp256r1) hardware-backed signing on iOS (Secure Enclave) and Android (Keystore),
   with the software fallback on web. Compressed 33-byte public keys and raw 64-byte r||s signatures
   (CESR-aligned); `getHardwareCapabilities` lists `ECDSA_256R1`.
+- Ed25519 signing (tier `wrapped`): a software CryptoKit/BouncyCastle key whose 32-byte private is
+  encrypted at rest by a hardware key (iOS Keychain biometry ACL, Android Keystore AES wrap) and
+  unwrapped only to sign, gated by the biometric. 32-byte public keys and 64-byte signatures.
+
+### Fixed
+
+- iOS `sign` rejected `ECDSA_256R1` with `E_TYPE_MISMATCH` (the key/type check missed the P-256
+  case). Now accepted.
 
 ### Security
 

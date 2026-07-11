@@ -29,6 +29,15 @@ export const SIGNATURE_ALGORITHMS: Record<SignatureType, SigAlgorithm> = {
         cesrVerKeyN: '1AAI',
         cesrSig: '0I',
     },
+    ED25519: {
+        id: 'ED25519',
+        tier: 'wrapped',
+        publicKeyLen: 32,
+        signatureLen: 64,
+        cesrVerKey: 'D',
+        cesrVerKeyN: 'B',
+        cesrSig: '0B',
+    },
     PQC_MLDSA_65: {
         id: 'PQC_MLDSA_65',
         tier: 'hardware',
