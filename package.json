@@ -60,7 +60,7 @@
   "scripts": {
     "clean": "rimraf ./dist",
     "docgen": "docgen --project tsconfig.docgen.json --api PqSecureStoragePlugin --output-readme README.md --output-json dist/docs.json",
-    "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs",
+    "build": "npm run clean && npm run docgen && node scripts/format-readme.mjs && tsc && rollup -c rollup.config.mjs",
     "lint": "eslint . --ext .ts && prettier --check \"{src,test}/**/*.ts\"",
     "fmt": "eslint . --ext .ts --fix && prettier --write \"{src,test}/**/*.ts\"",
     "test": "vitest run",

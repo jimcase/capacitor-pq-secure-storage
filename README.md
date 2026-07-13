@@ -549,12 +549,22 @@ the store is already empty. Web fallback has no biometric, so silent.
 
 #### SignatureType
 
-<code>'PQC_MLDSA_65' | 'PQC_MLDSA_87' | 'ECDSA_256R1' | 'ED25519'</code>
+```ts
+type SignatureType =
+  | 'PQC_MLDSA_65'
+  | 'PQC_MLDSA_87'
+  | 'ECDSA_256R1'
+  | 'ED25519';
+```
 
 
 #### KemType
 
-<code>'PQC_MLKEM_768' | 'PQC_MLKEM_1024'</code>
+```ts
+type KemType =
+  | 'PQC_MLKEM_768'
+  | 'PQC_MLKEM_1024';
+```
 
 
 #### Accessibility
@@ -565,7 +575,14 @@ When a stored item is reachable, honored per item on both platforms: iOS maps it
 unlocked device). Android Keystore keys are always device-bound, so every value is effectively
 this-device-only there.
 
-<code>'whenUnlocked' | 'afterFirstUnlock' | 'whenPasscodeSetThisDeviceOnly' | 'whenUnlockedThisDeviceOnly' | 'afterFirstUnlockThisDeviceOnly'</code>
+```ts
+type Accessibility =
+  | 'whenUnlocked'
+  | 'afterFirstUnlock'
+  | 'whenPasscodeSetThisDeviceOnly'
+  | 'whenUnlockedThisDeviceOnly'
+  | 'afterFirstUnlockThisDeviceOnly';
+```
 
 </docgen-api>
 
