@@ -1,6 +1,11 @@
 # pq-secure-storage-plugin
 
-[![Aikido](https://img.shields.io/badge/Aikido-monitored-4c1)](https://app.aikido.dev/repositories/2571605)
+<a href="https://app.aikido.dev/audit-report/external/s5Dq4JfRbnjJf4DiJVBzlwVZ/request" target="_blank" rel="noopener">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://app.aikido.dev/assets/badges/full-dark-theme.svg" />
+    <img src="https://app.aikido.dev/assets/badges/full-light-theme.svg" alt="Aikido Security Audit Report" height="40" />
+  </picture>
+</a>
 
 Capacitor plugin for hardware-backed post-quantum crypto and secure storage on iOS and Android.
 
