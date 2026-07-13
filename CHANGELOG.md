@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Build
+
+- Android now builds standalone (CI): the Capacitor dependency uses `project(':capacitor-android')`
+  from node_modules (the old `com.getcapacitor:capacitor-core` maven coordinate did not resolve),
+  plus the standard plugin scaffold (settings.gradle, variables.gradle, gradle.properties, wrapper).
+  `compileSdk`/`targetSdk` lowered from a non-existent 37 to 35.
+- GitHub Actions CI (`.github/workflows/test.yml`): web (lint/build/test) and Android (gradle build
+  + unit tests) run on every push/PR; iOS lints the podspec (needs the iOS 26 SDK / Xcode 26).
+
 ### Added
 
 - Extensible signature algorithm registry (`SIGNATURE_ALGORITHMS`) with per-algorithm tier

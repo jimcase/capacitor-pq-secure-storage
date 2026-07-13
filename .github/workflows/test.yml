@@ -1,0 +1,59 @@
+name: Test
+
+on:
+  push:
+    branches: ['master', 'main']
+  pull_request:
+
+permissions: {}
+
+jobs:
+  web:
+    name: Web (lint + build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm run test
+
+  android:
+    name: Android (build + unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # capacitor-android is a gradle subproject resolved from node_modules, so install deps first
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      # capacitor-android 7.x compiles with source release 21
+      - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12 # v4.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Gradle build + unit tests
+        working-directory: android
+        run: ./gradlew build
+
+  ios:
+    name: iOS (pod lib lint)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # NOTE: the plugin uses iOS 26 APIs (SecureEnclave.MLDSA / MLKEM), so this needs the iOS 26 SDK
+      # (Xcode 26). Point DEVELOPER_DIR at the Xcode 26 the runner ships once it is available.
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+      - name: Xcode version
+        run: xcodebuild -version
+      - name: Lint the podspec (compiles the pod)
+        run: pod lib lint PqSecureStoragePlugin.podspec --allow-warnings

@@ -45,6 +45,7 @@
     "ios/Sources/",
     "android/src/",
     "android/build.gradle",
+    "android/variables.gradle",
     "android/proguard-rules.pro",
     "PqSecureStoragePlugin.podspec"
   ],
@@ -80,8 +81,11 @@
     "@noble/post-quantum": "0.6.1"
   },
   "devDependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/cli": "^7.0.0",
     "@capacitor/core": "^7.0.0",
     "@capacitor/docgen": "^0.3.1",
+    "@capacitor/ios": "^7.0.0",
     "@rollup/plugin-commonjs": "^28.0.0",
     "@rollup/plugin-node-resolve": "^16.0.0",
     "@typescript-eslint/eslint-plugin": "^7.18.0",

@@ -2,3 +2,4 @@ node_modules/
 dist/
 android/.gradle/
 android/build/
+android/local.properties
