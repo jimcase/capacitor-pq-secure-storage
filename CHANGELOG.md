@@ -23,6 +23,12 @@ All notable changes to this project are documented here. The format is based on
 - GitHub Actions CI (`.github/workflows/test.yml`): web (lint/build/test) and Android (gradle build
   + unit tests) run on every push/PR; iOS lints the podspec and runs the XCTest suite on a
   simulator (needs an Xcode 26 runner for the iOS 26 SDK).
+- `test-app/`: a Vite + TypeScript Capacitor harness that consumes the plugin via `file:..`, with a
+  button per method and a live `#log`. Web build verified. Add native targets with
+  `npx cap add ios|android`. Appium + WebdriverIO e2e (`wdio.conf.ts`, `test/e2e/`): "core" specs
+  (bridge + Keychain/Keystore storage + capabilities) pass on a simulator/emulator; "hardware"
+  specs (SEP ML-DSA, StrongBox, ML-KEM, at-rest) are gated behind `E2E_HARDWARE=1` for a physical
+  device, since a simulator has no secure hardware and real biometric prompts can't be automated.
 
 ### Added
 

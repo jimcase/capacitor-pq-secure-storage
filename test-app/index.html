@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>PQ Test App</title>
+    <style>
+      :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
+      body { margin: 0; padding: 1rem; max-width: 820px; }
+      h1 { font-size: 1.2rem; }
+      h2 { font-size: 1rem; margin: 1.2rem 0 0.4rem; border-bottom: 1px solid #8884; padding-bottom: 0.2rem; }
+      .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.3rem 0; }
+      button { padding: 0.5rem 0.8rem; font-size: 0.9rem; }
+      input, select { padding: 0.4rem; font-size: 0.9rem; }
+      input[type="text"] { flex: 1; min-width: 8rem; }
+      #log {
+        white-space: pre-wrap; word-break: break-all; font-family: ui-monospace, monospace;
+        font-size: 0.78rem; background: #8881; padding: 0.6rem; border-radius: 6px;
+        height: 16rem; overflow: auto; margin-top: 0.8rem;
+      }
+      .env { font-size: 0.8rem; opacity: 0.7; }
+    </style>
+  </head>
+  <body>
+    <h1>PQ Secure Storage — test app</h1>
+    <div class="env" id="env">platform: …</div>
+    <div id="app"></div>
+    <div id="log"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
