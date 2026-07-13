@@ -15,7 +15,7 @@ step "build the plugin (dist/)"
 ( cd "$ROOT" && npm run build )
 
 step "test-app deps + web build"
-rm -rf node_modules/pq-secure-storage-plugin   # force a fresh copy of the file: dep
+rm -rf node_modules/capacitor-pq-secure-storage   # force a fresh copy of the file: dep
 npm install
 npm run build
 

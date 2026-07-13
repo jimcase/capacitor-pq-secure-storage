@@ -8,7 +8,7 @@ function topLine(log: string): string {
 
 // Core paths that need no secure hardware: the native bridge, the capabilities probe, and
 // queries on an absent item. Green on an iOS simulator / Android emulator and on a device.
-describe('pq-secure-storage-plugin: core (sim/emulator + device)', () => {
+describe('capacitor-pq-secure-storage: core (sim/emulator + device)', () => {
   before(async () => {
     await switchToWebview();
     await $('#log').waitForExist({ timeout: 15000 });
@@ -31,7 +31,7 @@ describe('pq-secure-storage-plugin: core (sim/emulator + device)', () => {
 // the store, SEP ML-DSA/P-256 for signing), so it all fails on an iOS simulator. On an Android
 // emulator the Keystore paths work (storage, at-rest, ML-KEM pass); only ML-DSA signing needs the
 // hardware KeyMint of a real device. Run with E2E_HARDWARE=1.
-describe('pq-secure-storage-plugin: hardware-backed (device; on Android emulator all but ML-DSA)', function () {
+describe('capacitor-pq-secure-storage: hardware-backed (device; on Android emulator all but ML-DSA)', function () {
   before(function () {
     if (!process.env.E2E_HARDWARE) {
       this.skip();

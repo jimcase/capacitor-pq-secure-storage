@@ -1,4 +1,4 @@
-# pq-secure-storage-plugin
+# capacitor-pq-secure-storage
 
 <a href="https://app.aikido.dev/audit-report/external/s5Dq4JfRbnjJf4DiJVBzlwVZ/request" target="_blank" rel="noopener">
   <picture>
@@ -62,12 +62,12 @@ uses.
 ## Install
 
 ```bash
-npm install pq-secure-storage-plugin
+npm install capacitor-pq-secure-storage
 npx cap sync
 ```
 
 ```ts
-import { PQSecureStorage } from 'pq-secure-storage-plugin';
+import { PQSecureStorage } from 'capacitor-pq-secure-storage';
 ```
 
 Data fields (`data`, `signature`, `ciphertext`, `plaintext`, `publicKey`, `recipientPublicKey`)

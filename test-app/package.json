@@ -2,7 +2,7 @@
   "name": "pq-test-app",
   "version": "0.0.1",
   "private": true,
-  "description": "Capacitor test harness for pq-secure-storage-plugin (web fallback + iOS/Android).",
+  "description": "Capacitor test harness for capacitor-pq-secure-storage (web fallback + iOS/Android).",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@capacitor/core": "^7.0.0",
-    "pq-secure-storage-plugin": "file:.."
+    "capacitor-pq-secure-storage": "file:.."
   },
   "devDependencies": {
     "@capacitor/android": "^7.0.0",

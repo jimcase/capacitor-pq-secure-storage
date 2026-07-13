@@ -1,16 +1,16 @@
 {
-  "name": "pq-secure-storage-plugin",
+  "name": "capacitor-pq-secure-storage",
   "version": "0.2.0",
   "description": "Hardware-backed post-quantum crypto (ML-DSA, ML-KEM, AES-256) and biometric secure storage for Capacitor on iOS and Android, with a software fallback for the web.",
   "license": "MIT",
   "author": "J Caso",
-  "homepage": "https://github.com/jimcase/pq-secure-storage-plugin#readme",
+  "homepage": "https://github.com/jimcase/capacitor-pq-secure-storage#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jimcase/pq-secure-storage-plugin.git"
+    "url": "git+https://github.com/jimcase/capacitor-pq-secure-storage.git"
   },
   "bugs": {
-    "url": "https://github.com/jimcase/pq-secure-storage-plugin/issues"
+    "url": "https://github.com/jimcase/capacitor-pq-secure-storage/issues"
   },
   "keywords": [
     "capacitor",

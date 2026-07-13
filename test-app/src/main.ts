@@ -4,7 +4,7 @@ import {
   type SignatureType,
   type KemType,
   type Accessibility,
-} from 'pq-secure-storage-plugin';
+} from 'capacitor-pq-secure-storage';
 
 const logEl = document.getElementById('log') as HTMLDivElement;
 const appEl = document.getElementById('app') as HTMLDivElement;
