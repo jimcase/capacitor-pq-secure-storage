@@ -65,8 +65,10 @@ export const config: WebdriverIO.Config = {
   logLevel: 'warn',
   framework: 'mocha',
   reporters: ['spec'],
-  // allow uiautomator2 to auto-download the chromedriver it needs for the Android WebView context
-  services: [['appium', { args: { allowInsecure: ['uiautomator2:chromedriver_autodownload'] } }]],
+  // allow uiautomator2 to auto-download the chromedriver it needs for the Android WebView context.
+  // appium 3 wants the scoped '<automationName>:<feature>' name, as a string (the service
+  // JSON-stringifies arrays, which appium can't parse).
+  services: [['appium', { args: { allowInsecure: 'uiautomator2:chromedriver_autodownload' } }]],
   // session creation can be slow while WebDriverAgent builds and the simulator boots
   connectionRetryTimeout: 360000,
   connectionRetryCount: 1,

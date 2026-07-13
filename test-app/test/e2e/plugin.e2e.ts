@@ -28,10 +28,10 @@ describe('pq-secure-storage-plugin: core (sim/emulator + device)', () => {
 });
 
 // Anything that stores or signs is hardware-backed on iOS (Secure Enclave ECIES for at-rest and
-// the store, SEP ML-DSA/P-256 for signing), so it fails on an iOS simulator. On Android the
-// Keystore storage works on an emulator too. Run with E2E_HARDWARE=1 on a real device (or an
-// Android emulator for the storage specs).
-describe('pq-secure-storage-plugin: hardware (device; storage also Android emulator)', function () {
+// the store, SEP ML-DSA/P-256 for signing), so it all fails on an iOS simulator. On an Android
+// emulator the Keystore paths work (storage, at-rest, ML-KEM pass); only ML-DSA signing needs the
+// hardware KeyMint of a real device. Run with E2E_HARDWARE=1.
+describe('pq-secure-storage-plugin: hardware-backed (device; on Android emulator all but ML-DSA)', function () {
   before(function () {
     if (!process.env.E2E_HARDWARE) {
       this.skip();

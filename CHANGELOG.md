@@ -29,11 +29,12 @@ All notable changes to this project are documented here. The format is based on
   inside the Capacitor webview. Verified on the iOS 26.2 simulator (Xcode 26.2): the "core" specs
   (bridge + capabilities + absent-item queries) pass. On iOS all storage and crypto is Secure
   Enclave-backed, so those "hardware" specs (setItem/getItem, sign, at-rest, ML-KEM) fail on a
-  simulator and skip unless `E2E_HARDWARE=1` on a physical device (on Android the Keystore storage
-  also runs on an emulator, and real biometric prompts can't be automated on a device). Manual e2e
-  workflow (`.github/workflows/e2e.yml`, `workflow_dispatch`): an iOS-simulator job (verified
-  locally) and an Android-emulator job (reactivecircus/android-emulator-runner), both running the
-  core specs.
+  simulator and skip unless `E2E_HARDWARE=1`. On an Android emulator the Keystore paths do work:
+  with `E2E_HARDWARE=1` the storage, at-rest, and ML-KEM specs pass; only ML-DSA signing needs the
+  hardware KeyMint of a real device. Real biometric prompts can't be automated on a device. Verified
+  locally: iOS 26.2 simulator (Xcode 26.2) and Android emulator (API 36, Pixel_9) both green on the
+  core specs. Manual e2e workflow (`.github/workflows/e2e.yml`, `workflow_dispatch`) with an iOS and
+  an Android job (reactivecircus/android-emulator-runner), both running the core specs.
 
 ### Added
 
