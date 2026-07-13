@@ -8,16 +8,40 @@
 </a>
 
 Capacitor plugin for hardware-backed post-quantum crypto and secure storage on iOS and Android.
+All symmetric crypto is AES-256 (quantum-safe); there is no RSA or ECC anywhere in the custody path.
 
-It exposes four things:
+## Features
 
-- **ML-DSA signing** (FIPS 204, levels 65/87), hardware-backed.
+- **ML-DSA signing** (FIPS 204, levels 65/87), hardware-backed (iOS Secure Enclave, Android Keystore).
 - **AES-256-GCM at rest** with the key held in the TEE / Keychain.
 - **ML-KEM** (FIPS 203, levels 768/1024) for receiving data encrypted to your public key.
-- **Secure storage** (`setItem`/`getItem`/...), a biometric-gated key-value store.
+- **Secure storage** (`setItem` / `getItem` / ...), a biometric-gated key-value store.
 
-All symmetric crypto is AES-256, which is quantum-safe. There is no RSA or ECC anywhere in the
-custody path.
+## Contents
+
+- [Requirements](#requirements)
+- [Platform support](#platform-support)
+- [Install](#install)
+- [Usage](#usage)
+- [API reference](#api-reference)
+- [Security notes](#security-notes)
+- [Error codes](#error-codes)
+- [Testing](#testing)
+
+## Requirements
+
+| Platform | Minimum | Post-quantum (ML-DSA / ML-KEM) |
+|---|---|---|
+| iOS | pod targets iOS 15; build with the iOS 26 SDK (Xcode 26+) | iOS 26+ (Secure Enclave) |
+| Android | `minSdk 34`, targets Android 17 (SDK 37) | Android 17 (Keystore ML-DSA + BouncyCastle 1.81 ML-KEM) |
+| Web | any | software fallback only |
+
+Below the post-quantum floor, `getHardwareCapabilities` reports `supportsPqc: false`, and AES-at-rest
+and secure storage keep working.
+
+On the **web** there is no secure hardware, so the plugin uses a software backend (@noble) with keys
+in `localStorage`. Operations work and `supportsPqc` is `true`, but nothing is hardware-backed or
+biometric-gated. Use it for development or non-critical data only.
 
 ## Platform support
 
@@ -28,19 +52,12 @@ custody path.
 | AES at rest | Keychain / CryptoKit | Keystore AES-256-GCM (TEE) |
 | Secure storage | Keychain, per-item access control | per-item Keystore AES-256-GCM key (StrongBox where available), biometric bound to the item Cipher |
 
-iOS decapsulates ML-KEM inside the Secure Enclave; Android does not, because the Android
-Keystore exposes ML-DSA to apps but not ML-KEM (ML-KEM stays in KeyMint / attestation / TLS,
-not the app-facing API). On Android the ML-KEM private key is wrapped by an auth-required
-Keystore AES key and only unwrapped inside a `BiometricPrompt.CryptoObject`, so a hooked
-biometric callback cannot release it (defense against GHSA-vx5f-vmr6-32wf). `kemInSecureEnclave`
-reports which path a device uses.
-
-Targets iOS 26 (CryptoKit `SecureEnclave.MLDSA*` / `SecureEnclave.MLKEM*`) and Android 17
-(Keystore ML-DSA + BouncyCastle 1.81 ML-KEM). Older OS versions report `supportsPqc: false`.
-
-On the web there is no secure hardware, so the plugin falls back to a **software** backend
-(@noble) with keys kept in `localStorage`. Operations work and `supportsPqc` is `true`, but it
-is not hardware-backed or biometric-gated. Use it for development or non-critical data only.
+iOS decapsulates ML-KEM inside the Secure Enclave; Android does not, because the Android Keystore
+exposes ML-DSA to apps but not ML-KEM (ML-KEM stays in KeyMint / attestation / TLS, not the
+app-facing API). On Android the ML-KEM private key is wrapped by an auth-required Keystore AES key
+and only unwrapped inside a `BiometricPrompt.CryptoObject`, so a hooked biometric callback cannot
+release it (defense against GHSA-vx5f-vmr6-32wf). `kemInSecureEnclave` reports which path a device
+uses.
 
 ## Install
 
@@ -191,7 +208,7 @@ The per-item keys never leave the Keystore, so a leaked backup is still useless 
 exclusion is defense in depth. Also set `android:allowBackup="false"` in the host app so the
 prefs cannot be pulled/edited via `adb backup`/`restore`.
 
-## API
+## API reference
 
 <docgen-index>
 
@@ -580,14 +597,14 @@ this-device-only there.
   (`E_BAD_ALIAS`).
 - **Identity-key overwrite.** `generateKeyPair` (ML-DSA) with `overwrite: true` on an existing
   alias destroys a possibly-live signing key, so it now requires a biometric bound to the existing
-  key first — a silent bridge caller cannot rotate/brick an identity key. `generateKemKeyPair`
+  key first -- a silent bridge caller cannot rotate/brick an identity key. `generateKemKeyPair`
   overwrite already prompts (to wrap the new private), though that prompt is not bound to the old key.
 - **Rollback (residual).** Per-item keys stop forgery but not full-snapshot rollback: an attacker
   who restores an old copy of the prefs AND the matching old item key can revive a rotated-away or
   revoked secret. Android has no universal monotonic anti-rollback counter (StrongBox has one, not
   on all devices). The host should not rely on the store alone for freshness of revocable state.
 - **Memory hygiene.** Store item keys and ML-DSA signing keys never leave the Keystore. The ML-KEM
-  API (`encryptTo`/`decrypt`) is software (BouncyCastle) — its raw private and shared secret are
+  API (`encryptTo`/`decrypt`) is software (BouncyCastle) -- its raw private and shared secret are
   wiped from the heap right after use, best-effort (JVM copies in `SecretKeySpec`/GC still linger,
   and a decrypted plaintext `String` is immutable). Treat in-process memory as recoverable.
 - **`hardwareBacked` is a probe, not a promise.** It reflects a real Keystore security-level check
@@ -599,12 +616,12 @@ this-device-only there.
   `removeItem`/`clear` prompt only when a bio item is involved; on Android a bio WRITE prompts too
   (encrypting needs the auth-gated key). The prompt is bound to the item's key op (CryptoObject),
   so a hooked callback can't fake it. It does not protect against an attacker who reaches the JS
-  bridge (the main surface in a webview) — the host MUST guard bridge access.
+  bridge (the main surface in a webview) -- the host MUST guard bridge access.
 - **Cross-platform ML-KEM.** iOS (CryptoKit) and Android (BouncyCastle) must agree on the raw
   shared secret. Before relying on a ciphertext produced on one platform decrypting on the other,
   run a known-answer test against a FIPS-203 vector on a real device.
 
-## Errors
+## Error codes
 
 Rejections carry a code: `E_MISSING_PARAMS`, `E_INVALID_ARGS` (key/value out of bounds),
 `E_BAD_ALIAS` (reserved/invalid alias), `E_AUTH_FAILED` (biometric cancelled/failed),
@@ -614,7 +631,7 @@ Rejections carry a code: `E_MISSING_PARAMS`, `E_INVALID_ARGS` (key/value out of 
 `E_TIER_MISMATCH` (setItem on an item stored with a different `requireBiometric`; removeItem first),
 `E_BUSY` (a keygen for the same alias is already in flight).
 
-## Tests
+## Testing
 
 The TypeScript layer has a software double (`test/pq-double.ts`) that mirrors the native wire
 format, so the round-trip and framing are unit-tested off-device.
