@@ -241,11 +241,14 @@ class PQSecureStoragePlugin : Plugin() {
         else System.arraycopy(b, 0, out, len - b.size, b.size)
         return out
     }
-    // DER ECDSA signature -> raw r||s (64B)
+    // secp256r1 (P-256) curve order n, for low-S normalization (the only EC signature curve here)
+    private val p256Order = java.math.BigInteger("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551", 16)
+    // DER ECDSA signature -> raw r||s (64B), normalized to low-S (canonical, non-malleable)
     private fun ecdsaDerToRaw(der: ByteArray): ByteArray {
         val seq = org.bouncycastle.asn1.ASN1Sequence.getInstance(der)
         val r = (seq.getObjectAt(0) as org.bouncycastle.asn1.ASN1Integer).positiveValue
-        val s = (seq.getObjectAt(1) as org.bouncycastle.asn1.ASN1Integer).positiveValue
+        var s = (seq.getObjectAt(1) as org.bouncycastle.asn1.ASN1Integer).positiveValue
+        if (s > p256Order.shiftRight(1)) s = p256Order.subtract(s)
         return toFixed(r, 32) + toFixed(s, 32)
     }
 

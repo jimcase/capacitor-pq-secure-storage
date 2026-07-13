@@ -60,7 +60,11 @@ export interface PQSecureStoragePlugin {
         requireBiometric?: boolean;
     }): Promise<{ publicKey: string }>;
 
-    /** Return the raw public key for an existing signing alias. */
+    /**
+     * Return the raw public key for an existing signing alias. Use one alias per key: an alias must
+     * back a single key. If the same alias somehow backs both a wrapped (e.g. Ed25519) and a
+     * hardware (ML-DSA / ECDSA) key, the wrapped one is returned.
+     */
     getPublicKey(options: { keyAlias: string }): Promise<{ publicKey: string }>;
 
     /**

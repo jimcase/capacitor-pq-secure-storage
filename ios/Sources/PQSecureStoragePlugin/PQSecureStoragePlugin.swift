@@ -47,6 +47,36 @@ private let vcpLog = OSLog(subsystem: "com.pq.securestorage", category: "PQSecur
 //     throw is already caught below and surfaces as `E_KEYGEN` -- acceptable for now, but worth
 //     a dedicated error code once confirmed.
 
+// P-256 curve order n, for low-S normalization (CryptoKit does not canonicalize ECDSA signatures)
+private let p256OrderBytes: [UInt8] = [
+    0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xBC, 0xE6, 0xFA, 0xAD, 0xA7, 0x17, 0x9E, 0x84, 0xF3, 0xB9, 0xCA, 0xC2, 0xFC, 0x63, 0x25, 0x51,
+]
+private func bigCmp32(_ a: [UInt8], _ b: [UInt8]) -> Int {
+    for i in 0..<32 where a[i] != b[i] { return a[i] < b[i] ? -1 : 1 }
+    return 0
+}
+// a - b for 32-byte big-endian, assumes a >= b
+private func bigSub32(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] {
+    var res = [UInt8](repeating: 0, count: 32)
+    var borrow = 0
+    for i in stride(from: 31, through: 0, by: -1) {
+        let d = Int(a[i]) - Int(b[i]) - borrow
+        if d < 0 { res[i] = UInt8(d + 256); borrow = 1 } else { res[i] = UInt8(d); borrow = 0 }
+    }
+    return res
+}
+// normalize a raw r||s (64B) ECDSA signature to low-S (canonical, non-malleable)
+private func lowSNormalizeP256(_ sig: Data) -> Data {
+    guard sig.count == 64 else { return sig }
+    let s = [UInt8](sig[32..<64])
+    let d = bigSub32(p256OrderBytes, s) // n - s (s < n, so valid)
+    if bigCmp32(d, s) < 0 { // n - s < s  =>  s was high-S
+        return sig.prefix(32) + Data(d)
+    }
+    return sig
+}
+
 @available(iOS 26.0, *)
 enum PQKey {
     case v65(SecureEnclave.MLDSA65.PrivateKey)
@@ -108,8 +138,8 @@ enum PQKey {
         switch self {
         case .v65(let k): return try k.signature(for: data)
         case .v87(let k): return try k.signature(for: data)
-        // raw r||s (64B), not DER, to match CESR
-        case .p256(let k): return try k.signature(for: data).rawRepresentation
+        // raw r||s (64B), not DER, normalized to low-S (canonical), to match CESR
+        case .p256(let k): return lowSNormalizeP256(try k.signature(for: data).rawRepresentation)
         }
     }
 }
@@ -980,7 +1010,8 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 var out: CFTypeRef?
                 switch SecItemCopyMatching(q as CFDictionary, &out) {
                 case errSecSuccess:
-                    guard let privRaw = out as? Data else { return call.reject("Signing failed", "E_SIGN") }
+                    guard var privRaw = out as? Data else { return call.reject("Signing failed", "E_SIGN") }
+                    defer { privRaw.resetBytes(in: 0..<privRaw.count) } // wipe our copy after signing
                     let priv = try Curve25519.Signing.PrivateKey(rawRepresentation: privRaw)
                     let sig = try priv.signature(for: msg)
                     call.resolve(["signature": sig.base64EncodedString()])

@@ -24,6 +24,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Security
 
+- ECDSA P-256 signatures are normalized to low-S (canonical, non-malleable) on Android and iOS to
+  match the web backend; KERI accepts either, but canonical signatures are the safer default.
+- iOS wrapped signing zeroizes its copy of the unwrapped private after use, matching Android.
+
+### Security
+
 - Cap decoded input at 10 MiB on `sign`/`encryptAtRest`/`decryptAtRest`/`encryptTo`/`decrypt`
   (`E_INPUT_TOO_LARGE`) to stop a bridge-driven memory DoS.
 - Android: per-key guard so concurrent `setItem` on the same key can't race the item-key create,
