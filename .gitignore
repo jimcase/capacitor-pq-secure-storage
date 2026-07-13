@@ -9,3 +9,7 @@ ios/Plugin.xcworkspace/
 ios/Pods/
 ios/Podfile.lock
 ios/build/
+
+# SPM (generated)
+.build/
+Package.resolved

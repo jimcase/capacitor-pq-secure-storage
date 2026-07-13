@@ -15,6 +15,9 @@ All notable changes to this project are documented here. The format is based on
 - `setKeyPrefix` / `getKeyPrefix`: namespace secure-store keys. The prefix is prepended on write and
   read (transparently), and `keys()` / `clear()` are scoped to the current prefix, so a library can
   share the store without its `clear()` wiping the host app's items. Default is `''` (no prefix).
+- Swift Package Manager support: a `Package.swift` alongside the podspec, so an SPM-based Capacitor
+  app can consume the plugin (`npx cap sync` picks CocoaPods or SPM per the app). Depends on
+  `capacitor-swift-pm` 7.x; iOS 15 floor. The manifest resolves cleanly (`swift package resolve`).
 
 ## [0.2.0] - 2026-07-13
 

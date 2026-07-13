@@ -47,7 +47,8 @@
     "android/build.gradle",
     "android/variables.gradle",
     "android/proguard-rules.pro",
-    "CapacitorPqSecureStorage.podspec"
+    "CapacitorPqSecureStorage.podspec",
+    "Package.swift"
   ],
   "capacitor": {
     "ios": {

@@ -31,7 +31,7 @@ All symmetric crypto is AES-256 (quantum-safe); there is no RSA or ECC anywhere 
 
 | Platform | Minimum | Post-quantum (ML-DSA / ML-KEM) |
 |---|---|---|
-| iOS | pod targets iOS 15; build with the iOS 26 SDK (Xcode 26+) | iOS 26+ (Secure Enclave) |
+| iOS | iOS 15 (CocoaPods or SPM); build with the iOS 26 SDK (Xcode 26+) | iOS 26+ (Secure Enclave) |
 | Android | `minSdk 34`, targets Android 17 (SDK 37) | Android 17 (Keystore ML-DSA + BouncyCastle 1.81 ML-KEM) |
 | Web | any | software fallback only |
 
@@ -83,10 +83,12 @@ Biometrics use Face ID, which requires a usage description or the app crashes. A
 <string>Authenticate to use your secure keys</string>
 ```
 
-The pod deployment target is iOS 15, so any modern app can depend on it. The post-quantum
-parts (ML-DSA / ML-KEM in the Secure Enclave) are gated with `@available(iOS 26.0, *)`: they run
-only on iOS 26+, and below that `getHardwareCapabilities` reports `supportsPqc: false` while
-AES-at-rest and secure storage keep working. Building the pod still needs the iOS 26 SDK (Xcode 26+).
+The plugin ships both CocoaPods and Swift Package Manager (`Package.swift`); `npx cap sync` uses
+whichever your app is set up for. The iOS deployment floor is 15, so any modern app can depend on
+it. The post-quantum parts (ML-DSA / ML-KEM in the Secure Enclave) are gated with
+`@available(iOS 26.0, *)`: they run only on iOS 26+, and below that `getHardwareCapabilities`
+reports `supportsPqc: false` while AES-at-rest and secure storage keep working. Building still needs
+the iOS 26 SDK (Xcode 26+).
 
 ### Android setup
 
