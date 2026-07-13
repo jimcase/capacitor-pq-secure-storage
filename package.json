@@ -1,6 +1,6 @@
 {
   "name": "pq-secure-storage-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hardware-backed post-quantum crypto (ML-DSA, ML-KEM, AES-256) and biometric secure storage for Capacitor on iOS and Android, with a software fallback for the web.",
   "license": "MIT",
   "author": "J Caso",
@@ -64,7 +64,8 @@
     "lint": "eslint . --ext .ts && prettier --check \"{src,test}/**/*.ts\"",
     "fmt": "eslint . --ext .ts --fix && prettier --write \"{src,test}/**/*.ts\"",
     "test": "vitest run",
-    "verify": "npm run build && npm run test"
+    "verify": "npm run build && npm run test",
+    "prepublishOnly": "npm run verify"
   },
   "engines": {
     "node": ">=18"

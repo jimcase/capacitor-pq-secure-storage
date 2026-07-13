@@ -9,7 +9,7 @@ Pod::Spec.new do |s|
   s.license = package['license'] || 'MIT'
   s.homepage = package['homepage'] || 'https://github.com/jimcase/pq-secure-storage-plugin'
   s.author = package['author'] || 'PQSecureStorage'
-  s.source = { :git => 'https://github.com/jimcase/pq-secure-storage-plugin.git', :tag => s.version.to_s }
+  s.source = { :git => 'https://github.com/jimcase/pq-secure-storage-plugin.git', :tag => "v#{s.version}" }
   s.source_files = 'ios/Sources/**/*.{swift,h,m,c,cc,mm,cpp}'
   # Low floor so any Capacitor app can depend on it. The PQC that needs iOS 26
   # (SecureEnclave.MLDSA / MLKEM) is gated at runtime with @available; on older iOS the

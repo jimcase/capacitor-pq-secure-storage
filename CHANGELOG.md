@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-13
+
 ### Build
 
 - Android now builds standalone (CI): the Capacitor dependency uses `project(':capacitor-android')`
@@ -33,8 +35,8 @@ All notable changes to this project are documented here. The format is based on
   with `E2E_HARDWARE=1` the storage, at-rest, and ML-KEM specs pass; only ML-DSA signing needs the
   hardware KeyMint of a real device. Real biometric prompts can't be automated on a device. Verified
   locally: iOS 26.2 simulator (Xcode 26.2) and Android emulator (API 36, Pixel_9) both green on the
-  core specs. Manual e2e workflow (`.github/workflows/e2e.yml`, `workflow_dispatch`) with an iOS and
-  an Android job (reactivecircus/android-emulator-runner), both running the core specs.
+  core specs. Run them locally with `npm run e2e:ios` / `npm run e2e:android` (the scripts build the
+  app, boot a simulator/emulator, and run the specs); `wdio:ios` / `wdio:android` re-run the specs.
 
 ### Added
 
@@ -57,9 +59,6 @@ All notable changes to this project are documented here. The format is based on
 - ECDSA P-256 signatures are normalized to low-S (canonical, non-malleable) on Android and iOS to
   match the web backend; KERI accepts either, but canonical signatures are the safer default.
 - iOS wrapped signing zeroizes its copy of the unwrapped private after use, matching Android.
-
-### Security
-
 - Cap decoded input at 10 MiB on `sign`/`encryptAtRest`/`decryptAtRest`/`encryptTo`/`decrypt`
   (`E_INPUT_TOO_LARGE`) to stop a bridge-driven memory DoS.
 - Android: per-key guard so concurrent `setItem` on the same key can't race the item-key create,
