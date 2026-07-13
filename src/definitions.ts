@@ -120,7 +120,7 @@ export interface PQSecureStoragePlugin {
      * `requireBiometric` (default `false`): `false` reads without a prompt (drop-in for a plain
      * secure store); `true` gates the item behind a device biometric. A `true` READ prompts on both
      * platforms; a `true` WRITE is silent on iOS but prompts on Android (the item's own key gates the
-     * encrypt). An item's tier is fixed when it's created -- to change `requireBiometric`, remove the
+     * encrypt). An item's tier is fixed when it's created; to change `requireBiometric`, remove the
      * item first (setItem on an existing item with a different value rejects `E_TIER_MISMATCH`).
      *
      * WARNING: a silent item is readable by any code on the JS bridge after device unlock (no

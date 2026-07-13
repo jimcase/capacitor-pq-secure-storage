@@ -163,7 +163,7 @@ Key-value store the plugin persists for you. Whether a read prompts is chosen **
 time** with `requireBiometric` (default `false`):
 
 ```ts
-// silent tier (default): reads never prompt -- a drop-in for a plain secure store
+// silent tier (default): reads never prompt (a drop-in for a plain secure store)
 await PQSecureStorage.setItem({ key: 'db-key', value: dbKey });
 const { value } = await PQSecureStorage.getItem({ key: 'db-key' }); // no prompt; null if absent
 
@@ -185,7 +185,7 @@ Notes:
   `accessibility`, so both are enforced per item by the platform and can't be downgraded by tampering.
 - A biometric READ prompts on both platforms; a biometric WRITE is silent on iOS but prompts on
   Android (encrypting needs the item's own auth-gated key). To change an item's `requireBiometric`,
-  `removeItem` first -- overwriting with a different value rejects `E_TIER_MISMATCH`.
+  `removeItem` first; overwriting with a different value rejects `E_TIER_MISMATCH`.
 - Secrets are stored `ThisDeviceOnly` and excluded from backups (see Android note below).
 
 #### Android backup exclusion
@@ -432,7 +432,7 @@ where available), so the flags below are enforced per item by the platform.
 `requireBiometric` (default `false`): `false` reads without a prompt (drop-in for a plain
 secure store); `true` gates the item behind a device biometric. A `true` READ prompts on both
 platforms; a `true` WRITE is silent on iOS but prompts on Android (the item's own key gates the
-encrypt). An item's tier is fixed when it's created -- to change `requireBiometric`, remove the
+encrypt). An item's tier is fixed when it's created; to change `requireBiometric`, remove the
 item first (setItem on an existing item with a different value rejects `E_TIER_MISMATCH`).
 
 WARNING: a silent item is readable by any code on the JS bridge after device unlock (no
@@ -572,64 +572,88 @@ this-device-only there.
 
 ## Security notes
 
+### Keys, biometrics, and recovery
+
 - **Recovery.** Biometric-tier keys are bound to the current enrollment: adding or removing a
   fingerprint/face invalidates them, making biometric items unreadable. This is deliberate (it
   blocks an attacker who enrolls their own biometric). After such a change the plugin rejects with
   `E_KEY_INVALIDATED` so the host can re-provision; the host MUST keep an independent recovery path
   for anything critical (e.g. an exportable mnemonic). Silent-tier items are not bound to biometric
   enrollment and survive it. Losing the device is not recoverable from the plugin alone.
-- **Public key integrity (Android).** Stored ML-KEM public keys are tagged with an HMAC keyed by
-  a non-exportable Keystore key. If the prefs are tampered, `getKemPublicKey`/`setItem` reject
-  with `E_TAMPERED` instead of encrypting to a substituted key.
-- **Store item integrity (Android).** Each item is encrypted under its own non-exportable Keystore
-  AES-256-GCM key with the item name bound as GCM AAD. A prefs writer can't forge a value (no key),
-  move a value to another key (each key is per-item), or downgrade the tier (`requireBiometric`/
-  accessibility live in the key, not in prefs). Tampering fails the GCM tag -> `E_DECRYPT`.
-- **Item-name confidentiality (Android).** The SharedPreferences key is a Keystore-keyed hash of
-  the item name, and the real name is stored AES-encrypted (Keystore key) inside the value. So a
-  prefs reader (root/backup) sees neither the values nor the names (e.g. `seed-phrase`); `keys()`
-  still lists real names via the in-TEE key. iOS keeps names in the Keychain, which encrypts them.
-- **Accessibility.** `setItem` takes an `accessibility` option (default `whenUnlockedThisDeviceOnly`),
-  honored per item on both platforms: iOS maps it to the `kSecAttrAccessible*` classes, Android to
-  the item key's `setUnlockedDeviceRequired`.
-- **Alias validation.** Key aliases are restricted to `[A-Za-z0-9_-]` and cannot start with the
-  plugin's reserved prefix, so a caller cannot clobber the plugin's own internal Keystore entries
-  (`E_BAD_ALIAS`).
-- **Identity-key overwrite.** `generateKeyPair` (ML-DSA) with `overwrite: true` on an existing
-  alias destroys a possibly-live signing key, so it now requires a biometric bound to the existing
-  key first -- a silent bridge caller cannot rotate/brick an identity key. `generateKemKeyPair`
-  overwrite already prompts (to wrap the new private), though that prompt is not bound to the old key.
-- **Rollback (residual).** Per-item keys stop forgery but not full-snapshot rollback: an attacker
-  who restores an old copy of the prefs AND the matching old item key can revive a rotated-away or
-  revoked secret. Android has no universal monotonic anti-rollback counter (StrongBox has one, not
-  on all devices). The host should not rely on the store alone for freshness of revocable state.
-- **Memory hygiene.** Store item keys and ML-DSA signing keys never leave the Keystore. The ML-KEM
-  API (`encryptTo`/`decrypt`) is software (BouncyCastle) -- its raw private and shared secret are
-  wiped from the heap right after use, best-effort (JVM copies in `SecretKeySpec`/GC still linger,
-  and a decrypted plaintext `String` is immutable). Treat in-process memory as recoverable.
-- **`hardwareBacked` is a probe, not a promise.** It reflects a real Keystore security-level check
-  for the AES/wrap keys. ML-KEM is always software; hardware ML-DSA additionally needs KeyMint
-  support (per-key attestation), which is not checked here. Do not read `hardwareBacked: true` as
-  "ML-KEM/ML-DSA are in hardware."
 - **Per-item biometric.** `requireBiometric` is baked into the item's own key at creation
   (`setUserAuthenticationRequired` on Android, the biometry access control on iOS). `getItem`/
   `removeItem`/`clear` prompt only when a bio item is involved; on Android a bio WRITE prompts too
   (encrypting needs the auth-gated key). The prompt is bound to the item's key op (CryptoObject),
   so a hooked callback can't fake it. It does not protect against an attacker who reaches the JS
-  bridge (the main surface in a webview) -- the host MUST guard bridge access.
+  bridge (the main surface in a webview), so the host MUST guard bridge access.
+- **Identity-key overwrite.** `generateKeyPair` (ML-DSA) with `overwrite: true` on an existing
+  alias destroys a possibly-live signing key, so it now requires a biometric bound to the existing
+  key first. A silent bridge caller cannot rotate/brick an identity key. `generateKemKeyPair`
+  overwrite already prompts (to wrap the new private), though that prompt is not bound to the old key.
+- **Accessibility.** `setItem` takes an `accessibility` option (default `whenUnlockedThisDeviceOnly`),
+  honored per item on both platforms: iOS maps it to the `kSecAttrAccessible*` classes, Android to
+  the item key's `setUnlockedDeviceRequired`.
+
+### Android integrity and confidentiality
+
+- **Public-key integrity.** Stored ML-KEM public keys are tagged with an HMAC keyed by a
+  non-exportable Keystore key. If the prefs are tampered, `getKemPublicKey`/`setItem` reject with
+  `E_TAMPERED` instead of encrypting to a substituted key.
+- **Store-item integrity.** Each item is encrypted under its own non-exportable Keystore
+  AES-256-GCM key with the item name bound as GCM AAD. A prefs writer can't forge a value (no key),
+  move a value to another key (each key is per-item), or downgrade the tier (`requireBiometric`/
+  accessibility live in the key, not in prefs). Tampering fails the GCM tag and rejects `E_DECRYPT`.
+- **Item-name confidentiality.** The SharedPreferences key is a Keystore-keyed hash of the item
+  name, and the real name is stored AES-encrypted (Keystore key) inside the value. So a prefs
+  reader (root/backup) sees neither the values nor the names (e.g. `seed-phrase`); `keys()` still
+  lists real names via the in-TEE key. iOS keeps names in the Keychain, which encrypts them.
+- **Alias validation.** Key aliases are restricted to `[A-Za-z0-9_-]` and cannot start with the
+  plugin's reserved prefix, so a caller cannot clobber the plugin's own internal Keystore entries
+  (`E_BAD_ALIAS`).
+
+### Limitations
+
+- **`hardwareBacked` is a probe, not a promise.** It reflects a real Keystore security-level check
+  for the AES/wrap keys. ML-KEM is always software; hardware ML-DSA additionally needs KeyMint
+  support (per-key attestation), which is not checked here. Do not read `hardwareBacked: true` as
+  "ML-KEM/ML-DSA are in hardware."
+- **Rollback (residual).** Per-item keys stop forgery but not full-snapshot rollback: an attacker
+  who restores an old copy of the prefs AND the matching old item key can revive a rotated-away or
+  revoked secret. Android has no universal monotonic anti-rollback counter (StrongBox has one, not
+  on all devices). The host should not rely on the store alone for freshness of revocable state.
+- **Memory hygiene.** Store item keys and ML-DSA signing keys never leave the Keystore. The ML-KEM
+  API (`encryptTo`/`decrypt`) is software (BouncyCastle), so its raw private and shared secret are
+  wiped from the heap right after use, best-effort (JVM copies in `SecretKeySpec`/GC still linger,
+  and a decrypted plaintext `String` is immutable). Treat in-process memory as recoverable.
 - **Cross-platform ML-KEM.** iOS (CryptoKit) and Android (BouncyCastle) must agree on the raw
   shared secret. Before relying on a ciphertext produced on one platform decrypting on the other,
   run a known-answer test against a FIPS-203 vector on a real device.
 
 ## Error codes
 
-Rejections carry a code: `E_MISSING_PARAMS`, `E_INVALID_ARGS` (key/value out of bounds),
-`E_BAD_ALIAS` (reserved/invalid alias), `E_AUTH_FAILED` (biometric cancelled/failed),
-`E_KEY_INVALIDATED` (biometric enrollment changed), `E_ENCRYPT`, `E_DECRYPT`, `E_KEYGEN`,
-`E_KEY_NOT_FOUND`, `E_UNSUPPORTED`, `E_ALIAS_EXISTS`, `E_NO_ACTIVITY`, `E_TAMPERED`
-(integrity check failed), `E_TYPE_MISMATCH`, `E_BAD_CIPHERTEXT`, `E_REMOVE`, `E_CLEAR`,
-`E_TIER_MISMATCH` (setItem on an item stored with a different `requireBiometric`; removeItem first),
-`E_BUSY` (a keygen for the same alias is already in flight).
+Every rejection carries a `code`:
+
+| Code | Meaning |
+|---|---|
+| `E_MISSING_PARAMS` | A required parameter is missing |
+| `E_INVALID_ARGS` | Key or value out of bounds |
+| `E_BAD_ALIAS` | Reserved or invalid key alias |
+| `E_AUTH_FAILED` | Biometric cancelled or failed |
+| `E_KEY_INVALIDATED` | Biometric enrollment changed since the key was created |
+| `E_ENCRYPT` | Encryption failed |
+| `E_DECRYPT` | Decryption failed, or a tampered / GCM-tag mismatch |
+| `E_KEYGEN` | Key generation failed |
+| `E_KEY_NOT_FOUND` | No key exists for that alias |
+| `E_UNSUPPORTED` | Not supported on this device |
+| `E_ALIAS_EXISTS` | Alias already exists (pass `overwrite: true` to replace) |
+| `E_NO_ACTIVITY` | Android: no foreground activity to host the prompt |
+| `E_TAMPERED` | Integrity check failed on a stored key or item |
+| `E_TYPE_MISMATCH` | The key's type does not match the requested operation |
+| `E_BAD_CIPHERTEXT` | Malformed ciphertext blob |
+| `E_REMOVE` | `removeItem` failed |
+| `E_CLEAR` | `clear` failed |
+| `E_TIER_MISMATCH` | `setItem` on an item stored with a different `requireBiometric` (call `removeItem` first) |
+| `E_BUSY` | A keygen for the same alias is already in flight |
 
 ## Testing
 
