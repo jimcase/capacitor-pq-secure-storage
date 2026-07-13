@@ -19,9 +19,9 @@ export interface HardwareCapabilities {
     /** Whether post-quantum operations are available (hardware OR software fallback). */
     supportsPqc: boolean;
     /**
-     * True when a real key-security-level probe says the TEE/Secure Enclave backs the Keystore/
-     * Keychain keys (FALSE on the web fallback, and FALSE if KeyMint silently fell back to a
-     * software keystore). Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android
+     * True when a real key-security-level probe says the TEE/Secure Enclave backs the
+     * Keystore/Keychain keys (FALSE on the web fallback, and FALSE if KeyMint silently fell back to
+     * a software keystore). Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android
      * ML-KEM is ALWAYS software (the private is only wrapped by a hardware key); this flag reflects
      * the AES/wrap keys, and hardware ML-DSA additionally needs per-key attestation.
      */

@@ -142,10 +142,10 @@ enum PQKey {
     }
 }
 
-// ML-KEM decapsulation key, generated in and resident in the Secure Enclave (iOS 26
-// ships `SecureEnclave.MLKEM768` / `SecureEnclave.MLKEM1024`, developer.apple.com
-// /documentation/cryptokit/secureenclave/mlkem768). Modeled 1:1 on the ML-DSA
-// SEP types above and the long-shipping P-256 SEP keys.
+// ML-KEM decapsulation key, generated in and resident in the Secure Enclave (iOS 26 ships
+// `SecureEnclave.MLKEM768` / `SecureEnclave.MLKEM1024`, see
+// developer.apple.com/documentation/cryptokit/secureenclave/mlkem768). Modeled 1:1 on the
+// ML-DSA SEP types above and the long-shipping P-256 SEP keys.
 //
 // on-device-confirm (no Xcode 26 here): the exact CryptoKit labels --
 //   * `SecureEnclave.MLKEM768.PrivateKey(accessControl:)` /
@@ -856,9 +856,9 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     @available(iOS 26.0, *)
     private static func persist(key: PQKey, type: String, alias: String, requireBiometric: Bool) throws {
         // write public first: aliasExists() checks the public account, so a failed private write
-        // leaves a consistent state (alias reports exists) that heals on retry,
-        // instead of an orphaned private that blocks the alias. dataRepresentation is SEP-wrapped
-        // ciphertext, so device-only/unlocked-only protection is enough.
+        // leaves a consistent state (alias reports exists) that heals on retry, instead of an
+        // orphaned private that blocks the alias. dataRepresentation is SEP-wrapped ciphertext, so
+        // device-only/unlocked-only protection is enough.
         let pubStatus = upsertKeychain(
             account: publicAccount(for: alias),
             data: key.publicKeyBytes,

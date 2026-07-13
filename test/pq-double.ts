@@ -1,7 +1,7 @@
 // Software double of the native plugin surface. Mirrors the crypto the Swift
-// (SecureEnclave.MLKEM + AES.GCM) and Kotlin (BouncyCastle ML-KEM + Keystore
-// AES) do, so the wire format and round-trip can be unit-tested here. The
-// native side keeps the private key in hardware; the double keeps it in a Map.
+// (SecureEnclave.MLKEM + AES.GCM) and Kotlin (BouncyCastle ML-KEM + Keystore AES) do, so the
+// wire format and round-trip can be unit-tested here. The native side keeps the private key
+// in hardware; the double keeps it in a Map.
 import { ml_kem768, ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
