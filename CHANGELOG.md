@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- `setJSON` / `getJSON` on `PqSecureStorage`: store and read typed JSON values (objects, arrays,
+  numbers, booleans, null) over the secure store, with the same options and per-item tiering as
+  `setItem` / `getItem`. A JS layer over the raw string API, which is unchanged. `getJSON<T>` returns
+  the value typed.
+
 ## [0.2.0] - 2026-07-13
 
 ### Build

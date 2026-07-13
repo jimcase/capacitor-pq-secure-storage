@@ -70,8 +70,8 @@ import { PqSecureStorage } from 'capacitor-pq-secure-storage';
 ```
 
 Data fields (`data`, `signature`, `ciphertext`, `plaintext`, `publicKey`, `recipientPublicKey`)
-are base64 strings. The secure-storage `value` is an opaque string stored verbatim (serialize
-JSON/base64 yourself).
+are base64 strings. Secure-storage `value` is a raw string; use `setJSON` / `getJSON` to store
+typed JSON (objects, arrays, numbers) and get the type back.
 
 ### iOS setup
 
@@ -174,6 +174,15 @@ const { exists } = await PqSecureStorage.hasItem({ key: 'seed-phrase' });
 const { keys } = await PqSecureStorage.keys();
 await PqSecureStorage.removeItem({ key: 'seed-phrase' }); // prompts only if the item is biometric
 await PqSecureStorage.clear(); // prompts once if any biometric item exists
+```
+
+For typed values use `setJSON` / `getJSON` (a JSON round-trip over `setItem` / `getItem`, same
+options and tiering). Pass the expected type on read:
+
+```ts
+await PqSecureStorage.setJSON({ key: 'profile', value: { id: 7, roles: ['admin'] } });
+const { value } = await PqSecureStorage.getJSON<{ id: number; roles: string[] }>({ key: 'profile' });
+// value: { id: number; roles: string[] } | null
 ```
 
 Notes:
