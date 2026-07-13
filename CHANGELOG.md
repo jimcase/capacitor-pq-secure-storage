@@ -25,10 +25,13 @@ All notable changes to this project are documented here. The format is based on
   simulator (needs an Xcode 26 runner for the iOS 26 SDK).
 - `test-app/`: a Vite + TypeScript Capacitor harness that consumes the plugin via `file:..`, with a
   button per method and a live `#log`. Web build verified. Add native targets with
-  `npx cap add ios|android`. Appium + WebdriverIO e2e (`wdio.conf.ts`, `test/e2e/`): "core" specs
-  (bridge + Keychain/Keystore storage + capabilities) pass on a simulator/emulator; "hardware"
-  specs (SEP ML-DSA, StrongBox, ML-KEM, at-rest) are gated behind `E2E_HARDWARE=1` for a physical
-  device, since a simulator has no secure hardware and real biometric prompts can't be automated.
+  `npx cap add ios|android`. Appium 3 + WebdriverIO e2e (`wdio.conf.ts`, `test/e2e/`) drives the app
+  inside the Capacitor webview. Verified on the iOS 26.2 simulator (Xcode 26.2): the "core" specs
+  (bridge + capabilities + absent-item queries) pass. On iOS all storage and crypto is Secure
+  Enclave-backed, so those "hardware" specs (setItem/getItem, sign, at-rest, ML-KEM) fail on a
+  simulator and skip unless `E2E_HARDWARE=1` on a physical device (on Android the Keystore storage
+  also runs on an emulator, and real biometric prompts can't be automated on a device). Manual e2e
+  workflow in `.github/workflows/e2e.yml`.
 
 ### Added
 

@@ -1,0 +1,59 @@
+name: E2E
+
+# Slow (builds WebDriverAgent, boots a simulator), and iOS needs an Xcode 26 runner for the
+# iOS 26 SDK, so this is manual-trigger only, not on every push/PR.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ios:
+    name: iOS e2e (simulator, core specs)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # needs Xcode 26 for the iOS 26 SDK; point DEVELOPER_DIR at it once the runner ships it
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: lts/*
+          cache: npm
+      # build the plugin dist/ so the test-app's file:.. dependency resolves
+      - run: npm ci
+      - run: npm run build
+      - name: Test-app install + web build
+        working-directory: test-app
+        run: |
+          npm install
+          npm run build
+      - name: Add iOS platform and build the app
+        working-directory: test-app
+        run: |
+          npx cap add ios
+          # the plugin floor is iOS 15; Capacitor generates 14
+          sed -i '' "s/platform :ios, '14.0'/platform :ios, '15.0'/" ios/App/Podfile
+          (cd ios/App && pod install)
+          xcodebuild -workspace ios/App/App.xcworkspace -scheme App -sdk iphonesimulator \
+            -configuration Debug -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build
+      - name: Install Appium xcuitest driver
+        working-directory: test-app
+        run: npx appium driver install xcuitest
+      - name: Pick an available iOS simulator
+        id: sim
+        run: |
+          udid=$(xcrun simctl list devices available -j \
+            | jq -r '[.devices | to_entries[] | select(.key | test("iOS")) | .value[] | select(.isAvailable and (.name | test("iPhone")))][0].udid')
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+      - name: Run e2e (core specs; hardware specs skip on the simulator)
+        working-directory: test-app
+        env:
+          IOS_APP_PATH: ${{ github.workspace }}/test-app/ios/build/Build/Products/Debug-iphonesimulator/App.app
+          IOS_UDID: ${{ steps.sim.outputs.udid }}
+        run: npm run e2e:ios
+
+  # Android e2e needs a KVM-enabled emulator. Add a job with reactivecircus/android-emulator-runner
+  # (pin it to a commit SHA first), building the APK with `npx cap add android && ./gradlew
+  # assembleDebug`, then `npm run e2e:android`. The Keystore storage specs run on the emulator too;
+  # set E2E_HARDWARE=1 to include them.

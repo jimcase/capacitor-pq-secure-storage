@@ -1,68 +1,71 @@
 import { $, expect } from '@wdio/globals';
 import { switchToWebview, tap } from './helpers.js';
 
-// Core paths: bridge + Keychain/Keystore storage + capabilities probe. Green on a
-// simulator/emulator (no Secure Enclave needed) and on a real device.
+// #log prepends the newest line, so the top line is the result of the last tap.
+function topLine(log: string): string {
+  return log.split('\n')[0] ?? '';
+}
+
+// Core paths that need no secure hardware: the native bridge, the capabilities probe, and
+// queries on an absent item. Green on an iOS simulator / Android emulator and on a device.
 describe('pq-secure-storage-plugin: core (sim/emulator + device)', () => {
   before(async () => {
     await switchToWebview();
     await $('#log').waitForExist({ timeout: 15000 });
   });
 
-  it('reports hardware capabilities', async () => {
+  it('reports hardware capabilities over the bridge', async () => {
     const log = await tap('getHardwareCapabilities');
-    expect(log).toContain('OK');
-    expect(log).toContain('supportsPqc');
+    expect(topLine(log)).toContain('OK');
+    expect(topLine(log)).toContain('supportsPqc');
   });
 
-  it('stores and reads a secure item', async () => {
-    await tap('setItem');
-    const read = await tap('getItem');
-    expect(read).toContain('my seed phrase');
-  });
-
-  it('reports the item exists and lists it', async () => {
-    const has = await tap('hasItem');
-    expect(has).toContain('true');
-    const keys = await tap('keys');
-    expect(keys).toContain('secret');
-  });
-
-  it('removes the item', async () => {
-    await tap('removeItem');
-    const gone = await tap('hasItem');
-    expect(gone).toContain('false');
+  it('reports an absent item as not present', async () => {
+    const log = await tap('hasItem');
+    expect(topLine(log)).toContain('OK');
+    expect(topLine(log)).toContain('false');
   });
 });
 
-// Hardware-backed crypto: Secure Enclave ML-DSA / P-256, StrongBox, ML-KEM, at-rest ECIES.
-// These fail on a simulator/emulator (no secure hardware), so they only run on a physical
-// device with E2E_HARDWARE=1.
-describe('pq-secure-storage-plugin: hardware (physical device only)', function () {
+// Anything that stores or signs is hardware-backed on iOS (Secure Enclave ECIES for at-rest and
+// the store, SEP ML-DSA/P-256 for signing), so it fails on an iOS simulator. On Android the
+// Keystore storage works on an emulator too. Run with E2E_HARDWARE=1 on a real device (or an
+// Android emulator for the storage specs).
+describe('pq-secure-storage-plugin: hardware (device; storage also Android emulator)', function () {
   before(function () {
     if (!process.env.E2E_HARDWARE) {
       this.skip();
     }
   });
 
-  it('generates an ML-DSA key and signs', async () => {
+  it('stores, reads, lists, and clears a secure item', async () => {
     await switchToWebview();
+    await tap('setItem');
+    const read = await tap('getItem');
+    expect(topLine(read)).toContain('my seed phrase');
+    const keys = await tap('keys');
+    expect(topLine(keys)).toContain('secret');
+    const cleared = await tap('clear');
+    expect(topLine(cleared)).toContain('OK');
+  });
+
+  it('generates an ML-DSA key and signs', async () => {
     await tap('generateKeyPair');
     const log = await tap('sign');
-    expect(log).toContain('OK');
-    expect(log).toContain('signature');
+    expect(topLine(log)).toContain('OK');
+    expect(topLine(log)).toContain('signature');
   });
 
   it('round-trips AES-256-GCM at rest', async () => {
     await tap('encryptAtRest');
     const log = await tap('decryptAtRest (last)');
-    expect(log).toContain('secret at rest');
+    expect(topLine(log)).toContain('secret at rest');
   });
 
   it('round-trips ML-KEM encrypt-to-self', async () => {
     await tap('generateKemKeyPair');
     await tap('encryptTo (self)');
     const log = await tap('decrypt (last)');
-    expect(log).toContain('kem message');
+    expect(topLine(log)).toContain('kem message');
   });
 });

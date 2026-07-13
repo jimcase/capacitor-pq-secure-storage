@@ -6,13 +6,18 @@ function contextId(c: unknown): string {
 }
 
 export async function switchToWebview(): Promise<void> {
-  await browser.waitUntil(
-    async () => (await browser.getContexts()).some((c) => contextId(c).includes('WEBVIEW')),
-    { timeout: 20000, timeoutMsg: 'Capacitor webview context never appeared' },
-  );
-  const web = (await browser.getContexts()).map(contextId).find((id) => id.includes('WEBVIEW'));
-  if (!web) throw new Error('no WEBVIEW context');
-  await browser.switchContext(web);
+  let seen: string[] = [];
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    seen = (await browser.getContexts()).map(contextId);
+    const web = seen.find((id) => id.includes('WEBVIEW'));
+    if (web) {
+      await browser.switchContext(web);
+      return;
+    }
+    await browser.pause(1000);
+  }
+  throw new Error(`Capacitor webview context never appeared; contexts seen: [${seen.join(', ')}]`);
 }
 
 export async function switchToNative(): Promise<void> {
