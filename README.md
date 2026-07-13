@@ -23,6 +23,7 @@ All symmetric crypto is AES-256 (quantum-safe); there is no RSA or ECC anywhere 
 - [Platform support](#platform-support)
 - [Install](#install)
 - [Usage](#usage)
+- [Migrating](#migrating)
 - [API reference](#api-reference)
 - [Error codes](#error-codes)
 - [Testing](#testing)
@@ -224,6 +225,59 @@ Backup rules live in the host app, not the library. Exclude the store's prefs fi
 The per-item keys never leave the Keystore, so a leaked backup is still useless off-device; the
 exclusion is defense in depth. Also set `android:allowBackup="false"` in the host app so the
 prefs cannot be pulled/edited via `adb backup`/`restore`.
+
+## Migrating
+
+Coming from another secure-storage plugin (`@evva/capacitor-secure-storage-plugin`,
+`@aparajita/capacitor-secure-storage`, ...)? Two parts: swap the API, then migrate the data. The new
+store uses its own Keychain / Keystore, so it can't read what the old plugin wrote.
+
+### 1. Swap the dependency
+
+```bash
+npm uninstall @evva/capacitor-secure-storage-plugin
+npm install capacitor-pq-secure-storage@7   # @8 for Capacitor 8
+npx cap sync
+```
+
+### 2. Map the API
+
+| From @evva | From @aparajita | Here |
+|---|---|---|
+| `set({ key, value })` | `setItem(key, value)` | `setItem({ key, value })` |
+| `get({ key })` | `getItem(key)` | `getItem({ key })` → `{ value }` |
+| (stringify yourself) | `set(key, data)` | `setJSON({ key, value })` |
+| (parse yourself) | `get(key)` | `getJSON<T>({ key })` |
+| `remove({ key })` | `remove(key)` | `removeItem({ key })` |
+| `keys()` → `{ value }` | `keys()` | `keys()` → `{ keys }` |
+| `clear()` | `clear()` | `clear()` |
+
+### 3. Migrate the data
+
+If the values can be re-fetched (login tokens, session state), skip this: switch the plugin and let
+users re-authenticate. For data you can't regenerate (seed phrase, keys), run a one-time copy with
+both plugins installed, then drop the old one:
+
+```ts
+import { SecureStoragePlugin as Old } from '@evva/capacitor-secure-storage-plugin';
+import { PqSecureStorage } from 'capacitor-pq-secure-storage';
+
+async function migrateOnce() {
+  if ((await PqSecureStorage.getItem({ key: '__migrated__' })).value) return;
+  const { value: keys } = await Old.keys();
+  for (const key of keys) {
+    const { value } = await Old.get({ key });
+    // seed-tier -> requireBiometric: true; tokens -> leave it silent
+    await PqSecureStorage.setItem({ key, value, requireBiometric: key === 'seedPhrase' });
+    await Old.remove({ key });
+  }
+  await PqSecureStorage.setItem({ key: '__migrated__', value: '1' });
+}
+```
+
+Notes: use `setJSON` / `getJSON` if the old values were JSON objects; a `requireBiometric: true` item
+prompts on every read; the store is device-only, so any iCloud-synced items become device-only after
+migrating.
 
 ## API reference
 
