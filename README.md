@@ -179,7 +179,7 @@ await PqSecureStorage.clear(); // prompts once if any biometric item exists
 ```
 
 For typed values use `setJSON` / `getJSON` (a JSON round-trip over `setItem` / `getItem`, same
-options and tiering). Pass the expected type on read:
+options and tiering; `Date` values round-trip, nested included). Pass the expected type on read:
 
 ```ts
 await PqSecureStorage.setJSON({ key: 'profile', value: { id: 7, roles: ['admin'] } });

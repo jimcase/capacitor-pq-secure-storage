@@ -50,4 +50,33 @@ describe('json helpers', () => {
         const s = make();
         expect((await s.getJSON({ key: 'nope' })).value).toBeNull();
     });
+
+    it('round-trips a top-level Date', async () => {
+        const s = make();
+        const d = new Date('2026-07-13T12:00:00.000Z');
+        await s.setJSON({ key: 'd', value: d });
+        const got = await s.getJSON<Date>({ key: 'd' });
+        expect(got.value).toBeInstanceOf(Date);
+        expect(got.value?.getTime()).toBe(d.getTime());
+    });
+
+    it('round-trips nested Dates in objects and arrays', async () => {
+        const s = make();
+        const value = {
+            at: new Date('2026-01-02T03:04:05.678Z'),
+            list: [new Date('2020-12-31T23:59:59.000Z')],
+        };
+        await s.setJSON({ key: 'nested', value });
+        const got = await s.getJSON<typeof value>({ key: 'nested' });
+        expect(got.value?.at).toBeInstanceOf(Date);
+        expect(got.value?.at.getTime()).toBe(value.at.getTime());
+        expect(got.value?.list[0]).toBeInstanceOf(Date);
+        expect(got.value?.list[0].getTime()).toBe(value.list[0].getTime());
+    });
+
+    it('does not revive a plain ISO string into a Date', async () => {
+        const s = make();
+        await s.setJSON({ key: 'str', value: '2026-07-13T12:00:00.000Z' });
+        expect(typeof (await s.getJSON({ key: 'str' })).value).toBe('string');
+    });
 });

@@ -11,7 +11,8 @@ All notable changes to this project are documented here. The format is based on
 - `setJSON` / `getJSON` on `PqSecureStorage`: store and read typed JSON values (objects, arrays,
   numbers, booleans, null) over the secure store, with the same options and per-item tiering as
   `setItem` / `getItem`. A JS layer over the raw string API, which is unchanged. `getJSON<T>` returns
-  the value typed.
+  the value typed. `Date` values round-trip, nested ones included (tagged as `{ $date }`), without
+  the false positives of reviving any ISO-looking string.
 - `setKeyPrefix` / `getKeyPrefix`: namespace secure-store keys. The prefix is prepended on write and
   read (transparently), and `keys()` / `clear()` are scoped to the current prefix, so a library can
   share the store without its `clear()` wiping the host app's items. Default is `''` (no prefix).
