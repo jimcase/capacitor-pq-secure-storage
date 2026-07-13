@@ -10,8 +10,10 @@
     "preview": "vite preview",
     "sync": "cap sync",
     "typecheck:e2e": "tsc --noEmit -p tsconfig.e2e.json",
-    "e2e:ios": "E2E_PLATFORM=ios wdio run ./wdio.conf.ts",
-    "e2e:android": "E2E_PLATFORM=android wdio run ./wdio.conf.ts"
+    "e2e:ios": "./scripts/e2e.sh ios",
+    "e2e:android": "./scripts/e2e.sh android",
+    "wdio:ios": "E2E_PLATFORM=ios wdio run ./wdio.conf.ts",
+    "wdio:android": "E2E_PLATFORM=android wdio run ./wdio.conf.ts"
   },
   "dependencies": {
     "@capacitor/core": "^7.0.0",
