@@ -47,7 +47,7 @@
     "android/build.gradle",
     "android/variables.gradle",
     "android/proguard-rules.pro",
-    "PqSecureStoragePlugin.podspec"
+    "CapacitorPqSecureStorage.podspec"
   ],
   "capacitor": {
     "ios": {
@@ -59,7 +59,7 @@
   },
   "scripts": {
     "clean": "rimraf ./dist",
-    "docgen": "docgen --project tsconfig.docgen.json --api PQSecureStoragePlugin --output-readme README.md --output-json dist/docs.json",
+    "docgen": "docgen --project tsconfig.docgen.json --api PqSecureStoragePlugin --output-readme README.md --output-json dist/docs.json",
     "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs",
     "lint": "eslint . --ext .ts && prettier --check \"{src,test}/**/*.ts\"",
     "fmt": "eslint . --ext .ts --fix && prettier --write \"{src,test}/**/*.ts\"",

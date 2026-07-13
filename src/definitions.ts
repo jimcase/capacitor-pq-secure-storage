@@ -39,7 +39,7 @@ export interface HardwareCapabilities {
     kemInSecureEnclave: boolean;
 }
 
-export interface PQSecureStoragePlugin {
+export interface PqSecureStoragePlugin {
     /** Report what post-quantum crypto this device supports. */
     getHardwareCapabilities(): Promise<HardwareCapabilities>;
 

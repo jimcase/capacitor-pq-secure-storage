@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PQSecureStorageDouble, KEM_CT_LEN } from './pq-double';
+import { PqSecureStorageDouble, KEM_CT_LEN } from './pq-double';
 
 const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
 const utf8 = (b64s: string) => Buffer.from(b64s, 'base64').toString('utf8');
@@ -7,7 +7,7 @@ const bytes = (b64s: string) => new Uint8Array(Buffer.from(b64s, 'base64'));
 
 describe('at-rest AES-256-GCM', () => {
     it('round-trips data under the same alias', async () => {
-        const pq = new PQSecureStorageDouble();
+        const pq = new PqSecureStorageDouble();
         const { ciphertext } = await pq.encryptAtRest({
             keyAlias: 'rest-1',
             data: b64('secret at rest'),
@@ -20,14 +20,14 @@ describe('at-rest AES-256-GCM', () => {
     });
 
     it('produces a fresh nonce each call (ciphertext differs)', async () => {
-        const pq = new PQSecureStorageDouble();
+        const pq = new PqSecureStorageDouble();
         const a = await pq.encryptAtRest({ keyAlias: 'rest-2', data: b64('x') });
         const b = await pq.encryptAtRest({ keyAlias: 'rest-2', data: b64('x') });
         expect(a.ciphertext).not.toBe(b.ciphertext);
     });
 
     it('rejects a tampered ciphertext (auth tag)', async () => {
-        const pq = new PQSecureStorageDouble();
+        const pq = new PqSecureStorageDouble();
         const { ciphertext } = await pq.encryptAtRest({
             keyAlias: 'rest-3',
             data: b64('do not touch'),
@@ -39,7 +39,7 @@ describe('at-rest AES-256-GCM', () => {
     });
 
     it('cannot decrypt under a different alias', async () => {
-        const pq = new PQSecureStorageDouble();
+        const pq = new PqSecureStorageDouble();
         const { ciphertext } = await pq.encryptAtRest({
             keyAlias: 'rest-a',
             data: b64('mine'),
@@ -50,7 +50,7 @@ describe('at-rest AES-256-GCM', () => {
 
 describe.each(['PQC_MLKEM_768', 'PQC_MLKEM_1024'] as const)('asymmetric %s', (type) => {
     it('encryptTo the public key round-trips via decrypt', async () => {
-        const pq = new PQSecureStorageDouble();
+        const pq = new PqSecureStorageDouble();
         const { publicKey } = await pq.generateKemKeyPair({
             keyAlias: `kem-${type}`,
             type,
@@ -69,7 +69,7 @@ describe.each(['PQC_MLKEM_768', 'PQC_MLKEM_1024'] as const)('asymmetric %s', (ty
     });
 
     it('frame is kemCt || nonce(12) || aeadCt(+tag16)', async () => {
-        const pq = new PQSecureStorageDouble();
+        const pq = new PqSecureStorageDouble();
         const { publicKey } = await pq.generateKemKeyPair({
             keyAlias: `frame-${type}`,
             type,
@@ -85,7 +85,7 @@ describe.each(['PQC_MLKEM_768', 'PQC_MLKEM_1024'] as const)('asymmetric %s', (ty
     });
 
     it('rejects a tampered ciphertext', async () => {
-        const pq = new PQSecureStorageDouble();
+        const pq = new PqSecureStorageDouble();
         const { publicKey } = await pq.generateKemKeyPair({
             keyAlias: `tamper-${type}`,
             type,
@@ -107,7 +107,7 @@ describe.each(['PQC_MLKEM_768', 'PQC_MLKEM_1024'] as const)('asymmetric %s', (ty
     });
 
     it('a different recipient key cannot decrypt', async () => {
-        const pq = new PQSecureStorageDouble();
+        const pq = new PqSecureStorageDouble();
         const a = await pq.generateKemKeyPair({ keyAlias: `a-${type}`, type });
         await pq.generateKemKeyPair({ keyAlias: `b-${type}`, type });
         const { ciphertext } = await pq.encryptTo({

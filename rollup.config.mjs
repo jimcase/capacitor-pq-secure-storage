@@ -10,7 +10,7 @@ export default {
         {
             file: 'dist/plugin.js',
             format: 'iife',
-            name: 'capacitorPQSecureStorage',
+            name: 'capacitorPqSecureStorage',
             globals: { '@capacitor/core': 'capacitorExports' },
             sourcemap: true,
             inlineDynamicImports: true,

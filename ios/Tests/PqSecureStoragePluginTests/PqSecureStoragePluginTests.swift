@@ -6,10 +6,10 @@ import XCTest
 //   xcodebuild test -workspace Plugin.xcworkspace -scheme Plugin \
 //     -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 // Exercises the CryptoKit primitives the plugin uses and that run in the simulator. Building the
-// test bundle also links PqSecureStoragePlugin.framework, so this doubles as a compile smoke test
+// test bundle also links CapacitorPqSecureStorage.framework, so this doubles as a compile smoke test
 // of the iOS 26 PQ code. SecureEnclave.MLDSA / MLKEM and the Face ID prompts need a physical
 // iOS 26 device and are tested manually.
-final class PQSecureStoragePluginTests: XCTestCase {
+final class PqSecureStoragePluginTests: XCTestCase {
     func testAesGcmCombinedRoundTrips() throws {
         let key = SymmetricKey(size: .bits256)
         let sealed = try AES.GCM.seal(Data("secret at rest".utf8), using: key)

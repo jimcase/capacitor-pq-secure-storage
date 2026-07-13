@@ -8,7 +8,7 @@ import { randomBytes } from '@noble/post-quantum/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 
-import type { PQSecureStoragePlugin, SignatureType, KemType, HardwareCapabilities } from './definitions.js';
+import type { PqSecureStoragePlugin, SignatureType, KemType, HardwareCapabilities } from './definitions.js';
 
 // Software fallback for platforms without hardware PQC (the web, mainly). Uses @noble in pure
 // JS and persists keys/values in a Storage (localStorage by default). NOT hardware-backed and
@@ -76,7 +76,7 @@ function concat(...parts: Uint8Array[]): Uint8Array {
     return out;
 }
 
-export class PQSecureStorageWeb extends WebPlugin implements PQSecureStoragePlugin {
+export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlugin {
     private store: Storage;
 
     constructor(store?: Storage) {

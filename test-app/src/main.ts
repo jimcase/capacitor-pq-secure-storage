@@ -1,6 +1,6 @@
 import { Capacitor } from '@capacitor/core';
 import {
-  PQSecureStorage,
+  PqSecureStorage,
   type SignatureType,
   type KemType,
   type Accessibility,
@@ -101,7 +101,7 @@ const accessibilities: Accessibility[] = [
 
 section(
   'Capabilities',
-  buttonRow(btn('getHardwareCapabilities', () => run('getHardwareCapabilities', () => PQSecureStorage.getHardwareCapabilities()))),
+  buttonRow(btn('getHardwareCapabilities', () => run('getHardwareCapabilities', () => PqSecureStorage.getHardwareCapabilities()))),
 );
 
 section(
@@ -113,7 +113,7 @@ section(
   buttonRow(
     btn('generateKeyPair', () =>
       run('generateKeyPair', () =>
-        PQSecureStorage.generateKeyPair({
+        PqSecureStorage.generateKeyPair({
           keyAlias: val('sigAlias'),
           type: val('sigType') as SignatureType,
           overwrite: true,
@@ -121,10 +121,10 @@ section(
         }),
       ),
     ),
-    btn('getPublicKey', () => run('getPublicKey', () => PQSecureStorage.getPublicKey({ keyAlias: val('sigAlias') }))),
+    btn('getPublicKey', () => run('getPublicKey', () => PqSecureStorage.getPublicKey({ keyAlias: val('sigAlias') }))),
     btn('sign', () =>
       run('sign', () =>
-        PQSecureStorage.sign({
+        PqSecureStorage.sign({
           keyAlias: val('sigAlias'),
           type: val('sigType') as SignatureType,
           data: toB64(val('sigMsg')),
@@ -142,7 +142,7 @@ section(
   buttonRow(
     btn('encryptAtRest', () =>
       run('encryptAtRest', async () => {
-        const r = await PQSecureStorage.encryptAtRest({ keyAlias: val('arAlias'), data: toB64(val('arMsg')) });
+        const r = await PqSecureStorage.encryptAtRest({ keyAlias: val('arAlias'), data: toB64(val('arMsg')) });
         lastCiphertextAtRest = r.ciphertext;
         return r;
       }),
@@ -150,7 +150,7 @@ section(
     btn('decryptAtRest (last)', () =>
       run('decryptAtRest', async () => {
         if (!lastCiphertextAtRest) throw { message: 'encrypt first' };
-        const r = await PQSecureStorage.decryptAtRest({ keyAlias: val('arAlias'), data: lastCiphertextAtRest });
+        const r = await PqSecureStorage.decryptAtRest({ keyAlias: val('arAlias'), data: lastCiphertextAtRest });
         return { plaintext: fromB64(r.plaintext) };
       }),
     ),
@@ -165,7 +165,7 @@ section(
   buttonRow(
     btn('generateKemKeyPair', () =>
       run('generateKemKeyPair', async () => {
-        const r = await PQSecureStorage.generateKemKeyPair({
+        const r = await PqSecureStorage.generateKemKeyPair({
           keyAlias: val('kemAlias'),
           type: val('kemType') as KemType,
           overwrite: true,
@@ -178,7 +178,7 @@ section(
     btn('encryptTo (self)', () =>
       run('encryptTo', async () => {
         if (!kemPublicKey) throw { message: 'generate KEM keypair first' };
-        const r = await PQSecureStorage.encryptTo({
+        const r = await PqSecureStorage.encryptTo({
           recipientPublicKey: kemPublicKey,
           type: val('kemType') as KemType,
           data: toB64(val('kemMsg')),
@@ -190,7 +190,7 @@ section(
     btn('decrypt (last)', () =>
       run('decrypt', async () => {
         if (!lastCiphertextKem) throw { message: 'encryptTo first' };
-        const r = await PQSecureStorage.decrypt({
+        const r = await PqSecureStorage.decrypt({
           keyAlias: val('kemAlias'),
           type: val('kemType') as KemType,
           data: lastCiphertextKem,
@@ -210,7 +210,7 @@ section(
   buttonRow(
     btn('setItem', () =>
       run('setItem', () =>
-        PQSecureStorage.setItem({
+        PqSecureStorage.setItem({
           key: val('itemKey'),
           value: val('itemVal'),
           requireBiometric: val('itemBio') === 'true',
@@ -218,11 +218,11 @@ section(
         }),
       ),
     ),
-    btn('getItem', () => run('getItem', () => PQSecureStorage.getItem({ key: val('itemKey') }))),
-    btn('hasItem', () => run('hasItem', () => PQSecureStorage.hasItem({ key: val('itemKey') }))),
-    btn('keys', () => run('keys', () => PQSecureStorage.keys())),
-    btn('removeItem', () => run('removeItem', () => PQSecureStorage.removeItem({ key: val('itemKey') }))),
-    btn('clear', () => run('clear', () => PQSecureStorage.clear())),
+    btn('getItem', () => run('getItem', () => PqSecureStorage.getItem({ key: val('itemKey') }))),
+    btn('hasItem', () => run('hasItem', () => PqSecureStorage.hasItem({ key: val('itemKey') }))),
+    btn('keys', () => run('keys', () => PqSecureStorage.keys())),
+    btn('removeItem', () => run('removeItem', () => PqSecureStorage.removeItem({ key: val('itemKey') }))),
+    btn('clear', () => run('clear', () => PqSecureStorage.clear())),
   ),
 );
 

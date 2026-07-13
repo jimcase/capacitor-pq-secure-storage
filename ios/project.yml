@@ -6,7 +6,7 @@
 #     -destination 'platform=iOS Simulator,name=iPhone 16'
 name: Plugin
 options:
-  bundleIdPrefix: com.pq.securestorage
+  bundleIdPrefix: com.capacitorpqsecurestorage
   deploymentTarget:
     iOS: "15.0"
   createIntermediateGroups: true
@@ -23,8 +23,8 @@ targets:
       - Sources
     settings:
       base:
-        PRODUCT_NAME: PqSecureStoragePlugin
-        PRODUCT_BUNDLE_IDENTIFIER: com.pq.securestorage.plugin
+        PRODUCT_NAME: CapacitorPqSecureStorage
+        PRODUCT_BUNDLE_IDENTIFIER: com.capacitorpqsecurestorage.plugin
         INFOPLIST_FILE: Support/Plugin-Info.plist
         DEFINES_MODULE: "YES"
   PluginTests:
@@ -34,7 +34,7 @@ targets:
       - Tests
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.pq.securestorage.pluginTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.capacitorpqsecurestorage.pluginTests
         INFOPLIST_FILE: Support/Tests-Info.plist
         GENERATE_INFOPLIST_FILE: "NO"
     dependencies:

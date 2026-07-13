@@ -15,7 +15,7 @@ apply plugin: 'kotlin-android'
 apply from: 'variables.gradle'
 
 android {
-    namespace "com.pq.securestorage"
+    namespace "com.capacitorpqsecurestorage"
 
     compileSdk rootProject.ext.compileSdkVersion
 

@@ -1,4 +1,4 @@
-# PQSecureStorage Plugin: On-Device Verification Checklist
+# PqSecureStorage Plugin: On-Device Verification Checklist
 
 Real hardware validation for post-quantum ML-DSA integration on Pixel 9 Pro (Android 17) and iOS 26 (if available).
 
@@ -9,7 +9,7 @@ Real hardware validation for post-quantum ML-DSA integration on Pixel 9 Pro (And
 - Pixel 9 Pro updated to Android 17 (API level 37)
 - iOS 26 device with Secure Enclave (iPhone 15 or later) — optional
 - Local KERIA instance running
-- PQSecureStorageExternalModule pointed at real plugin (not test double)
+- PqSecureStorageExternalModule pointed at real plugin (not test double)
 - noble-ed25519 or keripy available for off-device signature verification
 
 ---
@@ -109,7 +109,7 @@ Signature must verify cleanly. If verification fails, the private key or the sig
 
 ### 7. End-to-end: KERIA incept/interact/rotate
 
-Point `PQSecureStorageExternalModule` at the real plugin (change the `backend` parameter from test double to `new VeridianAndroidPlugin()` or similar).
+Point `PqSecureStorageExternalModule` at the real plugin (change the `backend` parameter from test double to `new VeridianAndroidPlugin()` or similar).
 
 Run the integration test flow against the local KERIA:
 
@@ -204,7 +204,7 @@ Document the choice in the security policy.
 | Attestation says "Software" | No lattice-PKA in TEE/StrongBox | Device manufacturer may have disabled it; hardware limitation |
 | `spkiToRawMldsa` yields wrong length | Non-RFC SPKI | Verify Android KeyStore is on latest patch level |
 | Signature fails verification | Private key or message encoding corrupted | Confirm UTF-8 encoding, no extra whitespace |
-| KERIA rejects signature | Wrong CESR code for ML-DSA-65 verkey (should be `1QAB`) or sig (should be `3E`) | Cross-check CESR code constants in PQSecureStorageExternalModule |
+| KERIA rejects signature | Wrong CESR code for ML-DSA-65 verkey (should be `1QAB`) or sig (should be `3E`) | Cross-check CESR code constants in PqSecureStorageExternalModule |
 | Biometric prompt doesn't appear (Android) | Host activity isn't a `FragmentActivity`, or `sign()` rejected with `E_NO_ACTIVITY` | Confirm the host app's activity extends Capacitor's `BridgeActivity` |
 | Biometric prompt doesn't appear (iOS) | LAContext not initialized correctly | Confirm `LAContext.evaluatePolicy()` is called before signing |
 | App crashes on unknown alias | Missing error handling | Add try-catch around `sign()` and handle `E_KEY_NOT_FOUND` |

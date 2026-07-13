@@ -1,4 +1,4 @@
-package com.pq.securestorage
+package com.capacitorpqsecurestorage
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties

@@ -28,7 +28,7 @@ function concat(...parts: Uint8Array[]): Uint8Array {
     return out;
 }
 
-export class PQSecureStorageDouble {
+export class PqSecureStorageDouble {
     private aesKeys = new Map<string, Uint8Array>();
     private kemKeys = new Map<string, { type: KemType; secretKey: Uint8Array; publicKey: Uint8Array }>();
 

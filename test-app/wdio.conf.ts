@@ -24,7 +24,7 @@ const iosCaps = {
   'appium:webviewConnectTimeout': 30000,
   // Capacitor's iOS executable is "App", so the remote debugger lists the webview under the
   // process "process-App", not the app bundle id. Match it so getContexts finds the WEBVIEW.
-  'appium:additionalWebviewBundleIds': ['process-App', 'com.pq.securestorage.testapp'],
+  'appium:additionalWebviewBundleIds': ['process-App', 'com.capacitorpqsecurestorage.testapp'],
   // first run compiles WebDriverAgent, so give it room
   'appium:wdaLaunchTimeout': 240000,
   'appium:wdaConnectionTimeout': 240000,
@@ -37,7 +37,7 @@ const androidCaps = {
   'appium:automationName': 'UiAutomator2',
   'appium:avd': process.env.ANDROID_AVD,
   'appium:app': process.env.ANDROID_APK_PATH,
-  'appium:appPackage': 'com.pq.securestorage.testapp',
+  'appium:appPackage': 'com.capacitorpqsecurestorage.testapp',
   'appium:appActivity': '.MainActivity',
   'appium:autoGrantPermissions': true,
 } as WebdriverIO.Capabilities;

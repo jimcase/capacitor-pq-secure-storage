@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { p256 } from '@noble/curves/nist.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { PQSecureStorageWeb } from '../src/web';
+import { PqSecureStorageWeb } from '../src/web';
 
 class MemoryStorage implements Storage {
     private m = new Map<string, string>();
@@ -27,7 +27,7 @@ class MemoryStorage implements Storage {
     }
 }
 
-const web = () => new PQSecureStorageWeb(new MemoryStorage());
+const web = () => new PqSecureStorageWeb(new MemoryStorage());
 const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
 const utf8 = (b: string) => Buffer.from(b, 'base64').toString('utf8');
 const bytes = (b: string) => new Uint8Array(Buffer.from(b, 'base64'));
@@ -123,7 +123,7 @@ describe('web software fallback', () => {
 
     it('binds a stored value to its key name (no swap)', async () => {
         const storage = new MemoryStorage();
-        const pq = new PQSecureStorageWeb(storage);
+        const pq = new PqSecureStorageWeb(storage);
         await pq.setItem({ key: 'a', value: 'AAA' });
         await pq.setItem({ key: 'b', value: 'BBB' });
         // move a's blob under b -> AAD mismatch on read

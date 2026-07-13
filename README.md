@@ -67,7 +67,7 @@ npx cap sync
 ```
 
 ```ts
-import { PQSecureStorage } from 'capacitor-pq-secure-storage';
+import { PqSecureStorage } from 'capacitor-pq-secure-storage';
 ```
 
 Data fields (`data`, `signature`, `ciphertext`, `plaintext`, `publicKey`, `recipientPublicKey`)
@@ -106,7 +106,7 @@ Exclude the store's prefs from backup (see the backup section below) and set
 ### Capabilities
 
 ```ts
-const caps = await PQSecureStorage.getHardwareCapabilities();
+const caps = await PqSecureStorage.getHardwareCapabilities();
 // { supportsPqc, hardwareBacked, biometricGated, supportedVariants, supportedKem, kemInSecureEnclave }
 // gate seed-tier trust on hardwareBacked (false on web), not on supportsPqc (true on web too)
 ```
@@ -114,9 +114,9 @@ const caps = await PQSecureStorage.getHardwareCapabilities();
 ### ML-DSA signing
 
 ```ts
-await PQSecureStorage.generateKeyPair({ keyAlias: 'aid-signing', type: 'PQC_MLDSA_65' });
-const { publicKey } = await PQSecureStorage.getPublicKey({ keyAlias: 'aid-signing' });
-const { signature } = await PQSecureStorage.sign({
+await PqSecureStorage.generateKeyPair({ keyAlias: 'aid-signing', type: 'PQC_MLDSA_65' });
+const { publicKey } = await PqSecureStorage.getPublicKey({ keyAlias: 'aid-signing' });
+const { signature } = await PqSecureStorage.sign({
   keyAlias: 'aid-signing',
   type: 'PQC_MLDSA_65',
   data: base64Payload,
@@ -132,25 +132,25 @@ Android, and that is what `encryptTo`/`recipientPublicKey` expects back.
 Encrypts and returns the blob; the caller stores it. Not biometric-gated.
 
 ```ts
-const { ciphertext } = await PQSecureStorage.encryptAtRest({ keyAlias: 'db', data: base64 });
-const { plaintext } = await PQSecureStorage.decryptAtRest({ keyAlias: 'db', data: ciphertext });
+const { ciphertext } = await PqSecureStorage.encryptAtRest({ keyAlias: 'db', data: base64 });
+const { plaintext } = await PqSecureStorage.decryptAtRest({ keyAlias: 'db', data: ciphertext });
 ```
 
 ### ML-KEM
 
 ```ts
-await PQSecureStorage.generateKemKeyPair({ keyAlias: 'inbox', type: 'PQC_MLKEM_1024' });
-const { publicKey } = await PQSecureStorage.getKemPublicKey({ keyAlias: 'inbox' });
+await PqSecureStorage.generateKemKeyPair({ keyAlias: 'inbox', type: 'PQC_MLKEM_1024' });
+const { publicKey } = await PqSecureStorage.getKemPublicKey({ keyAlias: 'inbox' });
 
 // sender side (software, no key/biometric):
-const { ciphertext } = await PQSecureStorage.encryptTo({
+const { ciphertext } = await PqSecureStorage.encryptTo({
   recipientPublicKey: publicKey,
   type: 'PQC_MLKEM_1024',
   data: base64,
 });
 
 // recipient side (decapsulates in the SEP on iOS, TEE-wrapped key on Android):
-const { plaintext } = await PQSecureStorage.decrypt({
+const { plaintext } = await PqSecureStorage.decrypt({
   keyAlias: 'inbox',
   type: 'PQC_MLKEM_1024',
   data: ciphertext,
@@ -164,17 +164,17 @@ time** with `requireBiometric` (default `false`):
 
 ```ts
 // silent tier (default): reads never prompt (a drop-in for a plain secure store)
-await PQSecureStorage.setItem({ key: 'db-key', value: dbKey });
-const { value } = await PQSecureStorage.getItem({ key: 'db-key' }); // no prompt; null if absent
+await PqSecureStorage.setItem({ key: 'db-key', value: dbKey });
+const { value } = await PqSecureStorage.getItem({ key: 'db-key' }); // no prompt; null if absent
 
 // biometric tier: reads (and deletes) prompt
-await PQSecureStorage.setItem({ key: 'seed-phrase', value: seedString, requireBiometric: true });
-const { value: seed } = await PQSecureStorage.getItem({ key: 'seed-phrase' }); // prompts
+await PqSecureStorage.setItem({ key: 'seed-phrase', value: seedString, requireBiometric: true });
+const { value: seed } = await PqSecureStorage.getItem({ key: 'seed-phrase' }); // prompts
 
-const { exists } = await PQSecureStorage.hasItem({ key: 'seed-phrase' });
-const { keys } = await PQSecureStorage.keys();
-await PQSecureStorage.removeItem({ key: 'seed-phrase' }); // prompts only if the item is biometric
-await PQSecureStorage.clear(); // prompts once if any biometric item exists
+const { exists } = await PqSecureStorage.hasItem({ key: 'seed-phrase' });
+const { keys } = await PqSecureStorage.keys();
+await PqSecureStorage.removeItem({ key: 'seed-phrase' }); // prompts only if the item is biometric
+await PqSecureStorage.clear(); // prompts once if any biometric item exists
 ```
 
 Notes:

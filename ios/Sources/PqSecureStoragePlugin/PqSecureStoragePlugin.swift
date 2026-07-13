@@ -5,7 +5,7 @@ import LocalAuthentication
 import Security
 import os.log
 
-private let vcpLog = OSLog(subsystem: "com.pq.securestorage", category: "PQSecureStoragePlugin")
+private let vcpLog = OSLog(subsystem: "com.capacitorpqsecurestorage", category: "PqSecureStoragePlugin")
 
 // Hardening notes (see task7-hardening-report.md for the pre-SecureEnclave history):
 //
@@ -111,7 +111,7 @@ enum PQKey {
         case "ECDSA_256R1":
             return .p256(try SecureEnclave.P256.Signing.PrivateKey(accessControl: accessControl))
         default:
-            throw PQSecureStorageError.unsupportedType
+            throw PqSecureStorageError.unsupportedType
         }
     }
 
@@ -128,7 +128,7 @@ enum PQKey {
         case "ECDSA_256R1":
             self = .p256(try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data, authenticationContext: context))
         default:
-            throw PQSecureStorageError.unsupportedType
+            throw PqSecureStorageError.unsupportedType
         }
     }
 
@@ -181,7 +181,7 @@ enum PQKemKey {
         case "PQC_MLKEM_1024":
             return .v1024(try SecureEnclave.MLKEM1024.PrivateKey(accessControl: accessControl))
         default:
-            throw PQSecureStorageError.unsupportedType
+            throw PqSecureStorageError.unsupportedType
         }
     }
 
@@ -192,7 +192,7 @@ enum PQKemKey {
         case "PQC_MLKEM_1024":
             self = .v1024(try SecureEnclave.MLKEM1024.PrivateKey(dataRepresentation: data, authenticationContext: context))
         default:
-            throw PQSecureStorageError.unsupportedType
+            throw PqSecureStorageError.unsupportedType
         }
     }
 
@@ -216,12 +216,12 @@ enum PQKemKey {
             let r = try pk.encapsulate()
             return (r.encapsulated, r.sharedSecret)
         default:
-            throw PQSecureStorageError.unsupportedType
+            throw PqSecureStorageError.unsupportedType
         }
     }
 }
 
-private enum PQSecureStorageError: Error {
+private enum PqSecureStorageError: Error {
     case keyNotFound
     case unsupportedType
     case accessControlFailed
@@ -231,10 +231,10 @@ private enum PQSecureStorageError: Error {
     case keychain(OSStatus)
 }
 
-@objc(PQSecureStoragePlugin)
-public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
-    public let identifier = "PQSecureStoragePlugin"
-    public let jsName = "PQSecureStorage"
+@objc(PqSecureStoragePlugin)
+public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "PqSecureStoragePlugin"
+    public let jsName = "PqSecureStorage"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "getHardwareCapabilities", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "generateKeyPair", returnType: CAPPluginReturnPromise),
@@ -254,7 +254,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "clear", returnType: CAPPluginReturnPromise)
     ]
 
-    private static let keychainService = "com.pq.securestorage.keys"
+    private static let keychainService = "com.capacitorpqsecurestorage.keys"
 
     @objc func getHardwareCapabilities(_ call: CAPPluginCall) {
         if #available(iOS 26.0, *) {
@@ -400,7 +400,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 }
                 let signature = try key.sign(raw)
                 call.resolve(["signature": signature.base64EncodedString()])
-            } catch PQSecureStorageError.keyNotFound {
+            } catch PqSecureStorageError.keyNotFound {
                 call.reject("Key not found", "E_KEY_NOT_FOUND")
             } catch {
                 os_log("sign failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
@@ -437,10 +437,10 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
             let priv = try Self.atRestKey(alias: alias, create: true)
-            guard let pub = SecKeyCopyPublicKey(priv) else { throw PQSecureStorageError.badCiphertext }
+            guard let pub = SecKeyCopyPublicKey(priv) else { throw PqSecureStorageError.badCiphertext }
             var err: Unmanaged<CFError>?
             guard let ct = SecKeyCreateEncryptedData(pub, Self.atRestAlgo, raw as CFData, &err) as Data? else {
-                throw PQSecureStorageError.badCiphertext
+                throw PqSecureStorageError.badCiphertext
             }
             call.resolve(["ciphertext": ct.base64EncodedString()])
         } catch {
@@ -464,10 +464,10 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             let priv = try Self.atRestKey(alias: alias, create: false)
             var err: Unmanaged<CFError>?
             guard let plain = SecKeyCreateDecryptedData(priv, Self.atRestAlgo, raw as CFData, &err) as Data? else {
-                throw PQSecureStorageError.badCiphertext
+                throw PqSecureStorageError.badCiphertext
             }
             call.resolve(["plaintext": plain.base64EncodedString()])
-        } catch PQSecureStorageError.keyNotFound {
+        } catch PqSecureStorageError.keyNotFound {
             call.reject("Key not found", "E_KEY_NOT_FOUND")
         } catch {
             os_log("decryptAtRest failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
@@ -606,7 +606,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 let box = try ChaChaPoly.SealedBox(combined: aead)
                 let plain = try ChaChaPoly.open(box, using: sharedSecret)
                 call.resolve(["plaintext": plain.base64EncodedString()])
-            } catch PQSecureStorageError.keyNotFound {
+            } catch PqSecureStorageError.keyNotFound {
                 call.reject("Key not found", "E_KEY_NOT_FOUND")
             } catch {
                 os_log("decrypt failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
@@ -633,7 +633,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     // re-checks .biometryCurrentSet against the LAContext at key-use time in loadKey() below.
     // Same effect as Android's CryptoObject binding: a hooked/forged callback here can't produce
     // a working key, because signature(for:) still goes through the SEP's own gate.
-    private static func authenticate(reason: String, completion: @escaping (Result<LAContext, PQSecureStorageError>) -> Void) {
+    private static func authenticate(reason: String, completion: @escaping (Result<LAContext, PqSecureStorageError>) -> Void) {
         let context = LAContext()
         // no reuse: every sign/decrypt must re-authenticate. Max reuse let a caller loop sign()
         // after one Touch ID approval and get many signatures without another prompt.
@@ -695,7 +695,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 os_log("access control creation failed: %{private}@", log: vcpLog, type: .error,
                        String(describing: accessError.takeRetainedValue()))
             }
-            throw PQSecureStorageError.accessControlFailed
+            throw PqSecureStorageError.accessControlFailed
         }
         return access
     }
@@ -747,7 +747,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         add[kSecValueData as String] = raw
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(add as CFDictionary, nil)
-        guard status == errSecSuccess else { throw PQSecureStorageError.keychain(status) }
+        guard status == errSecSuccess else { throw PqSecureStorageError.keychain(status) }
         return key
     }
     // SEP-signed integrity tag over the public entry (type, bio flag, key bytes). The signing key is
@@ -768,7 +768,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         guard let access = SecAccessControlCreateWithFlags(
             nil, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, .privateKeyUsage, nil
-        ) else { throw PQSecureStorageError.accessControlFailed }
+        ) else { throw PqSecureStorageError.accessControlFailed }
         let attrs: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
@@ -780,7 +780,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             ],
         ]
         guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, nil) else {
-            throw PQSecureStorageError.badCiphertext
+            throw PqSecureStorageError.badCiphertext
         }
         return key
     }
@@ -793,7 +793,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         var err: Unmanaged<CFError>?
         guard let sig = SecKeyCreateSignature(try pubSigKey(), pubSigAlgo,
             pubSignedInput(type: type, requireBiometric: requireBiometric, pub: pub) as CFData, &err) as Data? else {
-            throw PQSecureStorageError.badCiphertext
+            throw PqSecureStorageError.badCiphertext
         }
         return sig
     }
@@ -813,13 +813,13 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
     private static func encName(_ name: String) throws -> Data {
         let sealed = try AES.GCM.seal(Data(name.utf8), using: try symmetricKey(account: nameEncAccount))
-        guard let combined = sealed.combined else { throw PQSecureStorageError.badCiphertext }
+        guard let combined = sealed.combined else { throw PqSecureStorageError.badCiphertext }
         return combined
     }
     private static func decName(_ blob: Data) throws -> String {
         let box = try AES.GCM.SealedBox(combined: blob)
         let plain = try AES.GCM.open(box, using: try symmetricKey(account: nameEncAccount))
-        guard let s = String(data: plain, encoding: .utf8) else { throw PQSecureStorageError.badCiphertext }
+        guard let s = String(data: plain, encoding: .utf8) else { throw PqSecureStorageError.badCiphertext }
         return s
     }
 
@@ -867,14 +867,14 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
         )
-        guard pubStatus == errSecSuccess else { throw PQSecureStorageError.keychain(pubStatus) }
+        guard pubStatus == errSecSuccess else { throw PqSecureStorageError.keychain(pubStatus) }
 
         let privStatus = upsertKeychain(
             account: privateAccount(for: alias),
             data: key.dataRepresentation,
             attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
         )
-        guard privStatus == errSecSuccess else { throw PQSecureStorageError.keychain(privStatus) }
+        guard privStatus == errSecSuccess else { throw PqSecureStorageError.keychain(privStatus) }
     }
 
     private static func loadMetadata(alias: String) throws -> KeyMetadata {
@@ -890,7 +890,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let pubData = item[kSecValueData as String] as? Data,
               let typeData = item[kSecAttrGeneric as String] as? Data,
               let decoded = decodeGeneric(typeData) else {
-            throw PQSecureStorageError.keyNotFound
+            throw PqSecureStorageError.keyNotFound
         }
         return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag)
     }
@@ -906,7 +906,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess, let blob = result as? Data else {
-            throw PQSecureStorageError.keyNotFound
+            throw PqSecureStorageError.keyNotFound
         }
 
         // hands the evaluated `context` to the SEP so it can check the access-control policy
@@ -933,7 +933,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard status == errSecSuccess, let item = result as? [String: Any],
               let pubData = item[kSecValueData as String] as? Data,
               let typeData = item[kSecAttrGeneric as String] as? Data,
-              let decoded = decodeGeneric(typeData) else { throw PQSecureStorageError.keyNotFound }
+              let decoded = decodeGeneric(typeData) else { throw PqSecureStorageError.keyNotFound }
         return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag)
     }
 
@@ -943,11 +943,11 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: tag),
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
         ])
-        guard pubStatus == errSecSuccess else { throw PQSecureStorageError.keychain(pubStatus) }
+        guard pubStatus == errSecSuccess else { throw PqSecureStorageError.keychain(pubStatus) }
         var privAttrs: [String: Any] = [:]
         if requireBiometric {
             guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .biometryCurrentSet, nil) else {
-                throw PQSecureStorageError.accessControlFailed
+                throw PqSecureStorageError.accessControlFailed
             }
             privAttrs[kSecAttrAccessControl as String] = access
         } else {
@@ -959,7 +959,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         add[kSecValueData as String] = priv
         for (k, v) in privAttrs { add[k] = v }
         let privStatus = SecItemAdd(add as CFDictionary, nil)
-        guard privStatus == errSecSuccess else { throw PQSecureStorageError.keychain(privStatus) }
+        guard privStatus == errSecSuccess else { throw PqSecureStorageError.keychain(privStatus) }
     }
 
     private func wrappedGenerate(alias: String, type: String, overwrite: Bool, requireBiometric: Bool, call: CAPPluginCall) {
@@ -1048,7 +1048,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let ref = out {
             return ref as! SecKey
         }
-        guard create else { throw PQSecureStorageError.keyNotFound }
+        guard create else { throw PqSecureStorageError.keyNotFound }
         var aclError: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(
             nil,
@@ -1056,7 +1056,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             .privateKeyUsage,
             &aclError
         ) else {
-            throw PQSecureStorageError.accessControlFailed
+            throw PqSecureStorageError.accessControlFailed
         }
         let attrs: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
@@ -1070,7 +1070,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         ]
         var createError: Unmanaged<CFError>?
         guard let key = SecKeyCreateRandomKey(attrs as CFDictionary, &createError) else {
-            throw PQSecureStorageError.badCiphertext
+            throw PqSecureStorageError.badCiphertext
         }
         return key
     }
@@ -1099,14 +1099,14 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
         )
-        guard pubStatus == errSecSuccess else { throw PQSecureStorageError.keychain(pubStatus) }
+        guard pubStatus == errSecSuccess else { throw PqSecureStorageError.keychain(pubStatus) }
 
         let privStatus = upsertKeychain(
             account: kemPrivateAccount(for: alias),
             data: key.dataRepresentation,
             attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
         )
-        guard privStatus == errSecSuccess else { throw PQSecureStorageError.keychain(privStatus) }
+        guard privStatus == errSecSuccess else { throw PqSecureStorageError.keychain(privStatus) }
     }
 
     private static func loadKemMetadata(alias: String) throws -> KeyMetadata {
@@ -1121,7 +1121,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let pubData = item[kSecValueData as String] as? Data,
               let typeData = item[kSecAttrGeneric as String] as? Data,
               let decoded = decodeGeneric(typeData) else {
-            throw PQSecureStorageError.keyNotFound
+            throw PqSecureStorageError.keyNotFound
         }
         return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag)
     }
@@ -1135,7 +1135,7 @@ public class PQSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess, let blob = result as? Data else {
-            throw PQSecureStorageError.keyNotFound
+            throw PqSecureStorageError.keyNotFound
         }
         return try PQKemKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
     }

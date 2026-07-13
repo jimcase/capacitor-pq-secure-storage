@@ -63,7 +63,7 @@ jobs:
       - run: npm ci
       # podspec packaging sanity (compiles the pod on its own)
       - name: Lint the podspec
-        run: pod lib lint PqSecureStoragePlugin.podspec --allow-warnings
+        run: pod lib lint CapacitorPqSecureStorage.podspec --allow-warnings
       # generate the Xcode test project and run the XCTest suite on a simulator
       - name: Install XcodeGen
         run: brew install xcodegen

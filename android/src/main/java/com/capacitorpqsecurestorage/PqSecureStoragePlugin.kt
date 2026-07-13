@@ -1,4 +1,4 @@
-package com.pq.securestorage
+package com.capacitorpqsecurestorage
 
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
@@ -45,11 +45,11 @@ import org.bouncycastle.jcajce.spec.KEMGenerateSpec
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.jcajce.spec.MLKEMParameterSpec
 
-@CapacitorPlugin(name = "PQSecureStorage")
-class PQSecureStoragePlugin : Plugin() {
+@CapacitorPlugin(name = "PqSecureStorage")
+class PqSecureStoragePlugin : Plugin() {
 
     companion object {
-        private const val TAG = "PQSecureStoragePlugin"
+        private const val TAG = "PqSecureStoragePlugin"
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
         private const val MAX_STORE_KEY_LEN = 512
         private const val MAX_STORE_VALUE_LEN = 256 * 1024
@@ -60,7 +60,7 @@ class PQSecureStoragePlugin : Plugin() {
     // delivers BiometricPrompt callbacks off the UI thread, so the crypto in them doesn't block it
     private val cryptoExecutor = Executors.newSingleThreadExecutor()
 
-    // off in release unless explicitly enabled (adb setprop log.tag.PQSecureStoragePlugin DEBUG),
+    // off in release unless explicitly enabled (adb setprop log.tag.PqSecureStoragePlugin DEBUG),
     // so aliases and exception traces don't leak via logcat
     private fun logd(msg: String, e: Throwable? = null) {
         if (!Log.isLoggable(TAG, Log.DEBUG)) return
