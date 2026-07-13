@@ -16,13 +16,13 @@
     "wdio:android": "E2E_PLATFORM=android wdio run ./wdio.conf.ts"
   },
   "dependencies": {
-    "@capacitor/core": "^7.0.0",
+    "@capacitor/core": "^8.0.0",
     "capacitor-pq-secure-storage": "file:.."
   },
   "devDependencies": {
-    "@capacitor/android": "^7.0.0",
-    "@capacitor/cli": "^7.0.0",
-    "@capacitor/ios": "^7.0.0",
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/cli": "^8.0.0",
+    "@capacitor/ios": "^8.0.0",
     "@types/mocha": "^10.0.0",
     "@types/node": "^20.16.0",
     "@wdio/appium-service": "^9.0.0",

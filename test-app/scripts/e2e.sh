@@ -21,18 +21,24 @@ npm run build
 
 if [ "$PLATFORM" = "ios" ]; then
   step "add/refresh the iOS app"
-  # cap add runs pod install and fails at the default iOS 14 target; the project is still created
   [ -d ios ] || npx cap add ios || true
-  npx cap copy ios
-  # the plugin floor is iOS 15; Capacitor generates 14
-  sed -i '' "s/platform :ios, '14.0'/platform :ios, '15.0'/" ios/App/Podfile
-  ( cd ios/App && pod install )
 
   step "ensure the Appium xcuitest driver"
   npx appium driver list --installed 2>&1 | grep -q xcuitest || npx appium driver install xcuitest
 
   step "build the app for the simulator"
-  xcodebuild -workspace ios/App/App.xcworkspace -scheme App -sdk iphonesimulator \
+  if [ -f ios/App/Podfile ]; then
+    # Capacitor 7: CocoaPods. cap add generates the Podfile at iOS 14; the plugin floor is 15
+    npx cap copy ios
+    sed -i '' "s/platform :ios, '14.0'/platform :ios, '15.0'/" ios/App/Podfile
+    ( cd ios/App && pod install )
+    build_target=(-workspace ios/App/App.xcworkspace)
+  else
+    # Capacitor 8: Swift Package Manager (no Podfile); cap sync resolves the plugin package
+    npx cap sync ios
+    build_target=(-project ios/App/App.xcodeproj)
+  fi
+  xcodebuild "${build_target[@]}" -scheme App -sdk iphonesimulator \
     -configuration Debug -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO build
 
   step "pick a simulator"

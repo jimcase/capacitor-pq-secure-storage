@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Build
+
+- Capacitor 8 support on `master` (the `7.x` branch keeps the Capacitor 7 line; the plugin code is
+  shared, only build tooling differs). Bumped peer/dev to `@capacitor/* 8`, `capacitor-swift-pm` 8,
+  Android to compileSdk/targetSdk 36, AGP 8.13.2, Gradle 8.14.3, Kotlin 2.2.20, Java 21
+  (`compilerOptions`). No plugin API changes. Verified: JS tests, Android build + e2e, and the iOS
+  build via SPM (Capacitor 8's default) + e2e all pass. The e2e script now handles both the Cap 7
+  CocoaPods project and the Cap 8 SPM project.
+
 ### Added
 
 - `setJSON` / `getJSON` on `PqSecureStorage`: store and read typed JSON values (objects, arrays,
