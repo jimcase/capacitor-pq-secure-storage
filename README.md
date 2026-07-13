@@ -657,17 +657,27 @@ Every rejection carries a `code`:
 
 ## Testing
 
-The TypeScript layer has a software double (`test/pq-double.ts`) that mirrors the native wire
-format, so the round-trip and framing are unit-tested off-device.
+Unit tests run off-device: the TypeScript layer has a software double (`test/pq-double.ts`) that
+mirrors the native wire format, so the round-trip and framing are covered by vitest.
 
 ```bash
 npm run build   # tsc
 npm test        # vitest
 ```
 
-The native paths (Secure Enclave, Keystore, Keychain, biometrics) can only be exercised on a
-real device. Source carries `on-device-confirm` notes where an exact SDK label needs checking
-against the shipping iOS 26 / Android 17 APIs.
+End-to-end runs on a simulator/emulator through the `test-app` harness (Appium + WebdriverIO). Each
+command builds the plugin and the app, boots a simulator/emulator, and runs the specs:
+
+```bash
+cd test-app
+npm run e2e:ios       # or e2e:android
+```
+
+The "core" specs (bridge, capabilities, absent-item queries) pass there. Everything hardware-backed
+(Secure Enclave, StrongBox, biometrics) only runs on a real device, so those specs skip unless you
+set `E2E_HARDWARE=1` on a device. On an Android emulator `E2E_HARDWARE=1` also passes the Keystore
+storage, at-rest, and ML-KEM specs (only ML-DSA signing needs a device's KeyMint). See
+`DEVICE-VERIFICATION.md` for the on-device checklist.
 
 ## License
 
