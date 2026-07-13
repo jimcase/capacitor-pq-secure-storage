@@ -31,7 +31,9 @@ All notable changes to this project are documented here. The format is based on
   Enclave-backed, so those "hardware" specs (setItem/getItem, sign, at-rest, ML-KEM) fail on a
   simulator and skip unless `E2E_HARDWARE=1` on a physical device (on Android the Keystore storage
   also runs on an emulator, and real biometric prompts can't be automated on a device). Manual e2e
-  workflow in `.github/workflows/e2e.yml`.
+  workflow (`.github/workflows/e2e.yml`, `workflow_dispatch`): an iOS-simulator job (verified
+  locally) and an Android-emulator job (reactivecircus/android-emulator-runner), both running the
+  core specs.
 
 ### Added
 
