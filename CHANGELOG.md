@@ -12,6 +12,9 @@ All notable changes to this project are documented here. The format is based on
   numbers, booleans, null) over the secure store, with the same options and per-item tiering as
   `setItem` / `getItem`. A JS layer over the raw string API, which is unchanged. `getJSON<T>` returns
   the value typed.
+- `setKeyPrefix` / `getKeyPrefix`: namespace secure-store keys. The prefix is prepended on write and
+  read (transparently), and `keys()` / `clear()` are scoped to the current prefix, so a library can
+  share the store without its `clear()` wiping the host app's items. Default is `''` (no prefix).
 
 ## [0.2.0] - 2026-07-13
 

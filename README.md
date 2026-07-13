@@ -185,6 +185,13 @@ const { value } = await PqSecureStorage.getJSON<{ id: number; roles: string[] }>
 // value: { id: number; roles: string[] } | null
 ```
 
+Namespace keys with `setKeyPrefix` so `keys()` and `clear()` only touch your own items (useful when
+a library shares the store with its host app):
+
+```ts
+await PqSecureStorage.setKeyPrefix('myapp_'); // prepended to every key; keys() strips it back
+```
+
 Notes:
 
 - `getItem` on a missing key resolves `{ value: null }`, it does not throw.
