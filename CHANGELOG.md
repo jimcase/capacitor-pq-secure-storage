@@ -29,6 +29,12 @@ All notable changes to this project are documented here. The format is based on
   app can consume the plugin (`npx cap sync` picks CocoaPods or SPM per the app). Depends on
   `capacitor-swift-pm` 7.x; iOS 15 floor. The manifest resolves cleanly (`swift package resolve`).
 
+### Security
+
+- Bumped BouncyCastle (`bcprov-jdk18on`) 1.81 -> 1.84, fixing a signature-forgery issue and a Frodo
+  timing side-channel (both present in BC 1.71-1.83). The plugin only uses BC for ML-KEM, but the fix
+  is free. Android build verified with 1.84.
+
 ## [0.2.0] - 2026-07-13
 
 ### Build
