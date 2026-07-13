@@ -1,0 +1,51 @@
+# XcodeGen spec. This is the source of truth for the iOS test project.
+# Regenerate the .xcodeproj with:  cd ios && xcodegen generate
+# Then integrate Capacitor and run the tests:
+#   pod install
+#   xcodebuild test -workspace Plugin.xcworkspace -scheme Plugin \
+#     -destination 'platform=iOS Simulator,name=iPhone 16'
+name: Plugin
+options:
+  bundleIdPrefix: com.pq.securestorage
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+targets:
+  Plugin:
+    type: framework
+    platform: iOS
+    sources:
+      - Sources
+    settings:
+      base:
+        PRODUCT_NAME: PqSecureStoragePlugin
+        PRODUCT_BUNDLE_IDENTIFIER: com.pq.securestorage.plugin
+        INFOPLIST_FILE: Support/Plugin-Info.plist
+        DEFINES_MODULE: "YES"
+  PluginTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pq.securestorage.pluginTests
+        INFOPLIST_FILE: Support/Tests-Info.plist
+        GENERATE_INFOPLIST_FILE: "NO"
+    dependencies:
+      - target: Plugin
+schemes:
+  Plugin:
+    build:
+      targets:
+        Plugin: all
+        PluginTests: [test]
+    test:
+      gatherCoverageData: true
+      targets:
+        - PluginTests

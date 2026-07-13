@@ -12,8 +12,17 @@ All notable changes to this project are documented here. The format is based on
   from node_modules (the old `com.getcapacitor:capacitor-core` maven coordinate did not resolve),
   plus the standard plugin scaffold (settings.gradle, variables.gradle, gradle.properties, wrapper).
   `compileSdk`/`targetSdk` lowered from a non-existent 37 to 35.
+- iOS test project under `ios/` (XcodeGen `project.yml` + `Podfile`): a `Plugin` framework target
+  and a `PluginTests` XCTest target, so the tests run via `xcodebuild test` instead of only
+  `pod lib lint`. `project.yml`/`Podfile` are the source; the `.xcodeproj`/`.xcworkspace`/`Pods` are
+  generated (gitignored). Regenerate with `cd ios && xcodegen generate && pod install`.
+- Verified on Xcode 26.2: the plugin (including `SecureEnclave.MLDSA65/87` and `MLKEM`) compiles
+  clean against the iOS 26.2 SDK, and the CryptoKit XCTests pass on the iOS 26.2 simulator. The
+  SEP API surface the code comments flagged as unverified is confirmed by compiling; only the
+  runtime SEP behavior still needs a physical device.
 - GitHub Actions CI (`.github/workflows/test.yml`): web (lint/build/test) and Android (gradle build
-  + unit tests) run on every push/PR; iOS lints the podspec (needs the iOS 26 SDK / Xcode 26).
+  + unit tests) run on every push/PR; iOS lints the podspec and runs the XCTest suite on a
+  simulator (needs an Xcode 26 runner for the iOS 26 SDK).
 
 ### Added
 

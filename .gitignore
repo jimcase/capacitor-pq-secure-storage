@@ -3,3 +3,9 @@ dist/
 android/.gradle/
 android/build/
 android/local.properties
+# iOS test project: project.yml + Podfile are the source, the rest is generated
+ios/Plugin.xcodeproj/
+ios/Plugin.xcworkspace/
+ios/Pods/
+ios/Podfile.lock
+ios/build/

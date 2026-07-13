@@ -29,18 +29,16 @@ private let vcpLog = OSLog(subsystem: "com.pq.securestorage", category: "PQSecur
 //   evaluated context is then handed to the SecureEnclave key initializer so the SEP can reuse
 //   it instead of prompting a second time.
 //
-// on-device-confirm (no Xcode 26 here, so these are unverified against the real SDK -- modeled
-// 1:1 on the long-shipping `SecureEnclave.P256.Signing.PrivateKey`, which is the closest analog):
-//   * exact initializer labels for `SecureEnclave.MLDSA65.PrivateKey(accessControl:authenticationContext:)`
-//     and `init(dataRepresentation:authenticationContext:)` (P256 has both with
-//     `authenticationContext: LAContext? = nil`; if MLDSA differs -- extra params, no default,
-//     a `compactRepresentable:` flag, etc -- fix the two call sites in `PQKey` below).
-//   * that `.dataRepresentation` / `init(dataRepresentation:)` exist at all on the MLDSA
-//     SecureEnclave types. P256 has them; ML-DSA keys are much larger than P-256, so it's
-//     possible Apple uses a different persistence story for the lattice variants.
-//   * that `.publicKey.rawRepresentation` is the right accessor on the resulting public key type
-//     (matches the TS `'ios'` raw-bytes path; if CryptoKit exposes a different property name for
-//     the SecureEnclave-flavored public key, update `publicKeyBytes` below).
+// API surface confirmed: the plugin compiles clean against the iOS 26.2 SDK (Xcode 26.2), run via
+// the ios/ test project (xcodegen + PluginTests). So these labels/accessors match the real SDK
+// (modeled on the long-shipping `SecureEnclave.P256.Signing.PrivateKey`):
+//   * `SecureEnclave.MLDSA65.PrivateKey(accessControl:authenticationContext:)` and
+//     `init(dataRepresentation:authenticationContext:)` exist with the P256-style labels.
+//   * `.dataRepresentation` / `init(dataRepresentation:)` exist on the MLDSA SecureEnclave types.
+//   * `.publicKey.rawRepresentation` is the accessor on the resulting public key (matches the TS
+//     `'ios'` raw-bytes path).
+//
+// on-device-confirm (compiles, but the simulator has no Secure Enclave, so runtime is unverified):
 //   * whether `SecureEnclave.isAvailable` alone is a reliable predictor that the lattice PKA
 //     upgrade is present, or whether older-but-iOS-26-updated Secure Enclaves report available
 //     but still throw on `SecureEnclave.MLDSA65.PrivateKey(accessControl:)`. If the latter, that
