@@ -137,6 +137,14 @@ If the app crashes, exception handling is broken — file a bug.
 
 ## iOS: If iOS 26+ Device Is Available
 
+**Verified on iPhone 15 Pro / iOS 26 (2026-07-14).** Steps 1-5 below pass on hardware:
+`getHardwareCapabilities` reports `supportsPqc: true`, the SEP generates ML-DSA keys with no
+"Algorithm not supported", Face ID prompts on every `sign` (no cached window), and the signature
+verifies off-device.
+
+NOT covered by that run: the iOS blocks further down (at-rest, concurrency, item-name
+confidentiality, ECDSA P-256 / Ed25519). Those are still open.
+
 ### 1. Confirm capabilities
 Call `getHardwareCapabilities()`.
 
@@ -243,9 +251,12 @@ Document the choice in the security policy.
 - [ ] Android step 5: Biometric gate is CryptoObject-bound per operation; sign() shows its own prompt every call, denial rejects with `E_AUTH_FAILED`.
 - [ ] Android steps 6–7: Signature verifies off-device; KERIA accepts incept/interact/rotate.
 - [ ] Android step 8: Error handling is clean (no crash on invalid alias).
-- [ ] iOS step 3 (if device available): Key generation succeeds (no "Algorithm not supported").
-- [ ] iOS step 4 (if device available): Biometric prompt required on every sign; Face ID/Touch ID works.
-- [ ] iOS step 5 (if device available): Signature verifies off-device (same as Android).
+- [x] iOS step 3: Key generation succeeds (no "Algorithm not supported"). iPhone 15 Pro / iOS 26, 2026-07-14.
+- [x] iOS step 4: Biometric prompt required on every sign; Face ID/Touch ID works. Same device.
+- [x] iOS step 5: Signature verifies off-device (same as Android). Same device.
 - [ ] Cross-platform: Auth asymmetry documented and consciously accepted.
 
-Once all criteria are met, the plugin is ready for production deployment on Android 17+. iOS 26+ support is contingent on user device availability and Secure Enclave lattice-PKA support.
+iOS 26 is verified on hardware (iPhone 15 Pro), so the SEP path (ML-DSA keygen, per-sign biometric,
+off-device signature verification) is confirmed. Android 17 is still unverified on a device: until
+its attestation chain and CryptoObject gate are checked, the Android hardware claims rest on
+emulator runs only.
