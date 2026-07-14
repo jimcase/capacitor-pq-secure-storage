@@ -1,6 +1,20 @@
 export type SignatureType = 'PQC_MLDSA_65' | 'PQC_MLDSA_87' | 'ECDSA_256R1' | 'ED25519';
 export type KemType = 'PQC_MLKEM_768' | 'PQC_MLKEM_1024';
 
+/** Named signature-type values, so you can write MLDSA_65 instead of the raw string. */
+export const SignatureType = {
+    MLDSA_65: 'PQC_MLDSA_65',
+    MLDSA_87: 'PQC_MLDSA_87',
+    ECDSA_256R1: 'ECDSA_256R1',
+    ED25519: 'ED25519',
+} as const satisfies Record<string, SignatureType>;
+
+/** Named KEM-type values: MLKEM_768 / MLKEM_1024. */
+export const KemType = {
+    MLKEM_768: 'PQC_MLKEM_768',
+    MLKEM_1024: 'PQC_MLKEM_1024',
+} as const satisfies Record<string, KemType>;
+
 /**
  * When a stored item is reachable, honored per item on both platforms: iOS maps it to the Keychain
  * `kSecAttrAccessible*` classes; Android maps the unlock requirement to the item key's
@@ -14,6 +28,15 @@ export type Accessibility =
     | 'whenPasscodeSetThisDeviceOnly'
     | 'whenUnlockedThisDeviceOnly'
     | 'afterFirstUnlockThisDeviceOnly';
+
+/** Named accessibility values, e.g. WhenUnlockedThisDeviceOnly. */
+export const Accessibility = {
+    WhenUnlocked: 'whenUnlocked',
+    AfterFirstUnlock: 'afterFirstUnlock',
+    WhenPasscodeSetThisDeviceOnly: 'whenPasscodeSetThisDeviceOnly',
+    WhenUnlockedThisDeviceOnly: 'whenUnlockedThisDeviceOnly',
+    AfterFirstUnlockThisDeviceOnly: 'afterFirstUnlockThisDeviceOnly',
+} as const satisfies Record<string, Accessibility>;
 
 export interface HardwareCapabilities {
     /** Whether post-quantum operations are available (hardware OR software fallback). */
