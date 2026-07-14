@@ -1,7 +1,7 @@
 # capacitor-pq-secure-storage
 
 Capacitor plugin for hardware-backed post-quantum crypto and secure storage on iOS and Android.
-All symmetric crypto is AES-256 (quantum-safe); there is no RSA or ECC anywhere in the custody path.
+Your keys stay in the Secure Enclave and the Android Keystore, gated by a biometric.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/jimcase/capacitor-pq-secure-storage/master/hero.png" alt="capacitor-pq-secure-storage: hardware-backed post-quantum crypto" />
