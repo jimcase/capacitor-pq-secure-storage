@@ -64,13 +64,16 @@ uses.
 
 ## Install
 
+Install the line that matches your Capacitor major, then sync:
+
+| Capacitor | Plugin version | npm |
+|---|---|---|
+| 8 | `8.x` | `npm i capacitor-pq-secure-storage@8` |
+| 7 | `7.x` | `npm i capacitor-pq-secure-storage@7` |
+
 ```bash
-npm install capacitor-pq-secure-storage
 npx cap sync
 ```
-
-Built for Capacitor 8 (iOS via Swift Package Manager or CocoaPods). Capacitor 7 apps: install the
-plugin's `7.x` release line.
 
 ```ts
 import { PqSecureStorage } from 'capacitor-pq-secure-storage';
