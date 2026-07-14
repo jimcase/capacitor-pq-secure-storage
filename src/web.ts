@@ -159,7 +159,12 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         };
     }
 
-    async generateKeyPair(options: { keyAlias: string; type: SignatureType; overwrite?: boolean; requireBiometric?: boolean }): Promise<{ publicKey: string }> {
+    async generateKeyPair(options: {
+        keyAlias: string;
+        type: SignatureType;
+        overwrite?: boolean;
+        requireBiometric?: boolean;
+    }): Promise<{ publicKey: string }> {
         const alias = this.safeAlias(options.keyAlias);
         if (!options.overwrite && this.store.getItem(`pqss.sign.${alias}`) !== null) {
             throw this.unavailable('Alias already exists');
@@ -197,7 +202,12 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         return { plaintext: toB64(this.aesOpen(key, input)) };
     }
 
-    async generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boolean; requireBiometric?: boolean }): Promise<{ publicKey: string }> {
+    async generateKemKeyPair(options: {
+        keyAlias: string;
+        type: KemType;
+        overwrite?: boolean;
+        requireBiometric?: boolean;
+    }): Promise<{ publicKey: string }> {
         const alias = this.safeAlias(options.keyAlias);
         if (!options.overwrite && this.store.getItem(`pqss.kem.${alias}`) !== null) {
             throw this.unavailable('Alias already exists');
@@ -213,7 +223,11 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         return { publicKey: toB64(kp.pk) };
     }
 
-    async encryptTo(options: { recipientPublicKey: string; type: KemType; data: string }): Promise<{ ciphertext: string }> {
+    async encryptTo(options: {
+        recipientPublicKey: string;
+        type: KemType;
+        data: string;
+    }): Promise<{ ciphertext: string }> {
         const input = this.decodeCapped(options.data);
         const { cipherText, sharedSecret } = kemOf(options.type).encapsulate(fromB64(options.recipientPublicKey));
         const nonce = randomBytes(12);
@@ -237,7 +251,12 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
 
     // requireBiometric/accessibility are accepted for API parity but ignored: the web fallback has
     // no biometric or Keychain, so reads are always silent
-    async setItem(options: { key: string; value: string; requireBiometric?: boolean; accessibility?: string }): Promise<void> {
+    async setItem(options: {
+        key: string;
+        value: string;
+        requireBiometric?: boolean;
+        accessibility?: string;
+    }): Promise<void> {
         // same bounds as native so the fallback can't be flooded either
         if (options.key.length === 0 || options.key.length > 512 || options.value.length > 256 * 1024) {
             throw this.unavailable('Key or value out of bounds');
