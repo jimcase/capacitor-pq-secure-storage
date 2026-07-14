@@ -1,5 +1,9 @@
 # capacitor-pq-secure-storage
 
+<p align="center">
+  <img src="hero.png" alt="capacitor-pq-secure-storage: hardware-backed post-quantum crypto" />
+</p>
+
 <a href="https://app.aikido.dev/audit-report/external/s5Dq4JfRbnjJf4DiJVBzlwVZ/request" target="_blank" rel="noopener">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://app.aikido.dev/assets/badges/full-dark-theme.svg" />
