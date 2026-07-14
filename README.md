@@ -28,6 +28,7 @@ Your keys stay in the Secure Enclave and the Android Keystore, gated by a biomet
 
 - [Requirements](#requirements)
 - [Platform support](#platform-support)
+- [Verification status](#verification-status)
 - [Install](#install)
 - [Usage](#usage)
 - [API reference](#api-reference)
@@ -64,6 +65,17 @@ app-facing API). On Android the ML-KEM private key is wrapped by an auth-require
 and only unwrapped inside a `BiometricPrompt.CryptoObject`, so a hooked biometric callback cannot
 release it (defense against GHSA-vx5f-vmr6-32wf). `kemInSecureEnclave` reports which path a device
 uses.
+
+## Verification status
+
+| Platform | Verified on |
+|---|---|
+| iOS | iPhone 15 Pro / iOS 26, on hardware. ML-DSA keygen in the Secure Enclave, Face ID on every sign, signatures verified off-device. |
+| Android | Emulator only (API 36). The Keystore paths run, but StrongBox / TEE attestation is NOT yet confirmed on a physical device. |
+
+So on Android, read `hardwareBacked` from `getHardwareCapabilities()` at runtime and gate seed-tier
+trust on it. Do not assume hardware ML-DSA until you have checked it on your target device.
+`DEVICE-VERIFICATION.md` lists what is still open.
 
 ## Install
 

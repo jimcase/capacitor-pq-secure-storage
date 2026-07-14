@@ -6,8 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-07-14
+
+First release of the Capacitor 7 line. Same code as 8.0.0, only the build tooling differs.
+
 ### Added
 
+- Named constants for `SignatureType`, `KemType` and `Accessibility`, so callers can write
+  `SignatureType.MLDSA_65` instead of the raw `'PQC_MLDSA_65'` string. Plain string literals keep
+  working.
 - `setJSON` / `getJSON` on `PqSecureStorage`: store and read typed JSON values (objects, arrays,
   numbers, booleans, null) over the secure store, with the same options and per-item tiering as
   `setItem` / `getItem`. A JS layer over the raw string API, which is unchanged. `getJSON<T>` returns
@@ -25,6 +32,18 @@ All notable changes to this project are documented here. The format is based on
 - Bumped BouncyCastle (`bcprov-jdk18on`) 1.81 -> 1.84, fixing a signature-forgery issue and a Frodo
   timing side-channel (both present in BC 1.71-1.83). The plugin only uses BC for ML-KEM, but the fix
   is free. Android build verified with 1.84.
+
+### Changed
+
+- `@capacitor/core` peer narrowed to the matching major (`^7.0.0`). The old `>=6.0.0` also matched
+  Capacitor 8, so npm gave no warning when the two lines were crossed.
+
+### Notes
+
+- iOS is verified on hardware (iPhone 15 Pro / iOS 26): ML-DSA keygen in the Secure Enclave, Face ID
+  on every sign, signatures verified off-device. Android is verified on an emulator only, so
+  StrongBox / TEE attestation is NOT yet confirmed on a physical device. Gate seed-tier trust on the
+  `hardwareBacked` flag at runtime. See `DEVICE-VERIFICATION.md`.
 
 ## [0.2.0] - 2026-07-13
 
