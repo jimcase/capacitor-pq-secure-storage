@@ -1,6 +1,6 @@
 {
   "name": "capacitor-pq-secure-storage",
-  "version": "0.2.0",
+  "version": "8.0.0",
   "description": "Hardware-backed post-quantum crypto (ML-DSA, ML-KEM, AES-256) and biometric secure storage for Capacitor on iOS and Android, with a software fallback for the web.",
   "license": "MIT",
   "author": "J Caso",
