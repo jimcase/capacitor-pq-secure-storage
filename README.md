@@ -125,15 +125,21 @@ const caps = await PqSecureStorage.getHardwareCapabilities();
 ### ML-DSA signing
 
 ```ts
-await PqSecureStorage.generateKeyPair({ keyAlias: 'aid-signing', type: 'PQC_MLDSA_65' });
+import { PqSecureStorage, SignatureType } from 'capacitor-pq-secure-storage';
+
+await PqSecureStorage.generateKeyPair({ keyAlias: 'aid-signing', type: SignatureType.MLDSA_65 });
 const { publicKey } = await PqSecureStorage.getPublicKey({ keyAlias: 'aid-signing' });
 const { signature } = await PqSecureStorage.sign({
   keyAlias: 'aid-signing',
-  type: 'PQC_MLDSA_65',
+  type: SignatureType.MLDSA_65,
   data: base64Payload,
   description: 'Approve transfer of 10 tokens', // optional, shown in the prompt
 }); // prompts biometrics
 ```
+
+`SignatureType` / `KemType` / `Accessibility` are exported both as types and as named
+constants, so you can pass `SignatureType.MLDSA_65` instead of the raw `'PQC_MLDSA_65'`
+string (plain string literals still work).
 
 Public keys are returned as raw fixed-length bytes (FIPS 203/204), same encoding on iOS and
 Android, and that is what `encryptTo`/`recipientPublicKey` expects back.
@@ -150,20 +156,22 @@ const { plaintext } = await PqSecureStorage.decryptAtRest({ keyAlias: 'db', data
 ### ML-KEM
 
 ```ts
-await PqSecureStorage.generateKemKeyPair({ keyAlias: 'inbox', type: 'PQC_MLKEM_1024' });
+import { PqSecureStorage, KemType } from 'capacitor-pq-secure-storage';
+
+await PqSecureStorage.generateKemKeyPair({ keyAlias: 'inbox', type: KemType.MLKEM_1024 });
 const { publicKey } = await PqSecureStorage.getKemPublicKey({ keyAlias: 'inbox' });
 
 // sender side (software, no key/biometric):
 const { ciphertext } = await PqSecureStorage.encryptTo({
   recipientPublicKey: publicKey,
-  type: 'PQC_MLKEM_1024',
+  type: KemType.MLKEM_1024,
   data: base64,
 });
 
 // recipient side (decapsulates in the SEP on iOS, TEE-wrapped key on Android):
 const { plaintext } = await PqSecureStorage.decrypt({
   keyAlias: 'inbox',
-  type: 'PQC_MLKEM_1024',
+  type: KemType.MLKEM_1024,
   data: ciphertext,
 }); // prompts biometrics
 ```
@@ -577,6 +585,8 @@ the store is already empty. Web fallback has no biometric, so silent.
 
 #### SignatureType
 
+Named signature-type values, so you can write MLDSA_65 instead of the raw string.
+
 ```ts
 type SignatureType =
   | 'PQC_MLDSA_65'
@@ -587,6 +597,8 @@ type SignatureType =
 
 
 #### KemType
+
+Named KEM-type values: MLKEM_768 / MLKEM_1024.
 
 ```ts
 type KemType =
@@ -602,6 +614,7 @@ When a stored item is reachable, honored per item on both platforms: iOS maps it
 `setUnlockedDeviceRequired` (`afterFirstUnlock*` keeps it usable while locked, the rest require an
 unlocked device). Android Keystore keys are always device-bound, so every value is effectively
 this-device-only there.
+Named accessibility values, e.g. WhenUnlockedThisDeviceOnly.
 
 ```ts
 type Accessibility =
