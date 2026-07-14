@@ -1,20 +1,20 @@
 # capacitor-pq-secure-storage
 
+Capacitor plugin for hardware-backed post-quantum crypto and secure storage on iOS and Android.
+All symmetric crypto is AES-256 (quantum-safe); there is no RSA or ECC anywhere in the custody path.
+
 <p align="center">
   <img src="hero.png" alt="capacitor-pq-secure-storage: hardware-backed post-quantum crypto" />
 </p>
 
-Capacitor plugin for hardware-backed post-quantum crypto and secure storage on iOS and Android.
-All symmetric crypto is AES-256 (quantum-safe); there is no RSA or ECC anywhere in the custody path.
-
-<p align="right">
+<div align="right">
   <a href="https://app.aikido.dev/audit-report/external/s5Dq4JfRbnjJf4DiJVBzlwVZ/request" target="_blank" rel="noopener">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://app.aikido.dev/assets/badges/full-dark-theme.svg" />
       <img src="https://app.aikido.dev/assets/badges/full-light-theme.svg" alt="Aikido Security Audit Report" height="40" />
     </picture>
   </a>
-</p>
+</div>
 
 
 ## Features
