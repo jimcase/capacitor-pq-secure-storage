@@ -110,9 +110,7 @@ describe('web software fallback', () => {
         const pq = web();
         await pq.generateKeyPair({ keyAlias: 'big', type: 'PQC_MLDSA_65' });
         const huge = Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64');
-        await expect(pq.sign({ keyAlias: 'big', data: huge, type: 'PQC_MLDSA_65' })).rejects.toThrow(
-            /too large/i,
-        );
+        await expect(pq.sign({ keyAlias: 'big', data: huge, type: 'PQC_MLDSA_65' })).rejects.toThrow(/too large/i);
     });
 
     it('rejects reserved or invalid aliases', async () => {

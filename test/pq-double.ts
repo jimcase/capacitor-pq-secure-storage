@@ -105,7 +105,12 @@ export class SecureStorageDouble {
         return (this.silent ??= ml_kem1024.keygen());
     }
 
-    async setItem(o: { key: string; value: string; requireBiometric?: boolean; accessibility?: string }): Promise<void> {
+    async setItem(o: {
+        key: string;
+        value: string;
+        requireBiometric?: boolean;
+        accessibility?: string;
+    }): Promise<void> {
         const mode: 's' | 'b' = o.requireBiometric ? 'b' : 's';
         const t = this.tier(mode);
         const { cipherText, sharedSecret } = ml_kem1024.encapsulate(t.publicKey);
