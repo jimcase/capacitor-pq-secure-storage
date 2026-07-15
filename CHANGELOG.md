@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Security
+
+- Bumped BouncyCastle (`bcprov-jdk18on`) 1.84 -> 1.85 to stay on the latest release. 1.84 already
+  carried the signature-forgery and Frodo timing fixes; this keeps the dependency current.
+
 ## [8.0.0] - 2026-07-14
 
 First release of the Capacitor 8 line. Same plugin code as 7.0.0, only the build tooling differs.
