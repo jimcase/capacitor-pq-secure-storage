@@ -60,7 +60,7 @@ dependencies {
     // ML-KEM in software (AndroidKeyStore does not expose ML-KEM to apps, only ML-DSA). The
     // private key is wrapped by a Keystore AES key (TEE). ML-KEM naming (org.bouncycastle.jcajce
     // .spec.MLKEMParameterSpec, algorithm "ML-KEM") landed in BC 1.80; 1.78 only had Kyber.
-    implementation 'org.bouncycastle:bcprov-jdk18on:1.84'
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.85'
 
     testImplementation "junit:junit:$rootProject.ext.junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$rootProject.ext.androidxJunitVersion"
