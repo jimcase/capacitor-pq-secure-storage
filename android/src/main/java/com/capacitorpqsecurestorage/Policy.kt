@@ -1,0 +1,12 @@
+package com.capacitorpqsecurestorage
+
+// Decisions the plugin takes about keys, kept free of Android classes so plain JVM tests cover them.
+internal object Policy {
+    // The key to reuse for a setItem, or null to create a fresh one. Only a key with a real item
+    // behind it is reused: an orphan left by a failed write can have any tier, so it is recreated
+    // with the tier the caller asks for. [invalidated] is not called for an orphan.
+    fun <K : Any> reusableItemKey(existing: K?, itemPresent: Boolean, invalidated: (K) -> Boolean): K? {
+        if (existing == null || !itemPresent) return null
+        return if (invalidated(existing)) null else existing
+    }
+}
