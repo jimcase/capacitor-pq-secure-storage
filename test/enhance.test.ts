@@ -72,3 +72,42 @@ describe('key prefix', () => {
         expect((await s.getJSON({ key: 'o' })).value).toBeNull();
     });
 });
+
+describe('withPrefix', () => {
+    it('gives each caller its own namespace over the same plugin', async () => {
+        const s = make();
+        const a = s.withPrefix('a_');
+        const b = s.withPrefix('b_');
+        await a.setItem({ key: 'k', value: '1' });
+        await b.setItem({ key: 'k', value: '2' });
+        expect((await a.getItem({ key: 'k' })).value).toBe('1');
+        expect((await b.getItem({ key: 'k' })).value).toBe('2');
+        expect((await a.keys()).keys).toEqual(['k']);
+    });
+
+    it('clear() on one namespace leaves the others alone', async () => {
+        const s = make();
+        const a = s.withPrefix('a_');
+        const b = s.withPrefix('b_');
+        await a.setItem({ key: 'k', value: '1' });
+        await b.setItem({ key: 'k', value: '2' });
+        await a.clear();
+        expect((await a.keys()).keys).toEqual([]);
+        expect((await b.getItem({ key: 'k' })).value).toBe('2');
+    });
+
+    it('does not change the prefix of the shared instance', async () => {
+        const s = make();
+        s.withPrefix('lib_');
+        expect(await s.getKeyPrefix()).toBe('');
+        await s.setItem({ key: 'host', value: 'h' });
+        expect((await s.withPrefix('lib_').keys()).keys).toEqual([]);
+    });
+
+    it('keeps the json helpers and the crypto methods', async () => {
+        const a = make().withPrefix('j_');
+        await a.setJSON({ key: 'o', value: { n: 1 } });
+        expect((await a.getJSON<{ n: number }>({ key: 'o' })).value).toEqual({ n: 1 });
+        expect((await a.getHardwareCapabilities()).supportsPqc).toBe(true);
+    });
+});

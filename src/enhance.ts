@@ -5,20 +5,38 @@ export interface PrefixMethods {
     /**
      * Namespace every secure-store key with `prefix`: it is prepended on write and read, and
      * `keys()` / `clear()` only see items under it. Default is `''` (no prefix). The prefix is a JS
-     * concern, applied before the key reaches the native store. A library should set one so its
-     * `clear()` does not wipe the host app's other items.
+     * concern, applied before the key reaches the native store.
+     *
+     * @deprecated The prefix is state of the one shared instance, so whoever sets it changes it for
+     * every caller that imports this module, the host app included. Use `withPrefix` instead.
      */
     setKeyPrefix(prefix: string): Promise<void>;
 
-    /** The current key prefix (default `''`). */
+    /**
+     * The current key prefix of the shared instance (default `''`).
+     *
+     * @deprecated See `setKeyPrefix`. Use `withPrefix`.
+     */
     getKeyPrefix(): Promise<string>;
+
+    /**
+     * A view of the secure store scoped to `prefix`. Each view keeps its own prefix, independent of
+     * the shared instance and of other views, so a library can call
+     * `PqSecureStorage.withPrefix('mylib_')` and use that without touching the host app's items:
+     * its `keys()` and `clear()` only see items under the prefix. The crypto methods and the JSON
+     * helpers are available on the view.
+     */
+    withPrefix(prefix: string): PqSecureStoragePlugin & JsonMethods;
 }
 
 const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
 
-/** Wrap the native plugin with the JS-only key prefix and JSON helpers. Crypto methods pass through. */
-export function enhance(native: PqSecureStoragePlugin): PqSecureStoragePlugin & PrefixMethods & JsonMethods {
-    const state = { prefix: '' };
+// one prefixed view over `native`. `extra` carries what only the shared instance has.
+function scoped(
+    native: PqSecureStoragePlugin,
+    state: { prefix: string },
+    extra: object,
+): PqSecureStoragePlugin & JsonMethods {
     const px = (key: string) => state.prefix + key;
 
     // prefixed store the JSON layer sits on top of
@@ -29,13 +47,6 @@ export function enhance(native: PqSecureStoragePlugin): PqSecureStoragePlugin & 
     };
 
     const overrides = {
-        async setKeyPrefix(prefix: string): Promise<void> {
-            state.prefix = prefix;
-        },
-        async getKeyPrefix(): Promise<string> {
-            return state.prefix;
-        },
-
         setItem: store.setItem,
         getItem: store.getItem,
         removeItem: (o: { key: string }) => native.removeItem({ key: px(o.key) }),
@@ -57,6 +68,7 @@ export function enhance(native: PqSecureStoragePlugin): PqSecureStoragePlugin & 
         },
 
         ...jsonMethods(store),
+        ...extra,
     };
 
     return new Proxy(native, {
@@ -66,5 +78,20 @@ export function enhance(native: PqSecureStoragePlugin): PqSecureStoragePlugin & 
             }
             return Reflect.get(target, prop, receiver);
         },
-    }) as PqSecureStoragePlugin & PrefixMethods & JsonMethods;
+    }) as PqSecureStoragePlugin & JsonMethods;
+}
+
+/** Wrap the native plugin with the JS-only key prefix and JSON helpers. Crypto methods pass through. */
+export function enhance(native: PqSecureStoragePlugin): PqSecureStoragePlugin & PrefixMethods & JsonMethods {
+    const state = { prefix: '' };
+    const extra = {
+        async setKeyPrefix(prefix: string): Promise<void> {
+            state.prefix = prefix;
+        },
+        async getKeyPrefix(): Promise<string> {
+            return state.prefix;
+        },
+        withPrefix: (prefix: string) => scoped(native, { prefix }, {}),
+    };
+    return scoped(native, state, extra) as PqSecureStoragePlugin & PrefixMethods & JsonMethods;
 }
