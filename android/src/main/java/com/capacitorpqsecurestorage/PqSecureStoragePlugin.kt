@@ -47,6 +47,7 @@ class PqSecureStoragePlugin : Plugin() {
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
         private const val MAX_STORE_KEY_LEN = 512
         private const val MAX_STORE_VALUE_LEN = 256 * 1024
+        private const val MAX_RECIPIENT_KEY_B64 = 2200
     }
 
 
@@ -769,6 +770,8 @@ class PqSecureStoragePlugin : Plugin() {
     @PluginMethod
     fun encryptTo(call: PluginCall) {
         val pubStr = call.getString("recipientPublicKey") ?: return call.reject("Missing recipientPublicKey", "E_MISSING_PARAMS")
+        // the largest ML-KEM public key is 1568 bytes (2092 base64 chars); do not decode anything bigger
+        if (pubStr.length > MAX_RECIPIENT_KEY_B64) return call.reject("Invalid public key", "E_INVALID_ARGS")
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         val oid = mlkemOidOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
