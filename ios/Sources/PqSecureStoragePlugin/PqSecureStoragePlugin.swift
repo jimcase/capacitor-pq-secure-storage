@@ -290,10 +290,10 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard type == "PQC_MLDSA_65" || type == "PQC_MLDSA_87" || type == "ECDSA_256R1" || type == "ED25519" else {
             return call.reject("Unsupported key type", "E_UNSUPPORTED")
         }
+        guard let overwrite = Self.boolArg(call, "overwrite", default: false),
+              let requireBiometric = Self.boolArg(call, "requireBiometric", default: true) else { return }
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
 
-        let overwrite = call.getBool("overwrite") ?? false
-        let requireBiometric = call.getBool("requireBiometric") ?? true
         if type == "ED25519" {
             return wrappedGenerate(alias: alias, type: type, overwrite: overwrite, requireBiometric: requireBiometric, call: call)
         }
@@ -486,10 +486,10 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard type == "PQC_MLKEM_768" || type == "PQC_MLKEM_1024" else {
             return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         }
+        guard let overwrite = Self.boolArg(call, "overwrite", default: false),
+              let requireBiometric = Self.boolArg(call, "requireBiometric", default: true) else { return }
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
 
-        let overwrite = call.getBool("overwrite") ?? false
-        let requireBiometric = call.getBool("requireBiometric") ?? true
         let exists = Self.kemAliasExists(alias)
         if !overwrite && exists {
             return call.reject("Alias already exists", "E_ALIAS_EXISTS")
@@ -653,6 +653,15 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 completion(.failure(.authFailed))
             }
         }
+    }
+
+    // an option that is present but not a boolean is rejected, not silently replaced by its default
+    private static func boolArg(_ call: CAPPluginCall, _ name: String, default def: Bool) -> Bool? {
+        guard let v = InputPolicy.booleanOption(call.getValue(name), default: def) else {
+            call.reject("\(name) must be a boolean", "E_INVALID_ARGS")
+            return nil
+        }
+        return v
     }
 
     // same charset/length/reserved-prefix rule as Android's safeAlias. Dots are disallowed so a
@@ -1162,6 +1171,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let data = value.data(using: .utf8) else {
             call.reject("Invalid value", "E_MISSING_PARAMS"); return
         }
+        guard let requireBiometric = Self.boolArg(call, "requireBiometric", default: false) else { return }
         // the account is a keyed HMAC of the name (a Keychain dump reveals no names); encName carries
         // the encrypted real name so keys() can still enumerate them
         let account: String
@@ -1174,7 +1184,6 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         // per-item: requireBiometric -> biometry ACL (reads prompt); else plain accessibility
         // (silent reads). Both use the caller's accessibility class (default WhenUnlockedThisDeviceOnly).
-        let requireBiometric = call.getBool("requireBiometric") ?? false
         let protection = Self.accessibilityClass(call.getString("accessibility"))
         var accessAttr: [String: Any] = [:]
         if requireBiometric {
