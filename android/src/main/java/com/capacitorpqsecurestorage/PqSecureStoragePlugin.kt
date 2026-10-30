@@ -47,7 +47,6 @@ class PqSecureStoragePlugin : Plugin() {
         private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
         private const val MAX_STORE_KEY_LEN = 512
         private const val MAX_STORE_VALUE_LEN = 256 * 1024
-        private const val MAX_CRYPTO_INPUT = 10 * 1024 * 1024 // decoded-byte cap on crypto ops
     }
 
 
@@ -248,13 +247,25 @@ class PqSecureStoragePlugin : Plugin() {
 
     private fun keystore(): KeyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
 
-    // reject an oversized input before decoding it (the base64 string bounds the decoded size), then
-    // confirm the decoded size. Returns null and rejects the call on either check.
-    private fun decodeCapped(call: PluginCall, data: String): ByteArray? {
-        if (data.length > MAX_CRYPTO_INPUT * 2) { call.reject("Input too large", "E_INPUT_TOO_LARGE"); return null }
-        val bytes = Base64.decode(data, Base64.DEFAULT)
-        if (bytes.size > MAX_CRYPTO_INPUT) { call.reject("Input too large", "E_INPUT_TOO_LARGE"); return null }
-        return bytes
+    // decode the caller's base64 within the size cap. Rejects the call and returns null when it is
+    // too large or not valid base64 (a throw here would reach the bridge and kill the app).
+    private fun decodeCapped(call: PluginCall, data: String): ByteArray? = try {
+        decodeBase64Capped(data)
+    } catch (e: InputTooLargeException) {
+        call.reject("Input too large", "E_INPUT_TOO_LARGE"); null
+    } catch (e: IllegalArgumentException) {
+        call.reject("Invalid base64 input", "E_INVALID_ARGS"); null
+    }
+
+    // The Capacitor bridge rethrows anything that escapes a plugin method as a RuntimeException, which
+    // takes the whole app down. Methods that touch the Keystore outside their own try use this.
+    private inline fun guarded(call: PluginCall, code: String, body: () -> Unit) {
+        try {
+            body()
+        } catch (e: Exception) {
+            logd("plugin method failed", e)
+            call.reject("Operation failed", code)
+        }
     }
 
     @PluginMethod
@@ -285,7 +296,7 @@ class PqSecureStoragePlugin : Plugin() {
     }
 
     @PluginMethod
-    fun generateKeyPair(call: PluginCall) {
+    fun generateKeyPair(call: PluginCall): Unit = guarded(call, "E_KEYGEN") {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         if (!safeAlias(call, alias)) return
         val type = call.getString("type")
@@ -714,7 +725,7 @@ class PqSecureStoragePlugin : Plugin() {
     }
 
     @PluginMethod
-    fun getKemPublicKey(call: PluginCall) {
+    fun getKemPublicKey(call: PluginCall): Unit = guarded(call, "E_PUBKEY") {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         if (!safeAlias(call, alias)) return
         val pub = kemPrefs().getString(kemPubKeyKey(alias), null)
@@ -1188,13 +1199,24 @@ class PqSecureStoragePlugin : Plugin() {
         if (!storeWriting.add(key)) return call.reject("Store write in progress, retry", "E_BUSY")
         val done = { storeWriting.remove(key); Unit }
         val newBio = call.getBoolean("requireBiometric") ?: false
-        val alias = itemKeyAlias(key)
-        val existing = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
+        // these hit the Keystore; a throw here would skip done() and leave the key latched as busy
+        val alias: String
+        val existing: SecretKey?
+        val hasItem: Boolean
+        try {
+            alias = itemKeyAlias(key)
+            existing = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
+            hasItem = storeItems().contains(nameTag(key))
+        } catch (e: Exception) {
+            logd("setItem: key lookup failed for key=$key", e)
+            done()
+            return call.reject("Store failed", "E_ENCRYPT")
+        }
         // an item's tier is fixed at creation; a change must go through removeItem. Enforce it even
         // when the key was invalidated by an enrollment change (isAuthRequired reads metadata, still
         // valid on an invalidated key), so a bio item can't be silently recreated as silent. Only
         // when a real item exists -- an orphan key from a cancelled write shouldn't block a fresh one.
-        if (existing != null && storeItems().contains(nameTag(key)) && isAuthRequired(existing) != newBio) {
+        if (existing != null && hasItem && isAuthRequired(existing) != newBio) {
             done()
             return call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
         }
@@ -1266,7 +1288,7 @@ class PqSecureStoragePlugin : Plugin() {
     }
 
     @PluginMethod
-    fun getItem(call: PluginCall) {
+    fun getItem(call: PluginCall): Unit = guarded(call, "E_DECRYPT") {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
         val stored = storeItems().getString(nameTag(key), null)
         if (stored == null) {
@@ -1304,7 +1326,7 @@ class PqSecureStoragePlugin : Plugin() {
     // keys/hasItem stay silent (enumerating names leaks nothing). removeItem prompts only for a
     // biometric item, so silent items keep the drop-in behaviour.
     @PluginMethod
-    fun removeItem(call: PluginCall) {
+    fun removeItem(call: PluginCall): Unit = guarded(call, "E_REMOVE") {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
         val alias = itemKeyAlias(key)
         val itemKey = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
@@ -1334,7 +1356,7 @@ class PqSecureStoragePlugin : Plugin() {
     }
 
     @PluginMethod
-    fun hasItem(call: PluginCall) {
+    fun hasItem(call: PluginCall): Unit = guarded(call, "E_DECRYPT") {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
         val ret = JSObject()
         ret.put("exists", storeItems().contains(nameTag(key)))
@@ -1360,7 +1382,7 @@ class PqSecureStoragePlugin : Plugin() {
     }
 
     @PluginMethod
-    fun clear(call: PluginCall) {
+    fun clear(call: PluginCall): Unit = guarded(call, "E_CLEAR") {
         val ks = keystore()
         val itemAliases = ks.aliases().toList().filter { it.startsWith(itemAliasPrefix) }
         val bioAlias = itemAliases.firstOrNull { a ->
