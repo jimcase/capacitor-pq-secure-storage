@@ -11,4 +11,14 @@ enum InputPolicy {
         guard let n = raw as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
         return n.boolValue
     }
+
+    static let maxStoreKeyUnits = 512
+    static let maxStoreValueUnits = 256 * 1024
+
+    // Store limits in UTF-16 units, as String.length is on Android and in JS, so one input is accepted
+    // or rejected the same way everywhere. Counting Swift Characters let a value of 256K characters
+    // with combining marks take several MB.
+    static func storeWithinLimits(key: String, value: String) -> Bool {
+        !key.isEmpty && key.utf16.count <= maxStoreKeyUnits && value.utf16.count <= maxStoreValueUnits
+    }
 }
