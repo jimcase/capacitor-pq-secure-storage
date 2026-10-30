@@ -434,6 +434,8 @@ class PqSecureStoragePlugin : Plugin() {
             // keystore. getHardwareCapabilities probes the real security level instead of assuming.
             val kpg = KeyPairGenerator.getInstance(sa.keyPairAlgo, KEYSTORE_PROVIDER)
             val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
+                // usable only while the device is unlocked, as the docs say and iOS does
+                .setUnlockedDeviceRequired(true)
             if (sa.isEc) {
                 spec.setAlgorithmParameterSpec(java.security.spec.ECGenParameterSpec("secp256r1"))
                     .setDigests(KeyProperties.DIGEST_SHA256)
@@ -975,8 +977,9 @@ class PqSecureStoragePlugin : Plugin() {
     private fun kemTypeKey(alias: String) = "$alias.type"
     private fun kemTagKey(alias: String) = "$alias.tag"
 
-    // get-or-create an AES-256-GCM Keystore key. authRequired binds it to a per-op strong biometric.
-    private fun getOrCreateAesKey(alias: String, authRequired: Boolean): SecretKey {
+    // get-or-create an AES-256-GCM Keystore key. authRequired binds it to a per-op strong biometric,
+    // unlockRequired to an unlocked device.
+    private fun getOrCreateAesKey(alias: String, authRequired: Boolean, unlockRequired: Boolean = false): SecretKey {
         (keystore().getKey(alias, null) as? SecretKey)?.let { return it }
         return synchronized(keyCreateLock) {
             (keystore().getKey(alias, null) as? SecretKey)?.let { return@synchronized it }
@@ -985,6 +988,7 @@ class PqSecureStoragePlugin : Plugin() {
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256)
+                .setUnlockedDeviceRequired(unlockRequired)
             if (authRequired) {
                 spec.setUserAuthenticationRequired(true)
                     .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
@@ -994,7 +998,8 @@ class PqSecureStoragePlugin : Plugin() {
         }
     }
 
-    private fun getOrCreateAtRestKey(alias: String): SecretKey = getOrCreateAesKey(atRestAlias(alias), false)
+    private fun getOrCreateAtRestKey(alias: String): SecretKey =
+        getOrCreateAesKey(atRestAlias(alias), false, unlockRequired = true)
 
     // a fresh wrap key per generation (versioned alias). On overwrite the old version is deleted
     // after the new state is persisted, so a restored pre-rotation wrapped private can no longer be
@@ -1002,7 +1007,8 @@ class PqSecureStoragePlugin : Plugin() {
     private fun createKemWrapKey(alias: String, ver: Int, requireBiometric: Boolean): SecretKey =
         createFreshAesKey(kemWrapAlias(alias, ver), requireBiometric)
 
-    // always creates: an existing key under this alias is an orphan of a cancelled attempt
+    // always creates: an existing key under this alias is an orphan of a cancelled attempt. Only used
+    // for wrap keys, which work only while the device is unlocked.
     private fun createFreshAesKey(alias: String, authRequired: Boolean): SecretKey {
         val ks = keystore()
         if (ks.containsAlias(alias)) ks.deleteEntry(alias)
@@ -1011,6 +1017,7 @@ class PqSecureStoragePlugin : Plugin() {
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
+            .setUnlockedDeviceRequired(true)
         if (authRequired) {
             // per-op biometric bound to the cipher (same GHSA-safe pattern as sign())
             spec.setUserAuthenticationRequired(true)
