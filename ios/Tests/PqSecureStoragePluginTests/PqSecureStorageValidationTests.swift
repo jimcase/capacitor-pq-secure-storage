@@ -28,6 +28,14 @@ final class PqSecureStorageValidationTests: XCTestCase {
     }
 
 
+    func testSetItemBoundsTheValueByUtf16UnitsLikeAndroidAndWeb() {
+        // 70,000 Swift characters, but 280,000 UTF-16 units: over the 256K limit on the other platforms
+        let wide = String(repeating: "e\u{301}\u{301}\u{301}", count: 70_000)
+        XCTAssertLessThan(wide.count, 256 * 1024)
+        let code = reject(options: ["key": "audit-wide", "value": wide]) { $0.setItem($1) }
+        XCTAssertEqual(code, "E_INVALID_ARGS")
+    }
+
     func testSetItemRejectsARequireBiometricThatIsNotABoolean() {
         let code = reject(options: ["key": "audit-nonbool", "value": "v", "requireBiometric": "true"]) { $0.setItem($1) }
         XCTAssertEqual(code, "E_INVALID_ARGS")

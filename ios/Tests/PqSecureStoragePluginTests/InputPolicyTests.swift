@@ -20,4 +20,18 @@ final class InputPolicyTests: XCTestCase {
         XCTAssertNil(InputPolicy.booleanOption(NSNumber(value: 0), default: true))
         XCTAssertNil(InputPolicy.booleanOption([String: Any](), default: true))
     }
+
+    func testTheStoreLimitsAreInclusive() {
+        XCTAssertTrue(InputPolicy.storeWithinLimits(key: String(repeating: "k", count: 512), value: String(repeating: "v", count: 256 * 1024)))
+        XCTAssertFalse(InputPolicy.storeWithinLimits(key: "", value: "v"))
+        XCTAssertFalse(InputPolicy.storeWithinLimits(key: String(repeating: "k", count: 513), value: "v"))
+        XCTAssertFalse(InputPolicy.storeWithinLimits(key: "k", value: String(repeating: "v", count: 256 * 1024 + 1)))
+    }
+
+    // one Swift Character can hold many UTF-16 units: count the units, not the characters
+    func testTheStoreLimitsCountUtf16UnitsNotCharacters() {
+        let wide = String(repeating: "e\u{301}\u{301}\u{301}", count: 70_000)
+        XCTAssertLessThan(wide.count, InputPolicy.maxStoreValueUnits)
+        XCTAssertFalse(InputPolicy.storeWithinLimits(key: "k", value: wide))
+    }
 }

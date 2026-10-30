@@ -1165,7 +1165,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Missing key or value", "E_MISSING_PARAMS"); return
         }
         // bound key/value (matches Android) so a caller can't flood the Keychain
-        guard !key.isEmpty, key.count <= 512, value.count <= 256 * 1024 else {
+        guard InputPolicy.storeWithinLimits(key: key, value: value) else {
             call.reject("Key or value out of bounds", "E_INVALID_ARGS"); return
         }
         guard let data = value.data(using: .utf8) else {
