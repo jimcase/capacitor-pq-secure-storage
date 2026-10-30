@@ -752,10 +752,16 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     // HMAC key for the public-key integrity tag. Load-or-create, silent, device-only. Unlike
     // Android (Keystore/hardware HMAC key), this key lives in the Keychain (readable in-process): the
     // tag defends against offline/backup tampering of the stored public key, not an in-process attacker.
+    // Serializes load-or-create of the shared internal keys. SecKeyCreateRandomKey does not dedupe by
+    // tag, so two concurrent first calls would leave two keys under one tag and the tags would verify
+    // or not depending on which one a lookup returns.
+    private static let keyCreateLock = NSLock()
+
     // load-or-create a 256-bit Keychain key (silent, device-only). Used for the internal HMAC/name
     // keys. These live in the Keychain (readable in-process), so they defend against offline/backup
     // tampering and disclosure, not an in-process attacker.
     private static func symmetricKey(account: String) throws -> SymmetricKey {
+        keyCreateLock.lock(); defer { keyCreateLock.unlock() }
         var query = baseQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -777,6 +783,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     // HMAC key would sit in the keychain, readable). Silent, device-only.
     private static let pubSigAlgo: SecKeyAlgorithm = .ecdsaSignatureMessageX962SHA256
     private static func pubSigKey() throws -> SecKey {
+        keyCreateLock.lock(); defer { keyCreateLock.unlock() }
         let tag = Data("pq.pubsig".utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
@@ -1059,6 +1066,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     private static func atRestKeyTag(_ alias: String) -> Data { Data("pq.atrest.\(alias)".utf8) }
 
     private static func atRestKey(alias: String, create: Bool) throws -> SecKey {
+        keyCreateLock.lock(); defer { keyCreateLock.unlock() }
         let tag = atRestKeyTag(alias)
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
