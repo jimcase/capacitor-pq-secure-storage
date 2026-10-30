@@ -1,4 +1,5 @@
 import Capacitor
+import LocalAuthentication
 import XCTest
 @testable import CapacitorPqSecureStorage
 
@@ -25,6 +26,18 @@ final class PqSecureStorageValidationTests: XCTestCase {
         )
         run(PqSecureStoragePlugin(), call!)
         return code
+    }
+
+    // runs a plugin method and returns what it resolved with
+    private func resolved(options: [String: Any], _ run: (PqSecureStoragePlugin, CAPPluginCall) -> Void) -> [String: Any]? {
+        var data: [String: Any]?
+        let call = CAPPluginCall(
+            callbackId: "t", methodName: "m", options: options,
+            success: { result, _ in data = result?.data },
+            error: { _ in }
+        )
+        run(PqSecureStoragePlugin(), call!)
+        return data
     }
 
 
@@ -60,5 +73,14 @@ final class PqSecureStorageValidationTests: XCTestCase {
         let huge = String(repeating: "A", count: 5_000_000)
         let code = reject(options: ["recipientPublicKey": huge, "type": "PQC_MLKEM_768", "data": "AA=="]) { $0.encryptTo($1) }
         XCTAssertEqual(code, "E_INVALID_ARGS")
+    }
+
+    // biometric gating needs an enrolled biometric, not just a Secure Enclave
+
+    func testBiometricGatedFollowsEnrollmentNotJustTheEnclave() {
+        let caps = resolved(options: [:]) { $0.getHardwareCapabilities($1) }
+        let enclave = caps?["hardwareBacked"] as? Bool ?? false
+        let enrolled = LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        XCTAssertEqual(caps?["biometricGated"] as? Bool, enclave && enrolled)
     }
 }
