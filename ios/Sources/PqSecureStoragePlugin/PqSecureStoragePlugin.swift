@@ -299,6 +299,11 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if type == "ED25519" {
             return wrappedGenerate(alias: alias, type: type, overwrite: overwrite, requireBiometric: requireBiometric, call: call)
         }
+        // one alias, one key: a wrapped Ed25519 key under this alias would shadow the hardware key in
+        // getPublicKey, and an overwrite does not change the kind of custody
+        if (try? Self.loadWrapMetadata(alias: alias)) != nil {
+            return call.reject("Alias already exists", "E_ALIAS_EXISTS")
+        }
         let exists = Self.aliasExists(alias)
         if !overwrite && exists {
             // alias may back a live identity already -- refuse to silently clobber it
@@ -993,7 +998,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     private func wrappedGenerate(alias: String, type: String, overwrite: Bool, requireBiometric: Bool, call: CAPPluginCall) {
         let exists = (try? Self.loadWrapMetadata(alias: alias)) != nil
-        if !overwrite && exists {
+        // a hardware key under this alias is never replaced by a wrapped one
+        if (!overwrite && exists) || Self.aliasExists(alias) {
             return call.reject("Alias already exists", "E_ALIAS_EXISTS")
         }
         let doGenerate: () -> Void = {
