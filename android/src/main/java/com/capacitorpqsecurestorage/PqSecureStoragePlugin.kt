@@ -1220,8 +1220,9 @@ class PqSecureStoragePlugin : Plugin() {
             done()
             return call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
         }
-        val itemKey: SecretKey = if (existing != null && !invalidated(existing)) {
-            existing // reuse (an accessibility change on overwrite is ignored -- set at creation)
+        val reusable = Policy.reusableItemKey(existing, hasItem) { invalidated(it) }
+        val itemKey: SecretKey = if (reusable != null) {
+            reusable // reuse (an accessibility change on overwrite is ignored -- set at creation)
         } else {
             try {
                 createItemKey(alias, newBio, unlockRequiredFor(call.getString("accessibility")))
