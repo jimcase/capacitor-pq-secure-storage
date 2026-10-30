@@ -4,8 +4,8 @@ import XCTest
 @testable import CapacitorPqSecureStorage
 
 // Calls the plugin methods the way the bridge does, on the simulator. Only paths that finish before
-// any Secure Enclave or biometric work are covered here (argument checks, early rejections): the
-// simulator has no Secure Enclave and no biometrics.
+// any Secure Enclave key operation, biometric or Keychain write are covered here (argument checks,
+// early rejections): the simulator cannot do those.
 final class PqSecureStorageValidationTests: XCTestCase {
     private let storeKeys = ["audit-nonbool", "audit-wide"]
 
@@ -39,7 +39,6 @@ final class PqSecureStorageValidationTests: XCTestCase {
         run(PqSecureStoragePlugin(), call!)
         return data
     }
-
 
     func testSignRejectsAnUnknownAliasBeforeAnyPrompt() {
         let code = reject(options: ["keyAlias": "no-such-alias", "data": "AA==", "type": "PQC_MLDSA_65"]) { $0.sign($1) }
