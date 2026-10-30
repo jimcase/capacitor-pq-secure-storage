@@ -271,6 +271,14 @@ class PqSecureStoragePlugin : Plugin() {
         call.reject("Invalid base64 input", "E_INVALID_ARGS"); null
     }
 
+    // an option that is present but not a boolean is rejected, not silently replaced by its default
+    private fun boolArg(call: PluginCall, name: String, default: Boolean): Boolean? {
+        val raw = if (call.data.isNull(name)) null else call.data.opt(name)
+        val v = Policy.booleanOption(raw, default)
+        if (v == null) call.reject("$name must be a boolean", "E_INVALID_ARGS")
+        return v
+    }
+
     // The Capacitor bridge rethrows anything that escapes a plugin method as a RuntimeException, which
     // takes the whole app down. Methods that touch the Keystore outside their own try use this.
     private inline fun guarded(call: PluginCall, code: String, body: () -> Unit) {
@@ -315,8 +323,8 @@ class PqSecureStoragePlugin : Plugin() {
         if (!safeAlias(call, alias)) return
         val type = call.getString("type")
         val sa = sigAlgOf(type) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
-        val overwrite = call.getBoolean("overwrite") ?: false
-        val requireBiometric = call.getBoolean("requireBiometric") ?: true
+        val overwrite = boolArg(call, "overwrite", false) ?: return
+        val requireBiometric = boolArg(call, "requireBiometric", true) ?: return
         if (sa.wrapped) return generateWrappedSigningKey(alias, type!!, overwrite, requireBiometric, call)
         val ks = try {
             keystore()
@@ -630,8 +638,8 @@ class PqSecureStoragePlugin : Plugin() {
         if (!safeAlias(call, alias)) return
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val spec = mlkemSpecOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
-        val overwrite = call.getBoolean("overwrite") ?: false
-        val requireBiometric = call.getBoolean("requireBiometric") ?: true
+        val overwrite = boolArg(call, "overwrite", false) ?: return
+        val requireBiometric = boolArg(call, "requireBiometric", true) ?: return
         if (!kemGenerating.add(alias)) return call.reject("Key generation in progress, retry", "E_BUSY")
         try {
             val exists = kemPrefs().contains(kemPubKeyKey(alias))
@@ -1214,9 +1222,9 @@ class PqSecureStoragePlugin : Plugin() {
         if (key.isEmpty() || key.length > MAX_STORE_KEY_LEN || value.length > MAX_STORE_VALUE_LEN) {
             return call.reject("Key or value out of bounds", "E_INVALID_ARGS")
         }
+        val newBio = boolArg(call, "requireBiometric", false) ?: return
         if (!storeWriting.add(key)) return call.reject("Store write in progress, retry", "E_BUSY")
         val done = { storeWriting.remove(key); Unit }
-        val newBio = call.getBoolean("requireBiometric") ?: false
         // these hit the Keystore; a throw here would skip done() and leave the key latched as busy
         val alias: String
         val existing: SecretKey?

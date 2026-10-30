@@ -98,4 +98,24 @@ class PolicyTest {
         val aliases = (-1..4).map { Policy.sigWrapAlias("id", it) }
         assertEquals(aliases.size, aliases.toSet().size)
     }
+
+    @Test
+    fun anAbsentOptionTakesTheDefault() {
+        assertEquals(true, Policy.booleanOption(null, true))
+        assertEquals(false, Policy.booleanOption(null, false))
+    }
+
+    @Test
+    fun aRealBooleanIsUsedAsIs() {
+        assertEquals(true, Policy.booleanOption(true, false))
+        assertEquals(false, Policy.booleanOption(false, true))
+    }
+
+    // setItem({ requireBiometric: "true" }) used to store a silent item with no error
+    @Test
+    fun aValueThatIsNotABooleanIsInvalid() {
+        assertNull(Policy.booleanOption("true", false))
+        assertNull(Policy.booleanOption(1, false))
+        assertNull(Policy.booleanOption(Any(), true))
+    }
 }
