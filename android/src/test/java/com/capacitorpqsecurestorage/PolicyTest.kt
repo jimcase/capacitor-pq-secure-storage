@@ -79,4 +79,23 @@ class PolicyTest {
         assertEquals("ML-DSA-65", Policy.signatureAlgoFor("ML-DSA-65"))
         assertEquals("Ed25519", Policy.signatureAlgoFor("Ed25519"))
     }
+
+    // a wrapped key made before wrap keys were versioned has no version in prefs and keeps its alias
+    @Test
+    fun anUnversionedWrapKeyKeepsTheLegacyAlias() {
+        assertEquals("__pq_sigwrap_id", Policy.sigWrapAlias("id", -1))
+    }
+
+    @Test
+    fun versionedWrapKeysGetTheirOwnAlias() {
+        assertEquals("__pq_sigwrap_id.0", Policy.sigWrapAlias("id", 0))
+        assertEquals("__pq_sigwrap_id.3", Policy.sigWrapAlias("id", 3))
+    }
+
+    // the new key must not share an alias with the live one, or retiring the old would delete the new
+    @Test
+    fun consecutiveVersionsNeverCollide() {
+        val aliases = (-1..4).map { Policy.sigWrapAlias("id", it) }
+        assertEquals(aliases.size, aliases.toSet().size)
+    }
 }
