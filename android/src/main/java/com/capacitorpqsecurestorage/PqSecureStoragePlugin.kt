@@ -25,7 +25,6 @@ import java.security.PublicKey
 import java.security.SecureRandom
 import java.security.Signature
 import java.security.spec.PKCS8EncodedKeySpec
-import java.security.spec.X509EncodedKeySpec
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.crypto.Cipher
@@ -34,14 +33,9 @@ import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 import org.bouncycastle.asn1.ASN1ObjectIdentifier
 import org.bouncycastle.asn1.nist.NISTObjectIdentifiers
-import org.bouncycastle.asn1.x509.AlgorithmIdentifier
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo
-import org.bouncycastle.jcajce.SecretKeyWithEncapsulation
-import org.bouncycastle.jcajce.spec.KEMExtractSpec
-import org.bouncycastle.jcajce.spec.KEMGenerateSpec
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.jcajce.spec.MLKEMParameterSpec
 
@@ -747,7 +741,7 @@ class PqSecureStoragePlugin : Plugin() {
             // the peer sends a raw public key; rebuild the SPKI wrapper JCA needs to parse it
             val pubKey = mlkemPublicFromRaw(Base64.decode(pubStr, Base64.DEFAULT), oid)
             // encapsulate (software, no alias/biometric) -> frame = kemCt || nonce(12) || aead(+tag)
-            val frame = encapAndSeal(pubKey, input)
+            val frame = MlKemCrypto.encapAndSeal(bc, pubKey, input)
             val ret = JSObject()
             ret.put("ciphertext", Base64.encodeToString(frame, Base64.NO_WRAP))
             call.resolve(ret)
@@ -839,17 +833,8 @@ class PqSecureStoragePlugin : Plugin() {
     private fun rawFromSpki(encoded: ByteArray): ByteArray =
         SubjectPublicKeyInfo.getInstance(encoded).publicKeyData.bytes
 
-    private fun mlkemPublicFromRaw(raw: ByteArray, oid: ASN1ObjectIdentifier): PublicKey {
-        // reject a wrong-size raw key before wrapping it in SPKI (FIPS-203 fixed lengths)
-        val expected = when (oid) {
-            NISTObjectIdentifiers.id_alg_ml_kem_768 -> 1184
-            NISTObjectIdentifiers.id_alg_ml_kem_1024 -> 1568
-            else -> throw IllegalArgumentException("unsupported ML-KEM oid")
-        }
-        if (raw.size != expected) throw IllegalArgumentException("bad ML-KEM public key length")
-        val spki = SubjectPublicKeyInfo(AlgorithmIdentifier(oid), raw)
-        return KeyFactory.getInstance("ML-KEM", bc).generatePublic(X509EncodedKeySpec(spki.encoded))
-    }
+    private fun mlkemPublicFromRaw(raw: ByteArray, oid: ASN1ObjectIdentifier): PublicKey =
+        MlKemCrypto.publicFromRaw(bc, raw, oid)
 
     // ---- public-key integrity tag ----
     // Stored pubs live in tamperable prefs and get encapsulated to with no biometric. Tag them with
@@ -1269,43 +1254,13 @@ class PqSecureStoragePlugin : Plugin() {
         }
     }
 
-    // ML-KEM encapsulate to pub + ChaCha20-Poly1305 seal -> frame = kemCt || nonce(12) || aead(+tag)
-    private fun encapAndSeal(pub: PublicKey, plaintext: ByteArray): ByteArray {
-        val kg = KeyGenerator.getInstance("ML-KEM", bc)
-        kg.init(KEMGenerateSpec(pub, "AES"), SecureRandom())
-        val enc = kg.generateKey() as SecretKeyWithEncapsulation
-        val kemCt = enc.encapsulation
-        val sharedSecret = enc.encoded
-        val nonce = ByteArray(12).also { SecureRandom().nextBytes(it) }
-        val aead = try {
-            val cipher = Cipher.getInstance("ChaCha20-Poly1305")
-            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(sharedSecret, "ChaCha20"),
-                javax.crypto.spec.IvParameterSpec(nonce))
-            cipher.doFinal(plaintext)
-        } finally {
-            sharedSecret.fill(0)
-        }
-        return kemCt + nonce + aead
-    }
-
     // decapsulate the frame with the (already unwrapped) private. Wipes privBytes + shared secret
     // (best-effort: JVM copies in SecretKeySpec/GC still linger).
     private fun decapsulate(privBytes: ByteArray, frame: ByteArray, ctLen: Int): ByteArray {
-        val priv = KeyFactory.getInstance("ML-KEM", bc).generatePrivate(PKCS8EncodedKeySpec(privBytes))
-        val kemCt = frame.copyOfRange(0, ctLen)
-        val nonce = frame.copyOfRange(ctLen, ctLen + 12)
-        val aead = frame.copyOfRange(ctLen + 12, frame.size)
-        val kg = KeyGenerator.getInstance("ML-KEM", bc)
-        kg.init(KEMExtractSpec(priv, kemCt, "AES"))
-        val dec = kg.generateKey() as SecretKeyWithEncapsulation
-        val shared = dec.encoded
         try {
-            val cipher = Cipher.getInstance("ChaCha20-Poly1305")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(shared, "ChaCha20"),
-                javax.crypto.spec.IvParameterSpec(nonce))
-            return cipher.doFinal(aead)
+            val priv = KeyFactory.getInstance("ML-KEM", bc).generatePrivate(PKCS8EncodedKeySpec(privBytes))
+            return MlKemCrypto.decapsulate(bc, priv, frame, ctLen)
         } finally {
-            shared.fill(0)
             privBytes.fill(0)
         }
     }
