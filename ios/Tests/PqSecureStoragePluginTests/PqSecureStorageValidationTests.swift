@@ -28,6 +28,11 @@ final class PqSecureStorageValidationTests: XCTestCase {
     }
 
 
+    func testSignRejectsAnUnknownAliasBeforeAnyPrompt() {
+        let code = reject(options: ["keyAlias": "no-such-alias", "data": "AA==", "type": "PQC_MLDSA_65"]) { $0.sign($1) }
+        XCTAssertEqual(code, "E_KEY_NOT_FOUND")
+    }
+
     func testSetItemBoundsTheValueByUtf16UnitsLikeAndroidAndWeb() {
         // 70,000 Swift characters, but 280,000 UTF-16 units: over the 256K limit on the other platforms
         let wide = String(repeating: "e\u{301}\u{301}\u{301}", count: 70_000)
