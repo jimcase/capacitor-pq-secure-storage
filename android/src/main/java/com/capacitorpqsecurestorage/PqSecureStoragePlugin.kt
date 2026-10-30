@@ -221,7 +221,7 @@ class PqSecureStoragePlugin : Plugin() {
             if (secretKeyRequiresAuth(wrapKey)) {
                 val host = activity as? FragmentActivity
                     ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-                authenticateCipher(host, cipher, description ?: "Authorize signature", call) { boundCipher -> doSign(boundCipher) }
+                authenticateCipher(host, cipher, "Authorize signature", call, subtitle = description) { boundCipher -> doSign(boundCipher) }
             } else {
                 doSign(cipher)
             }
@@ -1027,6 +1027,7 @@ class PqSecureStoragePlugin : Plugin() {
         cipher: Cipher,
         reason: String,
         call: PluginCall,
+        subtitle: String? = null,
         onError: () -> Unit = {},
         onSuccess: (Cipher) -> Unit
     ) {
@@ -1073,6 +1074,7 @@ class PqSecureStoragePlugin : Plugin() {
             try {
                 val promptInfo = BiometricPrompt.PromptInfo.Builder()
                     .setTitle(reason)
+                    .apply { if (subtitle != null) setSubtitle(subtitle) }
                     .setNegativeButtonText("Cancel")
                     .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                     .build()
