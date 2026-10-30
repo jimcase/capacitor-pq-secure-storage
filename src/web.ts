@@ -51,6 +51,7 @@ const kemOf = (t: KemType) => {
 
 const STORE_KEY = 'pqss.storekey'; // internal store master AES key, unreachable via a caller alias
 const MAX_CRYPTO_INPUT = 10 * 1024 * 1024; // cap decoded input on the crypto ops (memory DoS guard)
+const MAX_RECIPIENT_KEY_B64 = 2200; // the largest ML-KEM public key is 1568 bytes, 2092 base64 chars
 
 const utf8 = new TextEncoder();
 const utf8d = new TextDecoder();
@@ -90,6 +91,13 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
             throw this.unavailable('Invalid key alias');
         }
         return alias;
+    }
+
+    // an option that is present but not a boolean is rejected, not silently replaced by its default
+    private checkBool(name: string, value: unknown): void {
+        if (value !== undefined && value !== null && typeof value !== 'boolean') {
+            throw this.unavailable(`${name} must be a boolean`);
+        }
     }
 
     // reject an oversized input before decoding it (the base64 string bounds the decoded size)
@@ -166,6 +174,8 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         requireBiometric?: boolean;
     }): Promise<{ publicKey: string }> {
         const alias = this.safeAlias(options.keyAlias);
+        this.checkBool('overwrite', options.overwrite);
+        this.checkBool('requireBiometric', options.requireBiometric);
         if (!options.overwrite && this.store.getItem(`pqss.sign.${alias}`) !== null) {
             throw this.unavailable('Alias already exists');
         }
@@ -209,6 +219,8 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         requireBiometric?: boolean;
     }): Promise<{ publicKey: string }> {
         const alias = this.safeAlias(options.keyAlias);
+        this.checkBool('overwrite', options.overwrite);
+        this.checkBool('requireBiometric', options.requireBiometric);
         if (!options.overwrite && this.store.getItem(`pqss.kem.${alias}`) !== null) {
             throw this.unavailable('Alias already exists');
         }
@@ -229,6 +241,7 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         data: string;
     }): Promise<{ ciphertext: string }> {
         const input = this.decodeCapped(options.data);
+        if (options.recipientPublicKey.length > MAX_RECIPIENT_KEY_B64) throw this.unavailable('Invalid public key');
         const { cipherText, sharedSecret } = kemOf(options.type).encapsulate(fromB64(options.recipientPublicKey));
         const nonce = randomBytes(12);
         const aead = chacha20poly1305(sharedSecret, nonce).encrypt(input);
@@ -257,6 +270,7 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         requireBiometric?: boolean;
         accessibility?: string;
     }): Promise<void> {
+        this.checkBool('requireBiometric', options.requireBiometric);
         // same bounds as native so the fallback can't be flooded either
         if (options.key.length === 0 || options.key.length > 512 || options.value.length > 256 * 1024) {
             throw this.unavailable('Key or value out of bounds');

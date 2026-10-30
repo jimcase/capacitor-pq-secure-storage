@@ -128,4 +128,33 @@ describe('web software fallback', () => {
         storage.setItem('pqss.store.b', storage.getItem('pqss.store.a') as string);
         await expect(pq.getItem({ key: 'b' })).rejects.toThrow();
     });
+
+    it('rejects requireBiometric and overwrite values that are not booleans', async () => {
+        const pq = web();
+        const notBool = 'true' as unknown as boolean;
+        await expect(pq.setItem({ key: 'k', value: 'v', requireBiometric: notBool })).rejects.toThrow(/boolean/);
+        await expect(
+            pq.generateKeyPair({ keyAlias: 'a', type: 'PQC_MLDSA_65', overwrite: 1 as unknown as boolean }),
+        ).rejects.toThrow(/boolean/);
+        await expect(
+            pq.generateKemKeyPair({ keyAlias: 'a', type: 'PQC_MLKEM_768', requireBiometric: notBool }),
+        ).rejects.toThrow(/boolean/);
+        expect((await pq.hasItem({ key: 'k' })).exists).toBe(false);
+    });
+
+    it('accepts missing and real boolean options', async () => {
+        const pq = web();
+        await pq.setItem({ key: 'k', value: 'v' });
+        await pq.setItem({ key: 'k', value: 'w', requireBiometric: false });
+        await pq.generateKeyPair({ keyAlias: 'a', type: 'PQC_MLDSA_65', overwrite: false, requireBiometric: true });
+        expect((await pq.getItem({ key: 'k' })).value).toBe('w');
+    });
+
+    it('rejects an oversized recipient public key without decoding it', async () => {
+        const pq = web();
+        const huge = Buffer.alloc(5 * 1024 * 1024).toString('base64');
+        await expect(pq.encryptTo({ recipientPublicKey: huge, type: 'PQC_MLKEM_768', data: b64('x') })).rejects.toThrow(
+            /invalid public key/i,
+        );
+    });
 });
