@@ -27,4 +27,13 @@ internal object Policy {
     // dot, so a versioned alias never collides with another alias's plain one.
     fun sigWrapAlias(alias: String, ver: Int): String =
         if (ver < 0) "__pq_sigwrap_$alias" else "__pq_sigwrap_$alias.$ver"
+
+    // An optional boolean option from JS: the default when absent, null when it is present but not a
+    // real boolean. Taking the default there made setItem({ requireBiometric: "true" }) store a
+    // silent item with no error.
+    fun booleanOption(raw: Any?, default: Boolean): Boolean? = when (raw) {
+        null -> default
+        is Boolean -> raw
+        else -> null
+    }
 }
