@@ -124,7 +124,7 @@ permission to the app's `AndroidManifest.xml`:
 <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 ```
 
-Exclude the store's prefs from backup (see the backup section below) and set
+Exclude the plugin's prefs from backup (see the backup section below) and set
 `android:allowBackup="false"`.
 
 ## Usage
@@ -220,12 +220,18 @@ const { value } = await PqSecureStorage.getJSON<{ id: number; roles: string[] }>
 // value: { id: number; roles: string[] } | null
 ```
 
-Namespace keys with `setKeyPrefix` so `keys()` and `clear()` only touch your own items (useful when
-a library shares the store with its host app):
+Namespace keys with `withPrefix` so `keys()` and `clear()` only touch your own items (useful when
+a library shares the store with its host app). Each view keeps its own prefix, so one caller cannot
+change another's:
 
 ```ts
-await PqSecureStorage.setKeyPrefix('myapp_'); // prepended to every key; keys() strips it back
+const mine = PqSecureStorage.withPrefix('mylib_'); // prepended to every key; keys() strips it back
+await mine.setItem({ key: 'token', value: 'abc' });
+await mine.clear(); // only the items under mylib_
 ```
+
+`setKeyPrefix` / `getKeyPrefix` still work but are deprecated: they change one prefix shared by every
+caller that imports the module, the host app included.
 
 Notes:
 
@@ -240,16 +246,20 @@ Notes:
 
 #### Android backup exclusion
 
-Backup rules live in the host app, not the library. Exclude the store's prefs file in your app's
+Backup rules live in the host app, not the library. Exclude the plugin's prefs files (store, KEM keys, signing keys) in your app's
 `data_extraction_rules.xml`:
 
 ```xml
 <data-extraction-rules>
   <cloud-backup>
     <exclude domain="sharedpref" path="pq_secure_store.xml"/>
+    <exclude domain="sharedpref" path="pq_kem.xml"/>
+    <exclude domain="sharedpref" path="pq_sig.xml"/>
   </cloud-backup>
   <device-transfer>
     <exclude domain="sharedpref" path="pq_secure_store.xml"/>
+    <exclude domain="sharedpref" path="pq_kem.xml"/>
+    <exclude domain="sharedpref" path="pq_sig.xml"/>
   </device-transfer>
 </data-extraction-rules>
 ```
@@ -312,7 +322,8 @@ keypairs (use that for KERI rotation, one alias per key).
 `requireBiometric` (default `true`) is baked into the key: `true` makes every `sign` prompt
 for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
 the device is unlocked. It cannot be changed after creation, and overwriting a biometric key
-prompts (a silent one overwrites silently).
+prompts (a silent one overwrites silently). `overwrite` and `requireBiometric` must be
+booleans when given; anything else rejects `E_INVALID_ARGS`.
 
 | Param         | Type                                                                                                                                  |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
@@ -329,9 +340,9 @@ prompts (a silent one overwrites silently).
 getPublicKey(options: { keyAlias: string; }) => Promise<{ publicKey: string; }>
 ```
 
-Return the raw public key for an existing signing alias. Use one alias per key: an alias must
-back a single key. If the same alias somehow backs both a wrapped (e.g. Ed25519) and a
-hardware (ML-DSA / ECDSA) key, the wrapped one is returned.
+Return the raw public key for an existing signing alias. An alias backs a single key:
+generating a hardware key (ML-DSA / ECDSA) under an alias that holds a wrapped Ed25519 key, or
+the reverse, rejects `E_ALIAS_EXISTS` even with `overwrite`.
 
 | Param         | Type                               |
 | ------------- | ---------------------------------- |

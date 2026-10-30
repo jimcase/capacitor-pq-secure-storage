@@ -10,6 +10,61 @@ All notable changes to this project are documented here. The format is based on
 
 - Bumped BouncyCastle (`bcprov-jdk18on`) 1.84 -> 1.85 to stay on the latest release. 1.84 already
   carried the signature-forgery and Frodo timing fixes; this keeps the dependency current.
+- Android `setItem` no longer reuses an item key left behind by a failed write. Such a key could
+  have the wrong tier, so a biometric item could end up under a silent key and read back with no
+  prompt.
+- Android `clear()` binds its prompt to a biometric key that can still unlock. After a biometric
+  re-enrollment it used to pick a dead key, read the invalidation as nothing to protect and wipe
+  live biometric items with no prompt.
+- Android key overwrite gate: for an ECDSA key it asked for `Signature.getInstance("EC")`, which does
+  not exist, so a biometric ECDSA key could never be overwritten and the alias was lost. It now uses
+  `SHA256withECDSA`.
+- Android wrapped Ed25519 keys keep the old wrap key until the replacement is committed. A cancelled
+  or failed replacement used to delete it first and leave a private key nothing could open.
+- A signing alias that exists as a hardware key can no longer be taken by a wrapped Ed25519 key, and
+  the reverse (`E_ALIAS_EXISTS`, on Android and iOS). `getPublicKey` returns the wrapped key, so JS
+  could shadow an identity alias with a silent one.
+- Android silent keys (signing, KEM and Ed25519 wrap keys, at-rest) now require an unlocked device,
+  as the docs say and as iOS does.
+- iOS `clear()` lists the store with `UIFail` instead of `UISkip`, so it cannot miss biometric items
+  and wipe them with no prompt.
+- iOS `sign` checks the alias and key type before it shows Face ID, so JS cannot pull prompts for
+  aliases that do not exist.
+- iOS serializes creation of its shared keys, so two concurrent first calls cannot leave two keys under
+  one tag and fail with `E_TAMPERED`.
+- A recipient public key longer than the largest ML-KEM key is rejected before it is decoded, on
+  all platforms.
+
+### Fixed
+
+- Android ML-KEM (`encryptTo` / `decrypt`) used BouncyCastle's default KDF3-SHA256 on the shared
+  secret, so Android frames did not open on iOS, web or any other library, and the other way around.
+  It now uses the raw FIPS 203 secret like iOS and noble. Frames sealed by earlier Android builds
+  no longer decrypt (they never interoperated).
+- Android no longer crashes the host app on invalid base64. `sign`, `encryptAtRest` and `encryptTo`
+  threw outside their `try` and the Capacitor bridge rethrows anything that escapes a plugin method.
+  They now reject with `E_INVALID_ARGS`, and the methods that touch the Keystore outside their own
+  `try` reject instead of throwing. Line breaks and spaces in base64 are still skipped.
+- iOS `biometricGated` is true only when a biometric is enrolled, not whenever a Secure Enclave
+  exists.
+- iOS `setItem` bounds the key and value in UTF-16 units, like Android and web, instead of Swift
+  characters (a value of 256K characters with combining marks could take several MB).
+- Android BiometricPrompt for wrapped Ed25519 keys keeps its fixed title; the caller's description is
+  the subtitle, as for hardware keys.
+- `requireBiometric` and `overwrite` that are present but not booleans are rejected with
+  `E_INVALID_ARGS` on all platforms instead of silently taking the default.
+- README: the Android backup exclusion now lists all three preference files (`pq_secure_store.xml`,
+  `pq_kem.xml`, `pq_sig.xml`).
+
+### Added
+
+- `withPrefix(prefix)`: a scoped view of the secure store with its own key prefix, independent of the
+  shared instance and of other views. Its `keys()` and `clear()` only see items under the prefix.
+
+### Deprecated
+
+- `setKeyPrefix` / `getKeyPrefix` change one prefix shared by every caller that imports the module,
+  the host app included. Use `withPrefix`. Both keep working.
 
 ## [7.0.0] - 2026-07-14
 

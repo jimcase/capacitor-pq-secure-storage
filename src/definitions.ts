@@ -74,7 +74,8 @@ export interface PqSecureStoragePlugin {
      * `requireBiometric` (default `true`) is baked into the key: `true` makes every `sign` prompt
      * for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
      * the device is unlocked. It cannot be changed after creation, and overwriting a biometric key
-     * prompts (a silent one overwrites silently).
+     * prompts (a silent one overwrites silently). `overwrite` and `requireBiometric` must be
+     * booleans when given; anything else rejects `E_INVALID_ARGS`.
      */
     generateKeyPair(options: {
         keyAlias: string;
@@ -84,9 +85,9 @@ export interface PqSecureStoragePlugin {
     }): Promise<{ publicKey: string }>;
 
     /**
-     * Return the raw public key for an existing signing alias. Use one alias per key: an alias must
-     * back a single key. If the same alias somehow backs both a wrapped (e.g. Ed25519) and a
-     * hardware (ML-DSA / ECDSA) key, the wrapped one is returned.
+     * Return the raw public key for an existing signing alias. An alias backs a single key:
+     * generating a hardware key (ML-DSA / ECDSA) under an alias that holds a wrapped Ed25519 key, or
+     * the reverse, rejects `E_ALIAS_EXISTS` even with `overwrite`.
      */
     getPublicKey(options: { keyAlias: string }): Promise<{ publicKey: string }>;
 

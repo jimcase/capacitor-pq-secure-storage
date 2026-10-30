@@ -245,6 +245,23 @@ Document the choice in the security policy.
 - [ ] ECDSA P-256: generateKeyPair + sign; the 64-byte r||s signature verifies off-device against the 33-byte compressed public key; biometric prompts per sign when `requireBiometric`.
 - [ ] Ed25519 (wrapped): generateKeyPair + sign; the 64-byte signature verifies off-device against the 32-byte public key; the biometric gates the unwrap-to-sign; a raw Keychain/prefs dump never shows the Ed25519 private in the clear.
 
+## Audit 2026-10-30 (device)
+
+Checks that could not be settled from the code or the simulator. Fixes for these findings are in the
+code; what is left is confirming the behavior on hardware.
+
+- [ ] iOS (M-8): with one silent item and one `requireBiometric: true` item, `keys()` lists both and `clear()` asks for Face ID before wiping. If `keys()` lists only the silent one, the system hides ACL items from attribute queries: add an index item (see the audit fixes, option B).
+- [ ] iOS: after changing the Face ID enrollment, on an old biometric item: `hasItem` is true, `removeItem` prompts and deletes, `setItem` of the same tier never overwrites it silently, `clear()` prompts. Note the `OSStatus` the `UIFail` probe returns.
+- [ ] iOS: `generateKeyPair({ type: 'ED25519', requireBiometric: true })` with no biometric enrolled. Does the alias keep a public entry with no private entry (`persistWrapped` writes the public one first)?
+- [ ] iOS (M-7): with an ML-DSA key under an alias, `generateKeyPair({ type: 'ED25519' })` under the same alias rejects `E_ALIAS_EXISTS`, and the reverse, with and without `overwrite`.
+- [ ] Android (M-1): while the device is locked and the app is in the background, a silent `setItem` fails and leaves an orphan item key. Then `setItem('k', 's', { requireBiometric: true })` followed by `getItem('k')` prompts on read.
+- [ ] Android (M-2): biometric item X, change the enrollment, new biometric item Y, `clear()` prompts.
+- [ ] Android (M-5): the `getAlgorithm()` of an ML-DSA private key from the Keystore, and whether `Signature.getInstance(<that name>)` resolves. Overwriting a biometric ECDSA key asks for "Authorize key replacement".
+- [ ] Android (M-6): silent Ed25519 key, then `generateKeyPair({ overwrite: true, requireBiometric: true })` and cancel the prompt. `sign` with the old key still works and `getPublicKey` returns the old public key.
+- [ ] Android (M-10): with the device locked, `sign` with a silent key, `decrypt` with a silent KEM key and `decryptAtRest` fail. They work again once unlocked.
+- [ ] Cross (M-3): `encryptTo` on web (test-app) to the ML-KEM public key of an Android and `decrypt` on the Android. Then the reverse.
+- [ ] Android: with a BiometricPrompt open, rotate the screen. Does `onAuthenticationError` arrive, or does `authInFlight` stay set and answer `E_BUSY` until restart?
+
 ## Acceptance Criteria
 
 - [ ] Android step 4: Attestation chain confirms StrongBox or TEE.
