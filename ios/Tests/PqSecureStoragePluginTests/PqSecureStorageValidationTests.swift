@@ -50,4 +50,10 @@ final class PqSecureStorageValidationTests: XCTestCase {
         let code = reject(options: ["keyAlias": "audit-a", "type": "PQC_MLKEM_768", "requireBiometric": 1]) { $0.generateKemKeyPair($1) }
         XCTAssertEqual(code, "E_INVALID_ARGS")
     }
+
+    func testEncryptToRejectsAnOversizedRecipientKeyBeforeDecodingIt() {
+        let huge = String(repeating: "A", count: 5_000_000)
+        let code = reject(options: ["recipientPublicKey": huge, "type": "PQC_MLKEM_768", "data": "AA=="]) { $0.encryptTo($1) }
+        XCTAssertEqual(code, "E_INVALID_ARGS")
+    }
 }

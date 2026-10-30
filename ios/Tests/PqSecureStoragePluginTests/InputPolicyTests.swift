@@ -34,4 +34,9 @@ final class InputPolicyTests: XCTestCase {
         XCTAssertLessThan(wide.count, InputPolicy.maxStoreValueUnits)
         XCTAssertFalse(InputPolicy.storeWithinLimits(key: "k", value: wide))
     }
+
+    func testARecipientKeyIsBoundedBeforeDecoding() {
+        XCTAssertTrue(InputPolicy.recipientKeyWithinLimit(String(repeating: "A", count: 2092)))
+        XCTAssertFalse(InputPolicy.recipientKeyWithinLimit(String(repeating: "A", count: 2201)))
+    }
 }
