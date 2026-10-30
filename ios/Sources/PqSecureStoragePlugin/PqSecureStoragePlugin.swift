@@ -1430,23 +1430,29 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             }
             if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Clear failed", "E_DECRYPT") }
         }
-        // enumerate accounts without prompting (metadata read, the biometry ACL gates data not
-        // metadata), then probe each item individually for its tier. A batch data read across a
-        // mixed store has ill-defined semantics and could report all-silent and wipe a bio item.
+        // enumerate without a prompt, then probe each item for its tier (a batch data read over a mixed
+        // store has fuzzy semantics). UIFail and not UISkip: UISkip may hide ACL items from the list and
+        // then bio items get wiped with no prompt. InteractionNotAllowed here means a bio item exists.
         let listQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.ssService,
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
         var listOut: CFTypeRef?
         let listStatus = SecItemCopyMatching(listQuery as CFDictionary, &listOut)
         if listStatus == errSecItemNotFound { return call.resolve() }
-        guard listStatus == errSecSuccess, let items = listOut as? [[String: Any]] else {
-            return call.reject("Clear failed", "E_DECRYPT")
-        }
         var hasBiometric = false
+        var items: [[String: Any]] = []
+        if listStatus == errSecInteractionNotAllowed {
+            hasBiometric = true
+        } else {
+            guard listStatus == errSecSuccess, let found = listOut as? [[String: Any]] else {
+                return call.reject("Clear failed", "E_DECRYPT")
+            }
+            items = found
+        }
         for item in items {
             guard let account = item[kSecAttrAccount as String] as? String else {
                 return call.reject("Clear failed", "E_DECRYPT") // unclassifiable -> fail closed
