@@ -1386,15 +1386,14 @@ class PqSecureStoragePlugin : Plugin() {
     fun clear(call: PluginCall): Unit = guarded(call, "E_CLEAR") {
         val ks = keystore()
         val itemAliases = ks.aliases().toList().filter { it.startsWith(itemAliasPrefix) }
-        val bioAlias = itemAliases.firstOrNull { a ->
-            (ks.getKey(a, null) as? SecretKey)?.let { isAuthRequired(it) } ?: false
-        }
-        if (bioAlias == null) { doClearWipe(); call.resolve(); return }
-        // prompt once, bound to a biometric item's key, before wiping
+        val bioKeys = itemAliases.mapNotNull { a -> (ks.getKey(a, null) as? SecretKey)?.takeIf { isAuthRequired(it) } }
+        // prompt once, bound to a biometric key that can still unlock. A key dead after an enrollment
+        // change guards nothing, and must not stand in for live biometric items.
+        val bioKey = Policy.pickLiveBioKey(bioKeys) { invalidated(it) }
+        if (bioKey == null) { doClearWipe(); call.resolve(); return }
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         try {
-            val bioKey = ks.getKey(bioAlias, null) as SecretKey
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, bioKey)
             authenticateCipher(hostActivity, cipher, "Authenticate to erase secure storage", call) { boundCipher ->
