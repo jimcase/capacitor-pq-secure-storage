@@ -102,7 +102,8 @@ class PqSecureStoragePlugin : Plugin() {
         if (!sigGenerating.add(alias)) return call.reject("Key generation in progress, retry", "E_BUSY")
         try {
             val exists = sigPrefs().contains(sigPubKey(alias))
-            if (!overwrite && exists) {
+            if ((!overwrite && exists) || keystore().containsAlias(alias)) {
+                // a hardware key under this alias is never replaced by a wrapped one
                 sigGenerating.remove(alias)
                 return call.reject("Alias already exists", "E_ALIAS_EXISTS")
             }
@@ -310,6 +311,9 @@ class PqSecureStoragePlugin : Plugin() {
             logd("generateKeyPair keystore load failed for alias=$alias", e)
             return call.reject("Key generation failed", "E_KEYGEN")
         }
+        // one alias, one key: a wrapped Ed25519 key under this alias would shadow the hardware key in
+        // getPublicKey, and an overwrite does not change the kind of custody
+        if (sigPrefs().contains(sigPubKey(alias))) return call.reject("Alias already exists", "E_ALIAS_EXISTS")
         val exists = ks.containsAlias(alias)
         if (exists && !overwrite) {
             // alias may back a live identity already -- refuse to silently clobber it
