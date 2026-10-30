@@ -538,8 +538,11 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func encryptTo(_ call: CAPPluginCall) {
         guard let pubStr = call.getString("recipientPublicKey"),
               let type = call.getString("type"),
-              let dataStr = call.getString("data"),
-              let pub = Data(base64Encoded: pubStr) else {
+              let dataStr = call.getString("data") else {
+            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        }
+        guard InputPolicy.recipientKeyWithinLimit(pubStr) else { return call.reject("Invalid public key", "E_INVALID_ARGS") }
+        guard let pub = Data(base64Encoded: pubStr) else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }

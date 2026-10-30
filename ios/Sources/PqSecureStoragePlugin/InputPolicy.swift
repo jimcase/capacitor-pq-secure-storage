@@ -21,4 +21,12 @@ enum InputPolicy {
     static func storeWithinLimits(key: String, value: String) -> Bool {
         !key.isEmpty && key.utf16.count <= maxStoreKeyUnits && value.utf16.count <= maxStoreValueUnits
     }
+
+    // the largest ML-KEM public key is 1568 bytes, 2092 base64 characters
+    static let maxRecipientKeyBase64 = 2200
+
+    // checked before the string is decoded, so a huge "public key" never gets a buffer
+    static func recipientKeyWithinLimit(_ b64: String) -> Bool {
+        b64.utf8.count <= maxRecipientKeyBase64
+    }
 }
