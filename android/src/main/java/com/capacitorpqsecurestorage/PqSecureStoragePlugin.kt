@@ -436,7 +436,7 @@ class PqSecureStoragePlugin : Plugin() {
         try {
             val priv = keystore().getKey(alias, null) as? java.security.PrivateKey
                 ?: return after() // no live key to protect (e.g. half-written alias) -> allow overwrite
-            val signer = Signature.getInstance(priv.algorithm)
+            val signer = Signature.getInstance(Policy.signatureAlgoFor(priv.algorithm))
             try {
                 signer.initSign(priv)
             } catch (e: KeyPermanentlyInvalidatedException) {

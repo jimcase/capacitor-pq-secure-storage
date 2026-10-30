@@ -15,4 +15,9 @@ internal object Policy {
     // live biometric items remain, so pick one that can still unlock. Null means there is none.
     fun <K : Any> pickLiveBioKey(bioKeys: List<K>, invalidated: (K) -> Boolean): K? =
         bioKeys.firstOrNull { !invalidated(it) }
+
+    // The Keystore reports "EC" as the algorithm of an ECDSA private key. That is a KeyFactory name:
+    // Signature.getInstance("EC") does not exist, so the overwrite gate could never sign for it.
+    fun signatureAlgoFor(keyAlgorithm: String): String =
+        if (keyAlgorithm == "EC") "SHA256withECDSA" else keyAlgorithm
 }
