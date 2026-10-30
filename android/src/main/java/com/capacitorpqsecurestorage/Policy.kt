@@ -9,4 +9,10 @@ internal object Policy {
         if (existing == null || !itemPresent) return null
         return if (invalidated(existing)) null else existing
     }
+
+    // The biometric key to bind a collective wipe prompt to. Keys killed by an enrollment change
+    // guard nothing, and an invalidation on one of them must not read as "nothing to protect" while
+    // live biometric items remain, so pick one that can still unlock. Null means there is none.
+    fun <K : Any> pickLiveBioKey(bioKeys: List<K>, invalidated: (K) -> Boolean): K? =
+        bioKeys.firstOrNull { !invalidated(it) }
 }
