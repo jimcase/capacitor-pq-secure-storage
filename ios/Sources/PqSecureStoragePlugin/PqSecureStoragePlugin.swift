@@ -261,10 +261,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             // gate on the actual SEP: an iOS 26 device/simulator without a Secure Enclave can't do
             // any of this, so don't claim hardware backing it doesn't have
             let hw = SecureEnclave.isAvailable
+            // gating on a biometric needs one enrolled, not just a Secure Enclave
+            let bio = hw && LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
             call.resolve([
                 "supportsPqc": hw,
                 "hardwareBacked": hw,
-                "biometricGated": hw,
+                "biometricGated": bio,
                 "supportedVariants": hw ? ["ECDSA_256R1", "ED25519", "PQC_MLDSA_65", "PQC_MLDSA_87"] : [],
                 "supportedKem": hw ? ["PQC_MLKEM_768", "PQC_MLKEM_1024"] : [],
                 "kemInSecureEnclave": hw
