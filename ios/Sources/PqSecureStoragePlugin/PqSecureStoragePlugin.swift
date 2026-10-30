@@ -408,9 +408,17 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
 
+        // check the key before any prompt: an unknown alias or a wrong type must not cost the user a
+        // Face ID, and must answer with the real error instead of an auth failure
+        let meta: KeyMetadata
+        do { meta = try Self.loadMetadata(alias: alias) } catch {
+            return call.reject("Key not found", "E_KEY_NOT_FOUND")
+        }
+        guard meta.type == type else { return call.reject("Key type mismatch", "E_TYPE_MISMATCH") }
+
         // prompt only for a biometric key; a silent key signs with a fresh (unevaluated) context and
         // the SEP releases it while the device is unlocked, no prompt
-        if (try? Self.loadMetadata(alias: alias).requireBiometric) ?? true {
+        if meta.requireBiometric {
             Self.authenticate(reason: reason) { result in
                 switch result {
                 case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
