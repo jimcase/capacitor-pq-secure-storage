@@ -89,7 +89,8 @@ class PqSecureStoragePlugin : Plugin() {
     }
 
     private fun sigPrefs() = context.getSharedPreferences("pq_sig", android.content.Context.MODE_PRIVATE)
-    private fun sigWrapAlias(alias: String) = "__pq_sigwrap_$alias"
+    private fun sigWrapVerKey(alias: String) = "$alias.wrapver"
+    private fun sigWrapAliasFor(alias: String) = Policy.sigWrapAlias(alias, sigPrefs().getInt(sigWrapVerKey(alias), -1))
     private fun sigPrivKey(alias: String) = "$alias.priv"
     private fun sigPubKey(alias: String) = "$alias.pub"
     private fun sigTypeKey(alias: String) = "$alias.type"
@@ -110,9 +111,11 @@ class PqSecureStoragePlugin : Plugin() {
             val runGeneration: () -> Unit = {
                 try {
                     val (seed, pub) = ed25519Keygen()
-                    val ks = keystore()
-                    if (ks.containsAlias(sigWrapAlias(alias))) ks.deleteEntry(sigWrapAlias(alias))
-                    val wrapKey = getOrCreateAesKey(sigWrapAlias(alias), requireBiometric)
+                    // a fresh wrap key per generation. The live one is retired only after the new state
+                    // is committed, so a cancelled or failed replacement leaves the old key signing.
+                    val oldVer = sigPrefs().getInt(sigWrapVerKey(alias), -1)
+                    val newVer = oldVer + 1
+                    val wrapKey = createFreshAesKey(Policy.sigWrapAlias(alias, newVer), requireBiometric)
                     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                     cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
                     val persist = { c: Cipher ->
@@ -123,7 +126,17 @@ class PqSecureStoragePlugin : Plugin() {
                             .putString(sigPubKey(alias), Base64.encodeToString(pub, Base64.NO_WRAP))
                             .putString(sigTypeKey(alias), type)
                             .putString(sigTagKey(alias), pubTag("sig:$alias", pub))
+                            .putInt(sigWrapVerKey(alias), newVer)
                             .commit()
+                        if (committed) {
+                            try {
+                                val ks = keystore()
+                                val oldAlias = Policy.sigWrapAlias(alias, oldVer)
+                                if (ks.containsAlias(oldAlias)) ks.deleteEntry(oldAlias)
+                            } catch (e: Exception) {
+                                logd("sig wrap rotate cleanup failed", e)
+                            }
+                        }
                         sigGenerating.remove(alias)
                         if (committed) {
                             val ret = JSObject()
@@ -151,7 +164,7 @@ class PqSecureStoragePlugin : Plugin() {
                     call.reject("Key generation failed", "E_KEYGEN")
                 }
             }
-            val existingWrap = if (exists) (try { keystore().getKey(sigWrapAlias(alias), null) as? SecretKey } catch (e: Exception) { null }) else null
+            val existingWrap = if (exists) (try { keystore().getKey(sigWrapAliasFor(alias), null) as? SecretKey } catch (e: Exception) { null }) else null
             if (existingWrap != null && secretKeyRequiresAuth(existingWrap)) {
                 val host = activity as? FragmentActivity
                 if (host == null) {
@@ -190,7 +203,7 @@ class PqSecureStoragePlugin : Plugin() {
             val wrapped = Base64.decode(privB64, Base64.DEFAULT)
             val iv = wrapped.copyOfRange(0, 12)
             val ct = wrapped.copyOfRange(12, wrapped.size)
-            val wrapKey = keystore().getKey(sigWrapAlias(alias), null) as? SecretKey
+            val wrapKey = keystore().getKey(sigWrapAliasFor(alias), null) as? SecretKey
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, wrapKey, GCMParameterSpec(128, iv))
@@ -972,21 +985,22 @@ class PqSecureStoragePlugin : Plugin() {
 
     private fun getOrCreateAtRestKey(alias: String): SecretKey = getOrCreateAesKey(atRestAlias(alias), false)
 
-    private fun createKemWrapKey(alias: String, ver: Int, requireBiometric: Boolean): SecretKey {
-        // a fresh wrap key per generation (versioned alias). On overwrite the old version is
-        // deleted after the new keypair is persisted, so a restored pre-rotation wrapped-private
-        // can no longer be unwrapped. Clear any orphan at this version first (cancelled attempt).
+    // a fresh wrap key per generation (versioned alias). On overwrite the old version is deleted
+    // after the new state is persisted, so a restored pre-rotation wrapped private can no longer be
+    // unwrapped. Clears any orphan at this version first (cancelled attempt).
+    private fun createKemWrapKey(alias: String, ver: Int, requireBiometric: Boolean): SecretKey =
+        createFreshAesKey(kemWrapAlias(alias, ver), requireBiometric)
+
+    // always creates: an existing key under this alias is an orphan of a cancelled attempt
+    private fun createFreshAesKey(alias: String, authRequired: Boolean): SecretKey {
         val ks = keystore()
-        if (ks.containsAlias(kemWrapAlias(alias, ver))) ks.deleteEntry(kemWrapAlias(alias, ver))
+        if (ks.containsAlias(alias)) ks.deleteEntry(alias)
         val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        val spec = KeyGenParameterSpec.Builder(
-            kemWrapAlias(alias, ver),
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-        )
+        val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
-        if (requireBiometric) {
+        if (authRequired) {
             // per-op biometric bound to the cipher (same GHSA-safe pattern as sign())
             spec.setUserAuthenticationRequired(true)
                 .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)

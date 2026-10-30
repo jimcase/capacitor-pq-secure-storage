@@ -20,4 +20,11 @@ internal object Policy {
     // Signature.getInstance("EC") does not exist, so the overwrite gate could never sign for it.
     fun signatureAlgoFor(keyAlgorithm: String): String =
         if (keyAlgorithm == "EC") "SHA256withECDSA" else keyAlgorithm
+
+    // Alias of the Keystore key that wraps an Ed25519 seed. Each generation gets its own versioned
+    // key, so the live one survives until the new state is committed. A key made before this was
+    // versioned has no version in prefs (-1) and keeps the plain alias. User aliases cannot hold a
+    // dot, so a versioned alias never collides with another alias's plain one.
+    fun sigWrapAlias(alias: String, ver: Int): String =
+        if (ver < 0) "__pq_sigwrap_$alias" else "__pq_sigwrap_$alias.$ver"
 }
