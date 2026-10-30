@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [8.1.0] - 2026-10-30
+
+Fixes from a security audit of 8.0.0 (18 findings, none critical). Same code as 7.1.0, only the build
+tooling differs. Frames sealed by earlier Android builds with `encryptTo` no longer decrypt, see Fixed.
+
 ### Security
 
 - Bumped BouncyCastle (`bcprov-jdk18on`) 1.84 -> 1.85 to stay on the latest release. 1.84 already
