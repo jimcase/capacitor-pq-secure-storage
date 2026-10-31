@@ -73,6 +73,24 @@ describe('web software fallback', () => {
         await expect(pq.generateKeyPair({ keyAlias: 'k', type: 'PQC_MLDSA_65' })).rejects.toThrow();
     });
 
+    it('generateKeyPair refuses to swap a hardware-class alias for Ed25519 even with overwrite', async () => {
+        const w = web();
+        await w.generateKeyPair({ keyAlias: 'id', type: 'PQC_MLDSA_65' });
+        await expect(w.generateKeyPair({ keyAlias: 'id', type: 'ED25519', overwrite: true })).rejects.toThrow(
+            'Alias already exists',
+        );
+        await expect(
+            w.generateKeyPair({ keyAlias: 'id', type: 'PQC_MLDSA_65', overwrite: true }),
+        ).resolves.toBeTruthy();
+    });
+
+    it('overwrite still replaces a corrupt signing record', async () => {
+        const storage = new MemoryStorage();
+        const w = new PqSecureStorageWeb(storage);
+        storage.setItem('pqss.sign.id', 'not json');
+        await expect(w.generateKeyPair({ keyAlias: 'id', type: 'ED25519', overwrite: true })).resolves.toBeTruthy();
+    });
+
     it('round-trips at-rest encryption', async () => {
         const pq = web();
         const { ciphertext } = await pq.encryptAtRest({ keyAlias: 'a', data: b64('rest') });

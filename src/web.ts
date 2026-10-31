@@ -179,6 +179,16 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         if (!options.overwrite && this.store.getItem(`pqss.sign.${alias}`) !== null) {
             throw this.unavailable('Alias already exists');
         }
+        let existing: string | undefined;
+        try {
+            existing = this.getKeypair('pqss.sign', alias)?.type;
+        } catch {
+            // corrupt record has no class, let overwrite replace it
+        }
+        // like native: an alias keeps its class (Ed25519 vs the rest) even with overwrite
+        if (existing !== undefined && (existing === 'ED25519') !== (options.type === 'ED25519')) {
+            throw this.unavailable('Alias already exists');
+        }
         const kp = dsaOf(options.type).keygen();
         this.putKeypair('pqss.sign', alias, kp.secretKey, kp.publicKey, options.type);
         return { publicKey: toB64(kp.publicKey) };
