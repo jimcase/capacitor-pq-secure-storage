@@ -1370,9 +1370,13 @@ class PqSecureStoragePlugin : Plugin() {
         val alias = itemKeyAlias(key)
         val itemKey = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
         val del = {
-            try { keystore().deleteEntry(alias) } catch (e: Exception) { logd("removeItem: key delete failed", e) }
-            storeItems().edit().remove(nameTag(key)).commit()
-            call.resolve()
+            val removed = storeItems().edit().remove(nameTag(key)).commit()
+            if (removed) {
+                try { keystore().deleteEntry(alias) } catch (e: Exception) { logd("removeItem: key delete failed", e) }
+                call.resolve()
+            } else {
+                call.reject("Remove failed", "E_REMOVE")
+            }
         }
         if (itemKey == null || !isAuthRequired(itemKey)) { del(); return }
         val hostActivity = activity as? FragmentActivity
