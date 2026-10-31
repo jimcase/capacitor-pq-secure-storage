@@ -327,10 +327,10 @@ keypairs (use that for KERI rotation, one alias per key).
 for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
 the device is unlocked. It cannot be changed after creation, and overwriting a biometric key
 prompts (a silent one overwrites silently). When the new key drops the biometric gate the
-prompt says so on Android and Touch ID, but Face ID shows no text, so confirm a downgrade in
-your own UI before calling. `overwrite` and `requireBiometric` must be booleans when given;
-anything else rejects `E_INVALID_ARGS`. On Android a new wrapped Ed25519 alias past 256
-existing ones rejects `E_STORE_FULL`.
+prompt says so on Android and Touch ID, but Face ID does not show this text (no dialog on a
+first-try success), so confirm a downgrade in your own UI before calling. `overwrite` and
+`requireBiometric` must be booleans when given; anything else rejects `E_INVALID_ARGS`. On
+Android a new wrapped Ed25519 alias past 256 existing ones rejects `E_STORE_FULL`.
 
 | Param         | Type                                                                                                                                  |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
@@ -426,8 +426,9 @@ Generate an ML-KEM keypair under an alias and return the raw public key. Rejects
 exists unless `overwrite` is true. `requireBiometric` (default `true`) is baked into the key:
 `true` makes every `decrypt` prompt; `false` decrypts silently while the device is unlocked.
 Overwriting a biometric key prompts. When the new key drops the biometric gate the prompt says
-so on Android and Touch ID, but Face ID shows no text, so confirm a downgrade in your own UI
-before calling. On Android a new alias past 256 existing ones rejects `E_STORE_FULL`.
+so on Android and Touch ID, but Face ID does not show this text (no dialog on a first-try
+success), so confirm a downgrade in your own UI before calling. On Android a new alias past
+256 existing ones rejects `E_STORE_FULL`.
 
 | Param         | Type                                                                                                                      |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------- |
