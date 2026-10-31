@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PqSecureStorageWeb } from '../src/web';
 import { enhance } from '../src/enhance';
+import type { PqSecureStoragePlugin } from '../src/definitions';
 
 class MemoryStorage implements Storage {
     private m = new Map<string, string>();
@@ -26,6 +27,20 @@ class MemoryStorage implements Storage {
 }
 
 const make = () => enhance(new PqSecureStorageWeb(new MemoryStorage()));
+
+// native stub over a Set, removeItem of `failKey` rejects and leaves the item
+const stubNative = (failKey?: string) => {
+    const items = new Set(['lib_a', 'lib_b', 'lib_c', 'host_x']);
+    const native = {
+        keys: async () => ({ keys: [...items] }),
+        removeItem: async ({ key }: { key: string }) => {
+            if (key === failKey) throw Object.assign(new Error('auth'), { code: 'E_AUTH_FAILED' });
+            items.delete(key);
+        },
+        clear: async () => items.clear(),
+    } as unknown as PqSecureStoragePlugin;
+    return { native, items };
+};
 
 describe('key prefix', () => {
     it('getKeyPrefix reflects setKeyPrefix; default is empty', async () => {
@@ -119,5 +134,19 @@ describe('withPrefix', () => {
 
     it('setKeyPrefix rejects a prefix that is not a string', async () => {
         await expect(make().setKeyPrefix(undefined as unknown as string)).rejects.toThrow(TypeError);
+    });
+
+    it('clear() on a view tries every item before rejecting', async () => {
+        const { native, items } = stubNative('lib_b');
+        const view = enhance(native).withPrefix('lib_');
+        await expect(view.clear()).rejects.toMatchObject({ code: 'E_AUTH_FAILED' });
+        expect([...items]).toEqual(['lib_b', 'host_x']);
+    });
+
+    it('clear() on a view resolves when every removal succeeds', async () => {
+        const { native, items } = stubNative();
+        const view = enhance(native).withPrefix('lib_');
+        await expect(view.clear()).resolves.toBeUndefined();
+        expect([...items]).toEqual(['host_x']);
     });
 });
