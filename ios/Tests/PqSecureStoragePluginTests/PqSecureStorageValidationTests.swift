@@ -74,6 +74,16 @@ final class PqSecureStorageValidationTests: XCTestCase {
         XCTAssertEqual(code, "E_INVALID_ARGS")
     }
 
+    func testSignRejectsUndecodableDataAsInvalidArgs() {
+        let code = reject(options: ["keyAlias": "audit-a", "data": "***", "type": "PQC_MLDSA_65"]) { $0.sign($1) }
+        XCTAssertEqual(code, "E_INVALID_ARGS")
+    }
+
+    func testEncryptToRejectsAnUndecodableRecipientKeyAsInvalidArgs() {
+        let code = reject(options: ["recipientPublicKey": "***", "type": "PQC_MLKEM_768", "data": "AA=="]) { $0.encryptTo($1) }
+        XCTAssertEqual(code, "E_INVALID_ARGS")
+    }
+
     // biometric gating needs an enrolled biometric, not just a Secure Enclave
 
     func testBiometricGatedFollowsEnrollmentNotJustTheEnclave() {

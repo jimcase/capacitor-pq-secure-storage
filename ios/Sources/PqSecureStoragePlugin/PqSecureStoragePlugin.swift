@@ -379,8 +379,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
-        guard let raw = Data(base64Encoded: dataStr) else {
-            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        guard let raw = InputPolicy.base64Data(dataStr) else {
+            return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
@@ -445,8 +445,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
-        guard let raw = Data(base64Encoded: dataStr) else {
-            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        guard let raw = InputPolicy.base64Data(dataStr) else {
+            return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
@@ -470,8 +470,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
-        guard let raw = Data(base64Encoded: dataStr) else {
-            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        guard let raw = InputPolicy.base64Data(dataStr) else {
+            return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
@@ -557,12 +557,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard InputPolicy.recipientKeyWithinLimit(pubStr) else { return call.reject("Invalid public key", "E_INVALID_ARGS") }
-        guard let pub = Data(base64Encoded: pubStr) else {
-            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        guard let pub = InputPolicy.base64Data(pubStr) else {
+            return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
         guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
-        guard let raw = Data(base64Encoded: dataStr) else {
-            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        guard let raw = InputPolicy.base64Data(dataStr) else {
+            return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
         guard type == "PQC_MLKEM_768" || type == "PQC_MLKEM_1024" else {
@@ -590,8 +590,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
-        guard let frame = Data(base64Encoded: dataStr) else {
-            return call.reject("Missing required parameters", "E_MISSING_PARAMS")
+        guard let frame = InputPolicy.base64Data(dataStr) else {
+            return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard #available(iOS 26.0, *) else { return call.reject("iOS 26 or later required", "E_UNSUPPORTED") }
@@ -1370,7 +1370,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Missing key", "E_MISSING_PARAMS"); return
         }
         guard let account = try? Self.nameTag(key) else {
-            call.reject("Remove failed", "E_DECRYPT"); return
+            call.reject("Remove failed", "E_REMOVE"); return
         }
         // UIFail + return-data probe tells us the tier without prompting: NotFound = absent,
         // Success = silent, InteractionNotAllowed = biometric. Data must be requested so the biometry
@@ -1391,7 +1391,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrAccount as String: account,
             ]
             let status = SecItemDelete(query as CFDictionary)
-            if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Remove failed", "E_DECRYPT") }
+            if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Remove failed", "E_REMOVE") }
         }
         let confirmDel: () -> Void = {
             Self.authenticate(reason: "Authenticate to delete your secret") { result in
@@ -1417,7 +1417,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 } else {
                     confirmDel()
                 }
-            default: call.reject("Remove failed", "E_DECRYPT")
+            default: call.reject("Remove failed", "E_REMOVE")
             }
         case errSecInteractionNotAllowed:
             // biometric item: confirm so a silent bridge caller can't delete it
@@ -1427,7 +1427,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             del()
         default:
             // unexpected status: fail closed rather than deleting an item we couldn't classify
-            call.reject("Remove failed", "E_DECRYPT")
+            call.reject("Remove failed", "E_REMOVE")
         }
     }
 
@@ -1489,7 +1489,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             for acct in [Self.nameEncAccount, Self.nameTagAccount] {
                 SecItemDelete(Self.baseQuery(account: acct) as CFDictionary)
             }
-            if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Clear failed", "E_DECRYPT") }
+            if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Clear failed", "E_CLEAR") }
         }
         // enumerate without a prompt, then probe each item for its tier (a batch data read over a mixed
         // store has fuzzy semantics). UIFail and not UISkip: UISkip may hide ACL items from the list and
@@ -1510,13 +1510,13 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             hasBiometric = true
         } else {
             guard listStatus == errSecSuccess, let found = listOut as? [[String: Any]] else {
-                return call.reject("Clear failed", "E_DECRYPT")
+                return call.reject("Clear failed", "E_CLEAR")
             }
             items = found
         }
         for item in items {
             guard let account = item[kSecAttrAccount as String] as? String else {
-                return call.reject("Clear failed", "E_DECRYPT") // unclassifiable -> fail closed
+                return call.reject("Clear failed", "E_CLEAR") // unclassifiable -> fail closed
             }
             let probe: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
@@ -1529,7 +1529,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             switch SecItemCopyMatching(probe as CFDictionary, nil) {
             case errSecInteractionNotAllowed: hasBiometric = true
             case errSecSuccess, errSecItemNotFound: break
-            default: return call.reject("Clear failed", "E_DECRYPT") // fail closed on unexpected
+            default: return call.reject("Clear failed", "E_CLEAR") // fail closed on unexpected
             }
         }
         if hasBiometric {

@@ -50,4 +50,14 @@ final class InputPolicyTests: XCTestCase {
         XCTAssertEqual(InputPolicy.promptReason("  sign this  ", default: "d"), "sign this")
         XCTAssertEqual(InputPolicy.promptReason(String(repeating: "x", count: 300), default: "d").count, 200)
     }
+
+    func testBase64AcceptsLineBreaksAndMissingPaddingLikeAndroid() {
+        XCTAssertEqual(InputPolicy.base64Data("aGVs\r\nbG8="), Data("hello".utf8))
+        XCTAssertEqual(InputPolicy.base64Data("aGVsbG8"), Data("hello".utf8))
+    }
+
+    func testBase64RejectsTheUrlSafeAlphabetAndGarbage() {
+        XCTAssertNil(InputPolicy.base64Data("aGVs_bG8="))
+        XCTAssertNil(InputPolicy.base64Data("***"))
+    }
 }
