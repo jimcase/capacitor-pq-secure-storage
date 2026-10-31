@@ -525,7 +525,8 @@ getItem(options: { key: string; }) => Promise<{ value: string | null; }>
 Read a stored secret. Prompts for biometrics only if the item was stored with
 `requireBiometric: true`. Returns `null` if the key is absent. NOTE: the plaintext is
 returned to the JS caller, so a compromised webview sees it; the host should minimize how
-long the value lives in JS.
+long the value lives in JS. Rejects `E_KEY_INVALIDATED` if the item was stored with a
+biometric that has since changed.
 
 | Param         | Type                          |
 | ------------- | ----------------------------- |
@@ -666,7 +667,7 @@ Every rejection carries a `code`:
 | `E_INVALID_ARGS` | Key or value out of bounds |
 | `E_BAD_ALIAS` | Reserved or invalid key alias |
 | `E_AUTH_FAILED` | Biometric cancelled or failed |
-| `E_KEY_INVALIDATED` | Biometric enrollment changed since the key was created |
+| `E_KEY_INVALIDATED` | Biometric enrollment changed since the key was created. On iOS, `getItem`/`setItem` of an item whose biometric set changed |
 | `E_ENCRYPT` | Encryption failed |
 | `E_DECRYPT` | Decryption failed, or a tampered / GCM-tag mismatch |
 | `E_KEYGEN` | Key generation failed |
