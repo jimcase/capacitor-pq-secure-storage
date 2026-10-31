@@ -28,18 +28,25 @@ class MemoryStorage implements Storage {
 
 const make = () => enhance(new PqSecureStorageWeb(new MemoryStorage()));
 
-// native stub over a Set, removeItem of `failKey` rejects and leaves the item
-const stubNative = (failKey?: string) => {
+// native stub over a Set, removeItem of a key in `fail` rejects with its code and leaves the item.
+// also counts the removeItem calls in flight at once
+const stubNative = (fail: Record<string, string> = {}) => {
     const items = new Set(['lib_a', 'lib_b', 'lib_c', 'host_x']);
+    let inFlight = 0;
+    let maxInFlight = 0;
     const native = {
         keys: async () => ({ keys: [...items] }),
         removeItem: async ({ key }: { key: string }) => {
-            if (key === failKey) throw Object.assign(new Error('auth'), { code: 'E_AUTH_FAILED' });
+            inFlight++;
+            maxInFlight = Math.max(maxInFlight, inFlight);
+            await Promise.resolve();
+            inFlight--;
+            if (fail[key]) throw Object.assign(new Error('fail'), { code: fail[key] });
             items.delete(key);
         },
         clear: async () => items.clear(),
     } as unknown as PqSecureStoragePlugin;
-    return { native, items };
+    return { native, items, maxInFlight: () => maxInFlight };
 };
 
 describe('key prefix', () => {
@@ -137,7 +144,7 @@ describe('withPrefix', () => {
     });
 
     it('clear() on a view tries every item before rejecting', async () => {
-        const { native, items } = stubNative('lib_b');
+        const { native, items } = stubNative({ lib_b: 'E_AUTH_FAILED' });
         const view = enhance(native).withPrefix('lib_');
         await expect(view.clear()).rejects.toMatchObject({ code: 'E_AUTH_FAILED' });
         expect([...items]).toEqual(['lib_b', 'host_x']);
@@ -148,5 +155,25 @@ describe('withPrefix', () => {
         const view = enhance(native).withPrefix('lib_');
         await expect(view.clear()).resolves.toBeUndefined();
         expect([...items]).toEqual(['host_x']);
+    });
+
+    it('clear() on a view removes one item at a time', async () => {
+        const { native, items, maxInFlight } = stubNative();
+        await enhance(native).withPrefix('lib_').clear();
+        expect(maxInFlight()).toBe(1);
+        expect([...items]).toEqual(['host_x']);
+    });
+
+    it('clear() on a view rejects with the first failure in key order', async () => {
+        const { native, items } = stubNative({ lib_a: 'E_AUTH_FAILED', lib_c: 'E_REMOVE' });
+        const view = enhance(native).withPrefix('lib_');
+        await expect(view.clear()).rejects.toMatchObject({ code: 'E_AUTH_FAILED' });
+        expect([...items]).toEqual(['lib_a', 'lib_c', 'host_x']);
+    });
+
+    it('clear() on a view with no matching items resolves and removes nothing', async () => {
+        const { native, items } = stubNative();
+        await expect(enhance(native).withPrefix('none_').clear()).resolves.toBeUndefined();
+        expect([...items]).toEqual(['lib_a', 'lib_b', 'lib_c', 'host_x']);
     });
 });
