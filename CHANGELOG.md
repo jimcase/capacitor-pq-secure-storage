@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [7.2.0] - 2026-10-31
+
+Fixes from the second security audit of 7.1.0 (14 findings, none critical). Same code as 8.2.0, only
+the build tooling differs.
+
 ### Security
 
 - Android store caps: 512 items and 16 MiB of stored text per store, and 256 KEM aliases and 256
