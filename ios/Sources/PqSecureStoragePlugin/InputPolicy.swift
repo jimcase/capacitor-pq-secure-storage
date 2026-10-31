@@ -45,11 +45,18 @@ enum InputPolicy {
     }
 
     // Base64 from JS the way Android reads it: spaces and line breaks skipped, missing padding
-    // accepted, the url-safe alphabet and anything else outside the standard one rejected. Works on
-    // utf8 bytes because Swift sees "\r\n" as a single Character.
+    // accepted, padding that does not fit the length rejected, the url-safe alphabet and anything
+    // else outside the standard one rejected. Works on utf8 bytes because Swift sees "\r\n" as a
+    // single Character.
     static func base64Data(_ s: String) -> Data? {
         var bytes = s.utf8.filter { $0 != 0x20 && $0 != 0x09 && $0 != 0x0D && $0 != 0x0A }
-        while bytes.count % 4 != 0 { bytes.append(0x3D) }
+        if bytes.last == 0x3D {
+            let pad = bytes.reversed().prefix { $0 == 0x3D }.count
+            guard bytes.count % 4 == 0, pad <= 2 else { return nil }
+        } else {
+            guard bytes.count % 4 != 1 else { return nil }
+            while bytes.count % 4 != 0 { bytes.append(0x3D) }
+        }
         return Data(base64Encoded: Data(bytes))
     }
 }

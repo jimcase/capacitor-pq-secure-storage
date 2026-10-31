@@ -54,6 +54,16 @@ final class InputPolicyTests: XCTestCase {
     func testBase64AcceptsLineBreaksAndMissingPaddingLikeAndroid() {
         XCTAssertEqual(InputPolicy.base64Data("aGVs\r\nbG8="), Data("hello".utf8))
         XCTAssertEqual(InputPolicy.base64Data("aGVsbG8"), Data("hello".utf8))
+        XCTAssertEqual(InputPolicy.base64Data("aGVsbA"), Data("hell".utf8))
+        XCTAssertEqual(InputPolicy.base64Data("aGVsbA=="), Data("hell".utf8))
+        XCTAssertEqual(InputPolicy.base64Data(""), Data())
+    }
+
+    // java.util.Base64 (the Android decoder) refuses padding that does not fit the length
+    func testBase64RejectsPaddingAndroidRejects() {
+        for bad in ["aGVsbA=", "aGVsbG8==", "aGVsbG8===", "aGVsbA===", "AAAA====", "====", "a", "aGVsb"] {
+            XCTAssertNil(InputPolicy.base64Data(bad), bad)
+        }
     }
 
     func testBase64RejectsTheUrlSafeAlphabetAndGarbage() {
