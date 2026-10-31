@@ -39,4 +39,15 @@ final class InputPolicyTests: XCTestCase {
         XCTAssertTrue(InputPolicy.recipientKeyWithinLimit(String(repeating: "A", count: 2092)))
         XCTAssertFalse(InputPolicy.recipientKeyWithinLimit(String(repeating: "A", count: 2201)))
     }
+
+    func testAnEmptyOrBlankDescriptionFallsBackToTheDefault() {
+        XCTAssertEqual(InputPolicy.promptReason("", default: "d"), "d")
+        XCTAssertEqual(InputPolicy.promptReason(" \n\t", default: "d"), "d")
+        XCTAssertEqual(InputPolicy.promptReason(nil, default: "d"), "d")
+    }
+
+    func testADescriptionIsTrimmedAndCappedAt200() {
+        XCTAssertEqual(InputPolicy.promptReason("  sign this  ", default: "d"), "sign this")
+        XCTAssertEqual(InputPolicy.promptReason(String(repeating: "x", count: 300), default: "d").count, 200)
+    }
 }
