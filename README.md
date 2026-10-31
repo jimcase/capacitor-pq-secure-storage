@@ -230,6 +230,8 @@ await mine.setItem({ key: 'token', value: 'abc' });
 await mine.clear(); // only the items under mylib_
 ```
 
+`clear()` on a view removes item by item: one prompt per biometric item, and a cancelled prompt leaves that item and rejects.
+
 `setKeyPrefix` / `getKeyPrefix` still work but are deprecated: they change one prefix shared by every
 caller that imports the module, the host app included.
 

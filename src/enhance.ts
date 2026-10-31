@@ -65,9 +65,17 @@ function scoped(
                 return;
             }
             const { keys } = await native.keys();
+            // one at a time, a biometric item opens its own prompt. Keep going after a failure.
+            let failed: { reason: unknown } | undefined;
             for (const k of keys) {
-                if (k.startsWith(state.prefix)) await native.removeItem({ key: k });
+                if (!k.startsWith(state.prefix)) continue;
+                try {
+                    await native.removeItem({ key: k });
+                } catch (reason) {
+                    failed ??= { reason };
+                }
             }
+            if (failed) throw failed.reason;
         },
 
         ...jsonMethods(store),
