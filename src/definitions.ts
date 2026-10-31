@@ -75,7 +75,8 @@ export interface PqSecureStoragePlugin {
      * for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
      * the device is unlocked. It cannot be changed after creation, and overwriting a biometric key
      * prompts (a silent one overwrites silently). `overwrite` and `requireBiometric` must be
-     * booleans when given; anything else rejects `E_INVALID_ARGS`.
+     * booleans when given; anything else rejects `E_INVALID_ARGS`. On Android a new wrapped Ed25519
+     * alias past 256 existing ones rejects `E_STORE_FULL`.
      */
     generateKeyPair(options: {
         keyAlias: string;
@@ -116,6 +117,7 @@ export interface PqSecureStoragePlugin {
      * Generate an ML-KEM keypair under an alias and return the raw public key. Rejects if the alias
      * exists unless `overwrite` is true. `requireBiometric` (default `true`) is baked into the key:
      * `true` makes every `decrypt` prompt; `false` decrypts silently while the device is unlocked.
+     * On Android a new alias past 256 existing ones rejects `E_STORE_FULL`.
      */
     generateKemKeyPair(options: {
         keyAlias: string;
@@ -155,7 +157,8 @@ export interface PqSecureStoragePlugin {
      * per item on both platforms (set when the item is first created).
      *
      * On Android the item NAME is not stored in the clear: the prefs key is a keyed hash of the
-     * name, so a prefs reader sees neither the values nor the names.
+     * name, so a prefs reader sees neither the values nor the names. The Android store holds at most
+     * 512 items and 16 MiB of stored text; a write past that rejects `E_STORE_FULL`.
      */
     setItem(options: {
         key: string;

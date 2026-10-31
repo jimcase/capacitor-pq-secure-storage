@@ -323,7 +323,8 @@ keypairs (use that for KERI rotation, one alias per key).
 for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
 the device is unlocked. It cannot be changed after creation, and overwriting a biometric key
 prompts (a silent one overwrites silently). `overwrite` and `requireBiometric` must be
-booleans when given; anything else rejects `E_INVALID_ARGS`.
+booleans when given; anything else rejects `E_INVALID_ARGS`. On Android a new wrapped Ed25519
+alias past 256 existing ones rejects `E_STORE_FULL`.
 
 | Param         | Type                                                                                                                                  |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
@@ -418,6 +419,7 @@ generateKemKeyPair(options: { keyAlias: string; type: KemType; overwrite?: boole
 Generate an ML-KEM keypair under an alias and return the raw public key. Rejects if the alias
 exists unless `overwrite` is true. `requireBiometric` (default `true`) is baked into the key:
 `true` makes every `decrypt` prompt; `false` decrypts silently while the device is unlocked.
+On Android a new alias past 256 existing ones rejects `E_STORE_FULL`.
 
 | Param         | Type                                                                                                                      |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -504,7 +506,8 @@ The silent default exists for drop-in migration, not because silent is safe for 
 per item on both platforms (set when the item is first created).
 
 On Android the item NAME is not stored in the clear: the prefs key is a keyed hash of the
-name, so a prefs reader sees neither the values nor the names.
+name, so a prefs reader sees neither the values nor the names. The Android store holds at most
+512 items and 16 MiB of stored text; a write past that rejects `E_STORE_FULL`.
 
 | Param         | Type                                                                                                                                 |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -678,6 +681,8 @@ Every rejection carries a `code`:
 | `E_CLEAR` | `clear` failed |
 | `E_TIER_MISMATCH` | `setItem` on an item stored with a different `requireBiometric` (call `removeItem` first) |
 | `E_BUSY` | A keygen for the same alias is already in flight |
+| `E_STORE_FULL` | Store or alias limit reached: 512 items / 16 MiB per store, 256 aliases per key kind |
+| `E_INPUT_TOO_LARGE` | Base64 input above the 10 MiB decoded cap |
 
 ## Testing
 

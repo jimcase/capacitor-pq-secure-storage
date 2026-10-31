@@ -36,4 +36,20 @@ internal object Policy {
         is Boolean -> raw
         else -> null
     }
+
+    const val MAX_STORE_ITEMS = 512
+    const val MAX_STORE_TOTAL_CHARS = 16 * 1024 * 1024
+    const val MAX_ALIASES_PER_KIND = 256
+
+    // Upper bound of the text an item adds to the prefs file: base64 of the ciphertext and of the
+    // encrypted name, the IV and the separators. It overestimates on purpose.
+    fun storedEntryEstimate(keyUtf8: Int, valueUtf8: Int): Int = 4 * (keyUtf8 + valueUtf8) / 3 + 128
+
+    // Whether a write still fits. [charsNow] must not count the entry being replaced.
+    fun storeHasRoom(itemsNow: Int, charsNow: Long, replacing: Boolean, newEntryChars: Int): Boolean {
+        val items = if (replacing) itemsNow else itemsNow + 1
+        return items <= MAX_STORE_ITEMS && charsNow + newEntryChars <= MAX_STORE_TOTAL_CHARS
+    }
+
+    fun canAddAlias(pubCount: Int, exists: Boolean): Boolean = exists || pubCount < MAX_ALIASES_PER_KIND
 }
