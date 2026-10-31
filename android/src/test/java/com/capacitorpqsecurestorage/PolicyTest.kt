@@ -127,4 +127,6 @@ class PolicyTest {
     @Test fun storeAcceptsExactlyTheTextBudget() { assertTrue(Policy.storeHasRoom(1, Policy.MAX_STORE_TOTAL_CHARS - 10L, replacing = false, newEntryChars = 10)) }
     @Test fun entryEstimateCoversTheBase64Growth() { assertTrue(Policy.storedEntryEstimate(10, 262144) >= 349_600) }
     @Test fun aliasCapAllowsAnOverwrite() { assertTrue(Policy.canAddAlias(256, exists = true)); assertFalse(Policy.canAddAlias(256, exists = false)) }
+    @Test fun ecKeyMatchesOnlyEcdsa() { assertFalse(Policy.hardwareTypeMismatch("EC", 33, "ECDSA_256R1")); assertTrue(Policy.hardwareTypeMismatch("EC", 33, "PQC_MLDSA_65")) }
+    @Test fun mldsaIsToldApartByPublicKeyLength() { assertFalse(Policy.hardwareTypeMismatch("ML-DSA", 1952, "PQC_MLDSA_65")); assertTrue(Policy.hardwareTypeMismatch("ML-DSA", 1952, "PQC_MLDSA_87")) }
 }

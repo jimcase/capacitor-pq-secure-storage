@@ -204,7 +204,8 @@ class PqSecureStoragePlugin : Plugin() {
     private fun signWrapped(alias: String, description: String?, input: ByteArray, call: PluginCall) {
         try {
             val privB64 = sigPrefs().getString(sigPrivKey(alias), null)
-                ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
+                ?: return if (keystore().containsAlias(alias)) call.reject("Key type mismatch", "E_TYPE_MISMATCH")
+                else call.reject("Key not found", "E_KEY_NOT_FOUND")
             val wrapped = Base64.decode(privB64, Base64.DEFAULT)
             val iv = wrapped.copyOfRange(0, 12)
             val ct = wrapped.copyOfRange(12, wrapped.size)
@@ -506,7 +507,7 @@ class PqSecureStoragePlugin : Plugin() {
                 return call.resolve(ret)
             }
             val ks = keystore()
-            val cert = ks.getCertificate(alias) ?: return call.reject("Key not found", "E_PUBKEY")
+            val cert = ks.getCertificate(alias) ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val pub = cert.publicKey
             val pubRaw = if (pub is java.security.interfaces.ECPublicKey) compressEcPoint(pub) else rawFromSpki(pub.encoded)
             val ret = JSObject()
@@ -534,6 +535,12 @@ class PqSecureStoragePlugin : Plugin() {
         try {
             val priv = keystore().getKey(alias, null) as? java.security.PrivateKey
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
+            // the Keystore keeps no type for the key, so compare the asked one with the key itself
+            val pub = (keystore().getCertificate(alias) ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")).publicKey
+            val rawLen = if (pub is java.security.interfaces.ECPublicKey) 33 else rawFromSpki(pub.encoded).size
+            if (Policy.hardwareTypeMismatch(priv.algorithm, rawLen, type)) {
+                return call.reject("Key type mismatch", "E_TYPE_MISMATCH")
+            }
             // initSign() does NOT unlock the key -- the Keystore only releases material inside
             // sign()/update(), and (for a biometric key) only for the Signature a real match bound.
             val signer = Signature.getInstance(sa.signatureAlgo)
