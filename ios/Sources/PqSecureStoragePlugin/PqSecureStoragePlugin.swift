@@ -734,21 +734,17 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         let publicKey: Data
         let requireBiometric: Bool
         let tag: Data?
+        let wrapVersion: Int
     }
 
-    // the public entry's generic attr holds "type:0|1:tagB64". The bio flag is only a prompt hint
-    // (the SEP enforces the real gate); the tag is an HMAC over the stored public key so a tampered
-    // public entry is detected on read. base64 never contains ':', so the split is unambiguous.
-    private static func encodeGeneric(type: String, requireBiometric: Bool, tag: Data) -> Data {
-        Data("\(type):\(requireBiometric ? "1" : "0"):\(tag.base64EncodedString())".utf8)
+    // the public entry's generic attr holds "type:0|1:tagB64" (wrapped keys add ":ver", see
+    // KeyGeneric). The bio flag is only a prompt hint (the SEP enforces the real gate); the tag is an
+    // HMAC over the stored public key so a tampered public entry is detected on read.
+    private static func encodeGeneric(type: String, requireBiometric: Bool, tag: Data, wrapVersion: Int = -1) -> Data {
+        KeyGeneric.encode(type: type, requireBiometric: requireBiometric, tag: tag, wrapVersion: wrapVersion)
     }
-    private static func decodeGeneric(_ data: Data) -> (type: String, requireBiometric: Bool, tag: Data?)? {
-        guard let s = String(data: data, encoding: .utf8) else { return nil }
-        let parts = s.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
-        guard let type = parts.first else { return nil }
-        let bio = parts.count > 1 ? parts[1] == "1" : true // old entries default to bio
-        let tag = parts.count > 2 ? Data(base64Encoded: String(parts[2])) : nil
-        return (String(type), bio, tag)
+    private static func decodeGeneric(_ data: Data) -> (type: String, requireBiometric: Bool, tag: Data?, wrapVersion: Int)? {
+        KeyGeneric.decode(data)
     }
 
     private static func privateAccount(for alias: String) -> String { "\(alias).private" }
@@ -926,7 +922,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let decoded = decodeGeneric(typeData) else {
             throw PqSecureStorageError.keyNotFound
         }
-        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: -1)
     }
 
     @available(iOS 26.0, *)
@@ -954,7 +950,9 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     // biometry access control (tier=wrapped): protected at rest by the device keybag, gated on read.
     // The public entry carries the SEP-signed integrity tag, like the SEP keys.
 
-    private static func wrapPrivAccount(_ alias: String) -> String { "\(alias).sigwrap.priv" }
+    private static func wrapPrivAccount(_ alias: String, version: Int) -> String {
+        KeyGeneric.wrapPrivAccount(alias: alias, version: version)
+    }
     private static func wrapPubAccount(_ alias: String) -> String { "\(alias).sigwrap.pub" }
 
     private static func loadWrapMetadata(alias: String) throws -> KeyMetadata {
@@ -964,20 +962,21 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
+        // keyNotFound only when the entry is really missing. persistWrapped must not guess the version
+        // of an entry it could not read (locked device), its orphan cleanup could hit the live private
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw PqSecureStorageError.keychain(status) }
         guard status == errSecSuccess, let item = result as? [String: Any],
               let pubData = item[kSecValueData as String] as? Data,
               let typeData = item[kSecAttrGeneric as String] as? Data,
               let decoded = decodeGeneric(typeData) else { throw PqSecureStorageError.keyNotFound }
-        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: decoded.wrapVersion)
     }
 
+    // SecItemUpdate can't change the ACL of an item, so the private can't be upserted. It goes
+    // under the next account version, then the public moves to that version, then the old private
+    // goes. A failed add (no biometry enrolled) or a crash in between keeps the old pair working.
     private static func persistWrapped(alias: String, type: String, requireBiometric: Bool, priv: Data, pub: Data) throws {
         let tag = try pubTag(type: type, requireBiometric: requireBiometric, pub: pub)
-        let pubStatus = upsertKeychain(account: wrapPubAccount(alias), data: pub, attrs: [
-            kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: tag),
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-        ])
-        guard pubStatus == errSecSuccess else { throw PqSecureStorageError.keychain(pubStatus) }
         var privAttrs: [String: Any] = [:]
         if requireBiometric {
             guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .biometryCurrentSet, nil) else {
@@ -987,13 +986,26 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         } else {
             privAttrs[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         }
-        // deterministic ACL: delete-then-add (the overwrite is gated at the call site)
-        SecItemDelete(baseQuery(account: wrapPrivAccount(alias)) as CFDictionary)
-        var add = baseQuery(account: wrapPrivAccount(alias))
+        let oldVer: Int
+        do { oldVer = try loadWrapMetadata(alias: alias).wrapVersion } catch PqSecureStorageError.keyNotFound { oldVer = -1 }
+        let newVer = oldVer + 1
+        let newAcct = wrapPrivAccount(alias, version: newVer)
+        // orphan of an attempt that died before the public moved
+        SecItemDelete(baseQuery(account: newAcct) as CFDictionary)
+        var add = baseQuery(account: newAcct)
         add[kSecValueData as String] = priv
         for (k, v) in privAttrs { add[k] = v }
         let privStatus = SecItemAdd(add as CFDictionary, nil)
         guard privStatus == errSecSuccess else { throw PqSecureStorageError.keychain(privStatus) }
+        let pubStatus = upsertKeychain(account: wrapPubAccount(alias), data: pub, attrs: [
+            kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: tag, wrapVersion: newVer),
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        ])
+        guard pubStatus == errSecSuccess else {
+            SecItemDelete(baseQuery(account: newAcct) as CFDictionary)
+            throw PqSecureStorageError.keychain(pubStatus)
+        }
+        SecItemDelete(baseQuery(account: wrapPrivAccount(alias, version: oldVer)) as CFDictionary)
     }
 
     private func wrappedGenerate(alias: String, type: String, overwrite: Bool, requireBiometric: Bool, call: CAPPluginCall) {
@@ -1036,7 +1048,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 }
                 let context = LAContext()
                 context.localizedReason = reason
-                var q = Self.baseQuery(account: Self.wrapPrivAccount(alias))
+                var q = Self.baseQuery(account: Self.wrapPrivAccount(alias, version: meta.wrapVersion))
                 q[kSecReturnData as String] = true
                 q[kSecMatchLimit as String] = kSecMatchLimitOne
                 q[kSecUseAuthenticationContext as String] = context
@@ -1159,7 +1171,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let decoded = decodeGeneric(typeData) else {
             throw PqSecureStorageError.keyNotFound
         }
-        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: -1)
     }
 
     @available(iOS 26.0, *)
