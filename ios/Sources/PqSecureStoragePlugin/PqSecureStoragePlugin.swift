@@ -326,7 +326,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         // silent key isn't biometrically protected, so its overwrite is silent too
         let existingBio = exists && ((try? Self.loadMetadata(alias: alias).requireBiometric) ?? true)
         if existingBio {
-            Self.authenticate(reason: "Authenticate to replace your key") { result in
+            Self.authenticate(reason: InputPolicy.replacementReason(newRequiresBiometric: requireBiometric)) { result in
                 switch result {
                 case .failure:
                     call.reject("Authentication failed", "E_AUTH_FAILED")
@@ -523,7 +523,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         // gate the overwrite only when the existing key is biometric (a silent one overwrites silently)
         let existingBio = exists && ((try? Self.loadKemMetadata(alias: alias).requireBiometric) ?? true)
         if existingBio {
-            Self.authenticate(reason: "Authenticate to replace your key") { result in
+            Self.authenticate(reason: InputPolicy.replacementReason(newRequiresBiometric: requireBiometric)) { result in
                 switch result {
                 case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
                 case .success: doGenerate()
@@ -1028,7 +1028,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         // gate overwrite of an existing biometric wrapped key (bare evaluatePolicy -- see B2 note)
         let existingBio = exists && ((try? Self.loadWrapMetadata(alias: alias).requireBiometric) ?? true)
         if existingBio {
-            Self.authenticate(reason: "Authenticate to replace your key") { result in
+            Self.authenticate(reason: InputPolicy.replacementReason(newRequiresBiometric: requireBiometric)) { result in
                 switch result {
                 case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
                 case .success: doGenerate()

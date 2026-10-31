@@ -60,4 +60,12 @@ final class InputPolicyTests: XCTestCase {
         XCTAssertNil(InputPolicy.base64Data("aGVs_bG8="))
         XCTAssertNil(InputPolicy.base64Data("***"))
     }
+
+    func testTheReplacementPromptIsTheUsualOneWhenTheNewKeyStaysBiometric() {
+        XCTAssertEqual(InputPolicy.replacementReason(newRequiresBiometric: true), "Authenticate to replace your key")
+    }
+
+    func testTheReplacementPromptNamesTheDropWhenTheNewKeyIsSilent() {
+        XCTAssertEqual(InputPolicy.replacementReason(newRequiresBiometric: false), "Replace your key with one that does not require Face ID")
+    }
 }

@@ -129,4 +129,7 @@ class PolicyTest {
     @Test fun aliasCapAllowsAnOverwrite() { assertTrue(Policy.canAddAlias(256, exists = true)); assertFalse(Policy.canAddAlias(256, exists = false)) }
     @Test fun ecKeyMatchesOnlyEcdsa() { assertFalse(Policy.hardwareTypeMismatch("EC", 33, "ECDSA_256R1")); assertTrue(Policy.hardwareTypeMismatch("EC", 33, "PQC_MLDSA_65")) }
     @Test fun mldsaIsToldApartByPublicKeyLength() { assertFalse(Policy.hardwareTypeMismatch("ML-DSA", 1952, "PQC_MLDSA_65")); assertTrue(Policy.hardwareTypeMismatch("ML-DSA", 1952, "PQC_MLDSA_87")) }
+
+    @Test fun replacementPromptIsTheUsualOneWhenTheNewKeyStaysBiometric() { assertEquals("Authorize key replacement", Policy.replacementPrompt(true)) }
+    @Test fun replacementPromptNamesTheDropWhenTheNewKeyIsSilent() { assertEquals("Authorize replacing this key with one that signs without biometrics", Policy.replacementPrompt(false)) }
 }

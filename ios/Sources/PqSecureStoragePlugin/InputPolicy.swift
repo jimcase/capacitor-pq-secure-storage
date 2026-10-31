@@ -38,6 +38,12 @@ enum InputPolicy {
         return text.isEmpty ? def : text
     }
 
+    // Replacement prompt text. If the new key is silent it says so, so a downgrade does not look
+    // like a normal rotation.
+    static func replacementReason(newRequiresBiometric: Bool) -> String {
+        newRequiresBiometric ? "Authenticate to replace your key" : "Replace your key with one that does not require Face ID"
+    }
+
     // Base64 from JS the way Android reads it: spaces and line breaks skipped, missing padding
     // accepted, the url-safe alphabet and anything else outside the standard one rejected. Works on
     // utf8 bytes because Swift sees "\r\n" as a single Character.
