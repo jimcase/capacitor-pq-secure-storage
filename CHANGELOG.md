@@ -6,6 +6,72 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Security
+
+- Android store caps: 512 items and 16 MiB of stored text per store, and 256 KEM aliases and 256
+  wrapped Ed25519 aliases. Past a cap, `setItem`, `generateKemKeyPair` and `generateKeyPair` for
+  Ed25519 reject `E_STORE_FULL`. With no cap, JS could fill the store with no prompt until the app
+  ran out of memory loading it. Then every store call failed until the app data was cleared, which
+  also deletes the Keystore keys. `keys()` now rejects `E_DECRYPT` when the store cannot be loaded,
+  it used to crash the app.
+- iOS `sign` with an empty or blank `description` on a biometric alias killed the app: `evaluatePolicy`
+  throws an Objective-C exception for an empty reason and Swift cannot catch it. A blank
+  `description` now gets the default prompt text.
+- iOS wrapped Ed25519 keys keep the old private key until the replacement is written. It was deleted
+  first, so a failed add (`requireBiometric` with no biometric enrolled) or a crash in between lost
+  the key. The private now sits under a versioned account and the public entry carries the version.
+- `withPrefix` throws a `TypeError` for a non-string or empty prefix, and `setKeyPrefix` for a
+  non-string. `withPrefix(undefined)` used to write under a literal `undefined` prefix, list the whole
+  store in `keys()` and make `clear()` on the view wipe the whole store.
+- The replacement prompt names the downgrade. Overwriting a biometric key with
+  `requireBiometric: false` showed the same text as a normal rotation, so one approval could leave an
+  identity key with no biometric gate. Android now titles that prompt "Replace this key with one that
+  does not need biometrics" and iOS "Replace your key with one that does not need Face ID or Touch
+  ID". The text for a biometric replacement is unchanged.
+
+### Fixed
+
+- Android `setItem` rejects `E_ENCRYPT` when the prefs commit fails. It resolved before, so the host
+  thought the secret was saved.
+- Android `removeItem` drops the store entry before the item key. A crash between the two used to
+  leave a name that `hasItem` reported and `getItem` could not read, and the next `setItem` recreated
+  it in any tier with no prompt. If the store write fails it rejects `E_REMOVE` and keeps the key.
+- iOS reports items killed by a biometric enrollment change. `getItem` rejects `E_KEY_INVALIDATED`
+  when the data read says not found but a metadata read still sees the item, and `setItem` rejects it
+  when the name is already taken by such an item (was `E_ENCRYPT`). `removeItem` used to resolve
+  without deleting them and the name stayed locked until `clear()`.
+- iOS `removeItem` of a biometric item that can no longer be read asks for biometrics before deleting
+  it, or deletes it with no prompt when no biometric is enrolled.
+- iOS `keys()` rejects `E_DECRYPT` on a Keychain error instead of returning an empty list, so
+  `clear()` on a view cannot resolve without deleting anything when the listing fails.
+- `clear()` on a view tries every item and then rejects with the first error. It stopped at the first
+  rejection (a cancelled prompt) and left the namespace half deleted. Prompts still come one at a
+  time, one per biometric item.
+- Web `generateKeyPair` with `overwrite: true` no longer swaps an alias between Ed25519 and
+  ML-DSA/ECDSA. It rejects `E_ALIAS_EXISTS`, like Android and iOS.
+
+### Changed
+
+- Error codes a host may compare, web: it rejects with the `E_*` codes of the README table instead
+  of `UNAVAILABLE` or bare errors (invalid base64 is `E_INVALID_ARGS`).
+- Error codes, iOS: bad base64 is `E_INVALID_ARGS` (was `E_MISSING_PARAMS`), `removeItem` and `clear`
+  failures are `E_REMOVE` and `E_CLEAR` (were `E_DECRYPT`), and `keys()` rejects `E_DECRYPT` on a
+  Keychain error (was an empty list).
+- Error codes, Android: `sign` with a type that does not match a hardware alias is
+  `E_TYPE_MISMATCH` (was `E_SIGN`), `sign` with `ED25519` on a hardware alias is `E_TYPE_MISMATCH`
+  (was `E_KEY_NOT_FOUND`), and `getPublicKey` on a missing hardware alias is `E_KEY_NOT_FOUND` (was
+  `E_PUBKEY`).
+- iOS accepts base64 with line breaks, spaces or missing padding, like Android. Padding that does
+  not fit the length and the url-safe alphabet are still rejected.
+- No rollback on iOS: a 7.1.0 build reads wrapped Ed25519 keys written by this version as
+  `E_TAMPERED`, because their public entry gained a version field. Keys written by 7.1.0 keep working
+  here.
+- Android keys created by 7.0.x keep working while the device is locked; `setUnlockedDeviceRequired`
+  applies to keys created from 7.1.0 on. Regenerate signing and KEM keys with `overwrite` to pick it
+  up; at-rest keys cannot be migrated by the plugin.
+- An alias that 7.0.x left with both a hardware and a wrapped Ed25519 key cannot be regenerated; that
+  state is not supported, recreate it under a new alias.
+
 ## [8.1.0] - 2026-10-30
 
 Fixes from a security audit of 8.0.0 (18 findings, none critical). Same code as 7.1.0, only the build

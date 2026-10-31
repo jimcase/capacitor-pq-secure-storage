@@ -230,7 +230,9 @@ await mine.setItem({ key: 'token', value: 'abc' });
 await mine.clear(); // only the items under mylib_
 ```
 
-`clear()` on a view removes item by item: one prompt per biometric item, and a cancelled prompt leaves that item and rejects.
+`clear()` on a view removes item by item, with one prompt per biometric item. It keeps going after a
+cancelled or failed one and rejects at the end with the first error. The items that were not removed
+stay in the store.
 
 `setKeyPrefix` / `getKeyPrefix` still work but are deprecated: they change one prefix shared by every
 caller that imports the module, the host app included.
@@ -384,7 +386,7 @@ payloads must show its own confirmation; `description` is truncated for the prom
 encryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ ciphertext: string; }>
 ```
 
-Encrypt data with an AES-256-GCM key (TEE/Keychain on device, localStorage on web). Returns the blob to store. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
+Encrypt data with an AES-256-GCM key (Android) or Secure Enclave ECIES (iOS); the web fallback keeps its key in localStorage. Returns the blob to store. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
 
 | Param         | Type                                             |
 | ------------- | ------------------------------------------------ |
@@ -578,7 +580,8 @@ Whether a key exists in the store. No prompt.
 keys() => Promise<{ keys: string[]; }>
 ```
 
-List the names of stored secrets. No prompt.
+List the names of stored secrets. No prompt. Rejects `E_DECRYPT` when the store cannot be
+listed, so a prefixed `clear()` fails instead of deleting nothing.
 
 **Returns:** <code>Promise&lt;{ keys: string[]; }&gt;</code>
 
@@ -659,6 +662,15 @@ type Accessibility =
 
 </docgen-api>
 
+## Upgrading
+
+Android keys created by 7.0.x keep working while the device is locked. `setUnlockedDeviceRequired`
+applies to keys created from 7.1.0 on. Regenerate signing and KEM keys with `overwrite` to pick it
+up. The plugin cannot migrate at-rest keys.
+
+An alias that 7.0.x left with both a hardware and a wrapped Ed25519 key cannot be regenerated. That
+state is not supported: recreate the key under a new alias.
+
 ## Error codes
 
 Every rejection carries a `code`:
@@ -666,13 +678,16 @@ Every rejection carries a `code`:
 | Code | Meaning |
 |---|---|
 | `E_MISSING_PARAMS` | A required parameter is missing |
-| `E_INVALID_ARGS` | Key or value out of bounds |
+| `E_INVALID_ARGS` | Key or value out of bounds, invalid base64, or an option of the wrong type |
 | `E_BAD_ALIAS` | Reserved or invalid key alias |
 | `E_AUTH_FAILED` | Biometric cancelled or failed |
-| `E_KEY_INVALIDATED` | Biometric enrollment changed since the key was created. On iOS, `getItem`/`setItem` of an item whose biometric set changed |
+| `E_KEY_INVALIDATED` | Biometric enrollment changed since the key was created. On iOS, `getItem`/`setItem` may reject this for an item whose biometric set changed |
 | `E_ENCRYPT` | Encryption failed |
-| `E_DECRYPT` | Decryption failed, or a tampered / GCM-tag mismatch |
+| `E_DECRYPT` | Decryption failed, or a tampered / GCM-tag mismatch. Also `keys()` when the store cannot be listed |
+| `E_CRYPTO` | Android: the cipher operation after a biometric prompt failed |
 | `E_KEYGEN` | Key generation failed |
+| `E_SIGN` | Signing failed |
+| `E_PUBKEY` | Android: reading a public key failed |
 | `E_KEY_NOT_FOUND` | No key exists for that alias |
 | `E_UNSUPPORTED` | Not supported on this device |
 | `E_ALIAS_EXISTS` | Alias already exists (pass `overwrite: true` to replace) |
@@ -683,16 +698,18 @@ Every rejection carries a `code`:
 | `E_REMOVE` | `removeItem` failed |
 | `E_CLEAR` | `clear` failed |
 | `E_TIER_MISMATCH` | `setItem` on an item stored with a different `requireBiometric` (call `removeItem` first) |
-| `E_BUSY` | A keygen for the same alias is already in flight |
-| `E_STORE_FULL` | Store or alias limit reached: 512 items / 16 MiB per store, 256 aliases per key kind |
+| `E_BUSY` | Android: a keygen for the same alias, a write of the same item, or a biometric prompt is already in flight |
+| `E_STORE_FULL` | Android: 512 items / 16 MiB per store, and 256 KEM aliases and 256 wrapped Ed25519 aliases |
 | `E_INPUT_TOO_LARGE` | Base64 input above the 10 MiB decoded cap |
 
-The web fallback uses the same codes; it never raises `E_AUTH_FAILED` or `E_TIER_MISMATCH` because it has no biometric and no tiers.
+The web fallback uses the same codes for the same failures. It never raises the ones that need a
+biometric, tiers, a prompt host or the native store: `E_AUTH_FAILED`, `E_TIER_MISMATCH`,
+`E_KEY_INVALIDATED`, `E_NO_ACTIVITY`, `E_BUSY`, `E_STORE_FULL`, `E_REMOVE`, `E_CLEAR` and `E_CRYPTO`.
 
 ## Testing
 
 Unit tests run off-device: the TypeScript layer has a software double (`test/pq-double.ts`) that
-mirrors the native wire format, so the round-trip and framing are covered by vitest.
+covers the JS layer and the web fallback; the native store framing is verified on device.
 
 ```bash
 npm run build   # tsc

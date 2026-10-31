@@ -107,7 +107,7 @@ export interface PqSecureStoragePlugin {
         description?: string;
     }): Promise<{ signature: string }>;
 
-    /** Encrypt data with an AES-256-GCM key (TEE/Keychain on device, localStorage on web). Returns the blob to store. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB. */
+    /** Encrypt data with an AES-256-GCM key (Android) or Secure Enclave ECIES (iOS); the web fallback keeps its key in localStorage. Returns the blob to store. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB. */
     encryptAtRest(options: { keyAlias: string; data: string }): Promise<{ ciphertext: string }>;
 
     /** Decrypt a blob produced by `encryptAtRest` under the same alias. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB. */
@@ -185,7 +185,10 @@ export interface PqSecureStoragePlugin {
     /** Whether a key exists in the store. No prompt. */
     hasItem(options: { key: string }): Promise<{ exists: boolean }>;
 
-    /** List the names of stored secrets. No prompt. */
+    /**
+     * List the names of stored secrets. No prompt. Rejects `E_DECRYPT` when the store cannot be
+     * listed, so a prefixed `clear()` fails instead of deleting nothing.
+     */
     keys(): Promise<{ keys: string[] }>;
 
     /**

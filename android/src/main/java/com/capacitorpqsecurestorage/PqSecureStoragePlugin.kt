@@ -933,10 +933,9 @@ class PqSecureStoragePlugin : Plugin() {
         )
     }
 
-    // ---- store item integrity MAC ----
-    // Items are encapsulated to the store's PUBLIC key, so a prefs writer could otherwise inject or
-    // swap arbitrary values. A Keystore-held HMAC over (itemKey || frame) makes forgery need the TEE
-    // key, and binds the value to its key name. Verified before decrypting.
+    // ---- store name hmac ----
+    // keystore hmac key. itemKeyAlias and nameTag use it to turn an item name into the item key alias
+    // and the prefs tag. values have no separate mac, the item key's gcm covers them.
     private val ssMacAlias = "__pq_ss_mac__"
 
     // ---- item-name confidentiality ----
@@ -1175,13 +1174,12 @@ class PqSecureStoragePlugin : Plugin() {
         }
     }
 
-    // ==== secure storage (self-addressed ML-KEM-1024 envelope, silent write / gated read) ====
+    // ==== secure storage (one keystore aes-gcm key per item) ====
     //
-    // The store owns one ML-KEM-1024 keypair. setItem encapsulates to its public key (software,
-    // no auth). getItem decapsulates with the private key, which is stored WRAPPED by an
-    // auth-required Keystore AES key and unwrapped inside a BiometricPrompt CryptoObject (same
-    // GHSA-safe binding as sign/decrypt). The first setItem creates the keypair and wraps the
-    // private, which needs one biometric prompt; after that setItem is silent.
+    // every item has its own AES-256-GCM key in the keystore. the tier (biometric or silent) and the
+    // unlock rule are set when the key is created and can't change after. the item name is the gcm
+    // aad. a silent item reads and writes with no prompt. a biometric item prompts on both, because
+    // its key needs a biometric to encrypt too (same CryptoObject binding as sign/decrypt).
 
     private val itemAliasPrefix = "__pq_ss_i_"
 
