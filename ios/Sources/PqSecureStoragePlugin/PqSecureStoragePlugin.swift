@@ -1239,7 +1239,14 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
         let create: () -> Void = {
             let status = SecItemAdd(addQuery as CFDictionary, nil)
-            if status == errSecSuccess { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
+            if status == errSecSuccess {
+                call.resolve()
+            } else if status == errSecDuplicateItem {
+                // probe said not found but the row is there: a dead biometric item
+                call.reject("Item invalidated by a biometric change; removeItem first", "E_KEY_INVALIDATED")
+            } else {
+                call.reject("Store failed", "E_ENCRYPT")
+            }
         }
         // value-only update. The tier/ACL is fixed at creation (a tier change rejects E_TIER_MISMATCH
         // below), so this never re-tiers, and it is atomic: a failed update leaves the old secret
@@ -1317,7 +1324,22 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                     call.reject("Decode failed", "E_DECRYPT")
                 }
             case errSecItemNotFound:
-                call.resolve(["value": NSNull()])
+                // after an enrollment change some OS versions answer NotFound for a data read of the
+                // dead item. A metadata read still sees the row, so tell the two apart.
+                let meta: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: Self.ssService,
+                    kSecAttrAccount as String: account,
+                    kSecReturnAttributes as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitOne,
+                    kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+                ]
+                let metaStatus = SecItemCopyMatching(meta as CFDictionary, nil)
+                if metaStatus == errSecSuccess || metaStatus == errSecInteractionNotAllowed {
+                    call.reject("Biometric enrollment changed; item invalidated", "E_KEY_INVALIDATED")
+                } else {
+                    call.resolve(["value": NSNull()])
+                }
             case errSecUserCanceled, errSecAuthFailed:
                 call.reject("Authentication failed", "E_AUTH_FAILED")
             default:
@@ -1356,7 +1378,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         switch SecItemCopyMatching(probe as CFDictionary, &probeOut) {
         case errSecItemNotFound:
-            call.resolve()
+            // a dead biometric item can read as NotFound but still be there; del() deletes it without a prompt
+            del()
         case errSecInteractionNotAllowed:
             // biometric item: confirm so a silent bridge caller can't delete it
             Self.authenticate(reason: "Authenticate to delete your secret") { result in

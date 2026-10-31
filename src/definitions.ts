@@ -171,7 +171,8 @@ export interface PqSecureStoragePlugin {
      * Read a stored secret. Prompts for biometrics only if the item was stored with
      * `requireBiometric: true`. Returns `null` if the key is absent. NOTE: the plaintext is
      * returned to the JS caller, so a compromised webview sees it; the host should minimize how
-     * long the value lives in JS.
+     * long the value lives in JS. Rejects `E_KEY_INVALIDATED` if the item was stored with a
+     * biometric that has since changed.
      */
     getItem(options: { key: string }): Promise<{ value: string | null }>;
 
