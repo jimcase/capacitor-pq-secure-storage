@@ -184,7 +184,7 @@ class PqSecureStoragePlugin : Plugin() {
                     runGeneration()
                     return
                 }
-                authenticateCipher(host, gateCipher, "Authorize key replacement", call,
+                authenticateCipher(host, gateCipher, Policy.replacementPrompt(requireBiometric), call,
                     onError = { sigGenerating.remove(alias) }) { boundCipher ->
                     boundCipher.doFinal(byteArrayOf(0))
                     runGeneration()
@@ -352,7 +352,7 @@ class PqSecureStoragePlugin : Plugin() {
         if (existingBio) {
             val hostActivity = activity as? FragmentActivity
                 ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-            authForExistingSign(hostActivity, alias, call) { doGenerateSigningKey(alias, sa, requireBiometric, call) }
+            authForExistingSign(hostActivity, alias, requireBiometric, call) { doGenerateSigningKey(alias, sa, requireBiometric, call) }
             return
         }
         doGenerateSigningKey(alias, sa, requireBiometric, call)
@@ -465,7 +465,7 @@ class PqSecureStoragePlugin : Plugin() {
 
     // prompt with a Signature bound to an existing Keystore signing key (proves a real biometric on
     // THAT key, GHSA-safe), then run [after]. Gates destructive overwrite of an identity key.
-    private fun authForExistingSign(hostActivity: FragmentActivity, alias: String, call: PluginCall, after: () -> Unit) {
+    private fun authForExistingSign(hostActivity: FragmentActivity, alias: String, requireBiometric: Boolean, call: PluginCall, after: () -> Unit) {
         try {
             val priv = keystore().getKey(alias, null) as? java.security.PrivateKey
                 ?: return after() // no live key to protect (e.g. half-written alias) -> allow overwrite
@@ -480,7 +480,7 @@ class PqSecureStoragePlugin : Plugin() {
             // a real op with the bound signer proves the biometric; a forged callback can't produce
             // it. A mid-auth invalidation surfaces as E_KEY_INVALIDATED here; a retry then hits the
             // initSign check above and allows the overwrite.
-            authenticateSignature(hostActivity, signer, "Authorize key replacement", null, call) { boundSigner ->
+            authenticateSignature(hostActivity, signer, Policy.replacementPrompt(requireBiometric), null, call) { boundSigner ->
                 boundSigner.update(byteArrayOf(0)); boundSigner.sign()
                 after()
             }
@@ -752,7 +752,7 @@ class PqSecureStoragePlugin : Plugin() {
                     runGeneration()
                     return
                 }
-                authenticateCipher(hostActivity, gateCipher, "Authorize key replacement", call,
+                authenticateCipher(hostActivity, gateCipher, Policy.replacementPrompt(requireBiometric), call,
                     onError = { kemGenerating.remove(alias) }) { boundCipher ->
                     boundCipher.doFinal(byteArrayOf(0)) // prove a real biometric released the existing key
                     runGeneration()
