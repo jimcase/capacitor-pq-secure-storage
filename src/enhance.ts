@@ -25,6 +25,9 @@ export interface PrefixMethods {
      * `PqSecureStorage.withPrefix('mylib_')` and use that without touching the host app's items:
      * its `keys()` and `clear()` only see items under the prefix. The crypto methods and the JSON
      * helpers are available on the view.
+     *
+     * An empty or non-string prefix throws a `TypeError`: an empty one would mean the whole store,
+     * and that is the shared instance itself.
      */
     withPrefix(prefix: string): PqSecureStoragePlugin & JsonMethods;
 }
@@ -86,12 +89,16 @@ export function enhance(native: PqSecureStoragePlugin): PqSecureStoragePlugin & 
     const state = { prefix: '' };
     const extra = {
         async setKeyPrefix(prefix: string): Promise<void> {
+            if (typeof prefix !== 'string') throw new TypeError('prefix must be a string');
             state.prefix = prefix;
         },
         async getKeyPrefix(): Promise<string> {
             return state.prefix;
         },
-        withPrefix: (prefix: string) => scoped(native, { prefix }, {}),
+        withPrefix: (prefix: string) => {
+            if (typeof prefix !== 'string' || prefix === '') throw new TypeError('prefix must be a non-empty string');
+            return scoped(native, { prefix }, {});
+        },
     };
     return scoped(native, state, extra) as PqSecureStoragePlugin & PrefixMethods & JsonMethods;
 }

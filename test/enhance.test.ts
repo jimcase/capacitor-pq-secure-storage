@@ -110,4 +110,14 @@ describe('withPrefix', () => {
         expect((await a.getJSON<{ n: number }>({ key: 'o' })).value).toEqual({ n: 1 });
         expect((await a.getHardwareCapabilities()).supportsPqc).toBe(true);
     });
+
+    it('rejects a prefix that is not a string', () => {
+        const s = make();
+        expect(() => s.withPrefix(undefined as unknown as string)).toThrow(TypeError);
+        expect(() => s.withPrefix('')).toThrow(TypeError);
+    });
+
+    it('setKeyPrefix rejects a prefix that is not a string', async () => {
+        await expect(make().setKeyPrefix(undefined as unknown as string)).rejects.toThrow(TypeError);
+    });
 });
