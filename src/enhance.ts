@@ -24,7 +24,8 @@ export interface PrefixMethods {
      * the shared instance and of other views, so a library can call
      * `PqSecureStorage.withPrefix('mylib_')` and use that without touching the host app's items:
      * its `keys()` and `clear()` only see items under the prefix. The crypto methods and the JSON
-     * helpers are available on the view.
+     * helpers are available on the view, but key aliases are not prefixed: they are shared by every
+     * caller.
      *
      * An empty or non-string prefix throws a `TypeError`: an empty one would mean the whole store,
      * and that is the shared instance itself.
