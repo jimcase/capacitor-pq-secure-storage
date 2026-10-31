@@ -52,4 +52,16 @@ internal object Policy {
     }
 
     fun canAddAlias(pubCount: Int, exists: Boolean): Boolean = exists || pubCount < MAX_ALIASES_PER_KIND
+
+    // Hardware keys carry no stored type, so what the caller asked for is checked against the key
+    // itself: EC is ECDSA, and the two ML-DSA levels differ in public key length (1952 / 2592).
+    fun hardwareTypeMismatch(keyAlgorithm: String, rawPubLength: Int, requested: String): Boolean {
+        val isEc = keyAlgorithm == "EC"
+        return when (requested) {
+            "ECDSA_256R1" -> !isEc
+            "PQC_MLDSA_65" -> isEc || rawPubLength != 1952
+            "PQC_MLDSA_87" -> isEc || rawPubLength != 2592
+            else -> true
+        }
+    }
 }
