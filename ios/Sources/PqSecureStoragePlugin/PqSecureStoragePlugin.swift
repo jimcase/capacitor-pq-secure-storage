@@ -1424,7 +1424,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         switch SecItemCopyMatching(probe as CFDictionary, &probeOut) {
         case errSecItemNotFound:
             // a dead biometric item can read as NotFound but still be there. Only a metadata miss
-            // means absent; if the row is there, confirm first like any biometric item.
+            // means absent; if the row is there, confirm first, unless no biometric is enrolled
+            // (then the item is dead).
             switch Self.ssMetaStatus(account: account) {
             case errSecItemNotFound: call.resolve()
             case errSecSuccess, errSecInteractionNotAllowed:
@@ -1432,7 +1433,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             default: call.reject("Remove failed", "E_REMOVE")
             }
         case errSecInteractionNotAllowed:
-            // biometric item: confirm so a silent bridge caller can't delete it
+            // biometric item: confirm so a silent bridge caller can't delete it, unless no
+            // biometric is enrolled (then the item is dead)
             Self.noBiometricEnrolled() ? del() : confirmDel()
         case errSecSuccess:
             // silent item: delete without a prompt (matches Android / the @evva drop-in)
