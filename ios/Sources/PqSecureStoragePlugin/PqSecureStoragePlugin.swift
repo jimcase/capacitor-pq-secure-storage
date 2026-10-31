@@ -1213,6 +1213,14 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         return SecItemCopyMatching(q as CFDictionary, nil)
     }
 
+    // every bio store item is biometryCurrentSet, so with no biometric enrolled none of them can be
+    // live and a prompt can't run. Then a dead item is deleted without one or the name stays locked.
+    private static func noBiometricEnrolled() -> Bool {
+        var err: NSError?
+        return !LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err)
+            && (err as? LAError)?.code == .biometryNotEnrolled
+    }
+
     @objc func setItem(_ call: CAPPluginCall) {
         guard let key = call.getString("key"), let value = call.getString("value") else {
             call.reject("Missing key or value", "E_MISSING_PARAMS"); return
@@ -1409,20 +1417,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             switch Self.ssMetaStatus(account: account) {
             case errSecItemNotFound: call.resolve()
             case errSecSuccess, errSecInteractionNotAllowed:
-                // with no biometric enrolled a biometryCurrentSet item can't be live and the prompt
-                // can't run, so delete it or the name stays locked
-                var enrollErr: NSError?
-                if !LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &enrollErr),
-                   (enrollErr as? LAError)?.code == .biometryNotEnrolled {
-                    del()
-                } else {
-                    confirmDel()
-                }
+                Self.noBiometricEnrolled() ? del() : confirmDel()
             default: call.reject("Remove failed", "E_REMOVE")
             }
         case errSecInteractionNotAllowed:
             // biometric item: confirm so a silent bridge caller can't delete it
-            confirmDel()
+            Self.noBiometricEnrolled() ? del() : confirmDel()
         case errSecSuccess:
             // silent item: delete without a prompt (matches Android / the @evva drop-in)
             del()
@@ -1529,11 +1529,13 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             ]
             switch SecItemCopyMatching(probe as CFDictionary, nil) {
             case errSecInteractionNotAllowed: hasBiometric = true
-            case errSecSuccess, errSecItemNotFound: break
+            // just listed, so NotFound means there but unreadable (a dead bio item): fail closed
+            case errSecItemNotFound: hasBiometric = true
+            case errSecSuccess: break
             default: return call.reject("Clear failed", "E_CLEAR") // fail closed on unexpected
             }
         }
-        if hasBiometric {
+        if hasBiometric && !Self.noBiometricEnrolled() {
             Self.authenticate(reason: "Authenticate to erase secure storage") { result in
                 switch result {
                 case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
