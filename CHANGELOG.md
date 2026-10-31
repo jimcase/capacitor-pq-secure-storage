@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [8.2.0] - 2026-10-31
+
+Fixes from the second security audit of 8.1.0 (14 findings, none critical). Same code as 7.2.0, only
+the build tooling differs.
+
 ### Security
 
 - Android store caps: 512 items and 16 MiB of stored text per store, and 256 KEM aliases and 256
@@ -73,13 +78,13 @@ All notable changes to this project are documented here. The format is based on
   was skipped, bad padding was `E_ENCRYPT`). Spaces, tabs and line breaks are still skipped.
 - iOS accepts base64 with line breaks, spaces or missing padding, like Android. Padding that does
   not fit the length and the url-safe alphabet are still rejected.
-- No rollback on iOS: a 7.1.0 build reads wrapped Ed25519 keys written by this version as
-  `E_TAMPERED`, because their public entry gained a version field. Do not regenerate them on 7.1.0,
-  upgrade again instead. Keys written by 7.1.0 keep working here.
-- Android keys created by 7.0.x keep working while the device is locked; `setUnlockedDeviceRequired`
-  applies to keys created from 7.1.0 on. Regenerate signing and KEM keys with `overwrite` to pick it
+- No rollback on iOS: an 8.1.0 build reads wrapped Ed25519 keys written by this version as
+  `E_TAMPERED`, because their public entry gained a version field. Do not regenerate them on 8.1.0,
+  upgrade again instead. Keys written by 8.1.0 keep working here.
+- Android keys created by 8.0.x keep working while the device is locked; `setUnlockedDeviceRequired`
+  applies to keys created from 8.1.0 on. Regenerate signing and KEM keys with `overwrite` to pick it
   up; at-rest keys cannot be migrated by the plugin.
-- An alias that 7.0.x left with both a hardware and a wrapped Ed25519 key cannot be regenerated; that
+- An alias that 8.0.x left with both a hardware and a wrapped Ed25519 key cannot be regenerated; that
   state is not supported, recreate it under a new alias.
 
 ## [8.1.0] - 2026-10-30

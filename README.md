@@ -668,16 +668,16 @@ type Accessibility =
 
 ## Upgrading
 
-Android keys created by 7.0.x keep working while the device is locked. `setUnlockedDeviceRequired`
-applies to keys created from 7.1.0 on. Regenerate signing and KEM keys with `overwrite` to pick it
+Android keys created by 8.0.x keep working while the device is locked. `setUnlockedDeviceRequired`
+applies to keys created from 8.1.0 on. Regenerate signing and KEM keys with `overwrite` to pick it
 up. The plugin cannot migrate at-rest keys.
 
-An alias that 7.0.x left with both a hardware and a wrapped Ed25519 key cannot be regenerated. That
+An alias that 8.0.x left with both a hardware and a wrapped Ed25519 key cannot be regenerated. That
 state is not supported: recreate the key under a new alias.
 
-No rollback on iOS: a 7.1.0 build reads wrapped Ed25519 keys written by 7.2.0 as `E_TAMPERED`,
-because their public entry gained a version field. Do not regenerate them on 7.1.0, upgrade again
-instead. Keys written by 7.1.0 keep working on 7.2.0.
+No rollback on iOS: an 8.1.0 build reads wrapped Ed25519 keys written by 8.2.0 as `E_TAMPERED`,
+because their public entry gained a version field. Do not regenerate them on 8.1.0, upgrade again
+instead. Keys written by 8.1.0 keep working on 8.2.0.
 
 ## Error codes
 
