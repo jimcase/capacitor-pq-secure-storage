@@ -1,7 +1,6 @@
-// Software double of the native plugin surface. Mirrors the crypto the Swift
-// (SecureEnclave.MLKEM + AES.GCM) and Kotlin (BouncyCastle ML-KEM + Keystore AES) do, so the
-// wire format and round-trip can be unit-tested here. The native side keeps the private key
-// in hardware; the double keeps it in a Map.
+// software doubles of the plugin surface, for unit tests. the ML-KEM frame is the one every
+// platform uses. the at-rest frame is the android and web one (ios at-rest is secure enclave ECIES,
+// not modeled here). private keys sit in a Map, not in hardware.
 import { ml_kem768, ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
@@ -87,11 +86,8 @@ export class PqSecureStorageDouble {
     }
 }
 
-// Secure storage double. Models the Android two-tier envelope: the store owns TWO ML-KEM-1024
-// keypairs, one silent and one biometric. setItem picks the tier from requireBiometric and records
-// the mode with the item; getItem decapsulates with the matching keypair. Distinct keypairs mean a
-// bio item is not readable via the silent private. The Map stands in for SharedPreferences; the
-// native side wraps each private in the TEE (silent = no-auth key, bio = auth-required key).
+// store double: keeps the tier per item and seals values to one ML-KEM keypair per tier. it does
+// not model the native stores (android: a keystore AES key per item, ios: a keychain item per key).
 type StoreKeypair = { publicKey: Uint8Array; secretKey: Uint8Array };
 
 export class SecureStorageDouble {

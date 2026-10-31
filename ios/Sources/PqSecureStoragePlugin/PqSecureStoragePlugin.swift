@@ -754,9 +754,6 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     private static func privateAccount(for alias: String) -> String { "\(alias).private" }
     private static func publicAccount(for alias: String) -> String { "\(alias).pub" }
 
-    // HMAC key for the public-key integrity tag. Load-or-create, silent, device-only. Unlike
-    // Android (Keystore/hardware HMAC key), this key lives in the Keychain (readable in-process): the
-    // tag defends against offline/backup tampering of the stored public key, not an in-process attacker.
     // Serializes load-or-create of the shared internal keys. SecKeyCreateRandomKey does not dedupe by
     // tag, so two concurrent first calls would leave two keys under one tag and the tags would verify
     // or not depending on which one a lookup returns.
