@@ -30,8 +30,8 @@ enum InputPolicy {
         b64.utf8.count <= maxRecipientKeyBase64
     }
 
-    // The text for the biometric prompt. An empty string makes evaluatePolicy throw an
-    // NSInvalidArgumentException, and Swift cannot catch it, so the app dies. Blank gets the default.
+    // an empty reason makes evaluatePolicy throw an ObjC exception swift can't catch (app dies),
+    // so a blank one gets the default
     static func promptReason(_ raw: String?, default def: String) -> String {
         guard let raw = raw else { return def }
         let text = String(raw.prefix(200)).trimmingCharacters(in: .whitespacesAndNewlines)

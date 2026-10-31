@@ -65,7 +65,8 @@ function scoped(
                 return;
             }
             const { keys } = await native.keys();
-            // one at a time, a biometric item opens its own prompt. Keep going after a failure.
+            // one at a time: parallel prompts hit android's one-prompt latch and come back E_BUSY.
+            // keep going after a failure so one cancel does not leave the rest.
             let failed: { reason: unknown } | undefined;
             for (const k of keys) {
                 if (!k.startsWith(state.prefix)) continue;

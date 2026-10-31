@@ -738,8 +738,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     // the public entry's generic attr holds "type:0|1:tagB64" (wrapped keys add ":ver", see
-    // KeyGeneric). The bio flag is only a prompt hint (the SEP enforces the real gate); the tag is an
-    // HMAC over the stored public key so a tampered public entry is detected on read.
+    // KeyGeneric). The bio flag is only a prompt hint (the SEP enforces the real gate); the tag is a
+    // SEP signature over the stored public key (see pubTag) so a tampered public entry is detected on read.
     private static func encodeGeneric(type: String, requireBiometric: Bool, tag: Data, wrapVersion: Int = -1) -> Data {
         KeyGeneric.encode(type: type, requireBiometric: requireBiometric, tag: tag, wrapVersion: wrapVersion)
     }
@@ -962,8 +962,9 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        // keyNotFound only when the entry is really missing. persistWrapped must not guess the version
-        // of an entry it could not read (locked device), its orphan cleanup could hit the live private
+        // keyNotFound for a missing entry, and also for one that is there but can't be decoded. Any
+        // other status throws: persistWrapped must not guess the version of an entry it could not
+        // read (locked device), its orphan cleanup could hit the live private
         guard status == errSecSuccess || status == errSecItemNotFound else { throw PqSecureStorageError.keychain(status) }
         guard status == errSecSuccess, let item = result as? [String: Any],
               let pubData = item[kSecValueData as String] as? Data,

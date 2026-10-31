@@ -1,8 +1,7 @@
 import Foundation
 
-// The kSecAttrGeneric of a key's public entry: "type:0|1:tagB64". Wrapped keys add ":ver", the
-// account version of their private, so a new private can be written before the old one goes.
-// Hardware and KEM keys keep the three fields. Free of Capacitor and the Keychain for unit tests.
+// generic attr of a key's public entry, "type:0|1:tagB64". wrapped keys add ":ver" so a new private
+// can be written before the old one goes. no capacitor or keychain here, for unit tests.
 enum KeyGeneric {
     static func encode(type: String, requireBiometric: Bool, tag: Data, wrapVersion: Int) -> Data {
         var s = "\(type):\(requireBiometric ? "1" : "0"):\(tag.base64EncodedString())"

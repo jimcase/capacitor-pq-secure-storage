@@ -212,7 +212,7 @@ Document the choice in the security policy.
 | Attestation says "Software" | No lattice-PKA in TEE/StrongBox | Device manufacturer may have disabled it; hardware limitation |
 | `spkiToRawMldsa` yields wrong length | Non-RFC SPKI | Verify Android KeyStore is on latest patch level |
 | Signature fails verification | Private key or message encoding corrupted | Confirm UTF-8 encoding, no extra whitespace |
-| KERIA rejects signature | Wrong CESR code for ML-DSA-65 verkey (should be `1QAB`) or sig (should be `3E`) | Cross-check CESR code constants in PqSecureStorageExternalModule |
+| KERIA rejects signature | Wrong CESR code for ML-DSA-65 verkey (should be `2QAD`) or sig (should be `1QAA`), see `src/algorithms.ts` | Cross-check CESR code constants in PqSecureStorageExternalModule |
 | Biometric prompt doesn't appear (Android) | Host activity isn't a `FragmentActivity`, or `sign()` rejected with `E_NO_ACTIVITY` | Confirm the host app's activity extends Capacitor's `BridgeActivity` |
 | Biometric prompt doesn't appear (iOS) | LAContext not initialized correctly | Confirm `LAContext.evaluatePolicy()` is called before signing |
 | App crashes on unknown alias | Missing error handling | Add try-catch around `sign()` and handle `E_KEY_NOT_FOUND` |
@@ -252,7 +252,6 @@ code; what is left is confirming the behavior on hardware.
 
 - [ ] iOS (M-8): with one silent item and one `requireBiometric: true` item, `keys()` lists both and `clear()` asks for Face ID before wiping. If `keys()` lists only the silent one, the system hides ACL items from attribute queries: add an index item (see the audit fixes, option B).
 - [ ] iOS: after changing the Face ID enrollment, on an old biometric item: `hasItem` is true, `removeItem` prompts and deletes, `setItem` of the same tier never overwrites it silently, `clear()` prompts. Note the `OSStatus` the `UIFail` probe returns.
-- [ ] iOS: `generateKeyPair({ type: 'ED25519', requireBiometric: true })` with no biometric enrolled. Does the alias keep a public entry with no private entry (`persistWrapped` writes the public one first)?
 - [ ] iOS (M-7): with an ML-DSA key under an alias, `generateKeyPair({ type: 'ED25519' })` under the same alias rejects `E_ALIAS_EXISTS`, and the reverse, with and without `overwrite`.
 - [ ] Android (M-1): while the device is locked and the app is in the background, a silent `setItem` fails and leaves an orphan item key. Then `setItem('k', 's', { requireBiometric: true })` followed by `getItem('k')` prompts on read.
 - [ ] Android (M-2): biometric item X, change the enrollment, new biometric item Y, `clear()` prompts.
@@ -261,6 +260,16 @@ code; what is left is confirming the behavior on hardware.
 - [ ] Android (M-10): with the device locked, `sign` with a silent key, `decrypt` with a silent KEM key and `decryptAtRest` fail. They work again once unlocked.
 - [ ] Cross (M-3): `encryptTo` on web (test-app) to the ML-KEM public key of an Android and `decrypt` on the Android. Then the reverse.
 - [ ] Android: with a BiometricPrompt open, rotate the screen. Does `onAuthenticationError` arrive, or does `authInFlight` stay set and answer `E_BUSY` until restart?
+
+From the second audit (2026-10-31):
+
+- [ ] Android (N-1, an emulator is enough): loop `setItem` with 256K values until it rejects. Expected `E_STORE_FULL` at about 47 items (the 16 MiB cap), then a loop of small values stops at 512 items. Restart the app: `getItem`, `keys()` and `clear()` still work. Note after how many items it stops, and the `heapgrowthlimit` of the AVD.
+- [ ] iOS (N-2): `sign` with `description: ''` (and `'   '`) on a biometric alias shows the prompt with the default text and the app stays alive.
+- [ ] iOS (N-3): silent Ed25519 key, then `generateKeyPair({ type: 'ED25519', overwrite: true, requireBiometric: true })` with no biometric enrolled. Does `SecItemAdd` fail? After that failed replacement, and after a cancelled one, `sign` with the old key still works and `getPublicKey` returns the old public key.
+- [ ] iOS (N-4): after changing the Face ID enrollment, note the `OSStatus` of the `getItem` read, of the `hasItem` probe and of the `removeItem` probe. Then `setItem` of the same name: does it hit `errSecDuplicateItem` and reject `E_KEY_INVALIDATED`? Does `getItem` reject `E_KEY_INVALIDATED`, or does it return `null` or `E_AUTH_FAILED`?
+- [ ] iOS (N-4): `removeItem` of a dead biometric item after an enrollment change: one Face ID / Touch ID prompt, then the item is gone and `setItem` of the same name works. With all biometrics removed from the device: no prompt, the item is gone. With Face ID permission denied for the app (`biometryNotAvailable`): note what happens (expected today: `E_AUTH_FAILED` and the item stays).
+- [ ] iOS (N-7): `keys()` with the device locked and the app alive in the background: does it list, return `[]` or reject `E_DECRYPT`? `withPrefix(...).clear()` must not resolve having deleted nothing.
+- [ ] Cross (N-13): overwrite a biometric key with `requireBiometric: false`. Android: the prompt title is "Replace this key with one that does not need biometrics". iOS: "Replace your key with one that does not need Face ID or Touch ID". With `requireBiometric: true` the title stays "Authorize key replacement" on Android and "Authenticate to replace your key" on iOS.
 
 ## Acceptance Criteria
 
