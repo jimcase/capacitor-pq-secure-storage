@@ -27,9 +27,10 @@ All notable changes to this project are documented here. The format is based on
   `requireBiometric: false` showed the same text as a normal rotation, so one approval could leave an
   identity key with no biometric gate. Android now titles that prompt "Replace this key with one that
   does not need biometrics" and iOS "Replace your key with one that does not need Face ID or Touch
-  ID". The text for a biometric replacement is unchanged. On iOS with Face ID the system shows no
-  text at all (Face ID ignores the reason), so only Android and Touch ID users see this warning. A
-  host should confirm a downgrade in its own UI before calling.
+  ID". The text for a biometric replacement is unchanged. On iOS with Face ID the system does not
+  show the reason text (on a first-try success no dialog appears, after a failed attempt it shows
+  generic instructions), so only Android and Touch ID users see this warning. A host should confirm
+  a downgrade in its own UI before calling.
 
 ### Fixed
 
@@ -68,8 +69,8 @@ All notable changes to this project are documented here. The format is based on
   (was `E_KEY_NOT_FOUND`), `sign` with a hardware type on a wrapped Ed25519 alias is
   `E_TYPE_MISMATCH` (was `E_KEY_NOT_FOUND`), and `getPublicKey` on a missing hardware alias is
   `E_KEY_NOT_FOUND` (was `E_PUBKEY`). `encryptTo` decodes the recipient key with the strict decoder:
-  a character outside the base64 alphabet or bad padding is `E_INVALID_ARGS` (the character was
-  skipped, bad padding was `E_ENCRYPT`).
+  a non-whitespace character outside the alphabet or bad padding is `E_INVALID_ARGS` (the character
+  was skipped, bad padding was `E_ENCRYPT`). Spaces, tabs and line breaks are still skipped.
 - iOS accepts base64 with line breaks, spaces or missing padding, like Android. Padding that does
   not fit the length and the url-safe alphabet are still rejected.
 - No rollback on iOS: a 7.1.0 build reads wrapped Ed25519 keys written by this version as
