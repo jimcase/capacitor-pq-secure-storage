@@ -687,6 +687,8 @@ Every rejection carries a `code`:
 | `E_STORE_FULL` | Store or alias limit reached: 512 items / 16 MiB per store, 256 aliases per key kind |
 | `E_INPUT_TOO_LARGE` | Base64 input above the 10 MiB decoded cap |
 
+The web fallback uses the same codes; it never raises `E_AUTH_FAILED` or `E_TIER_MISMATCH` because it has no biometric and no tiers.
+
 ## Testing
 
 Unit tests run off-device: the TypeScript layer has a software double (`test/pq-double.ts`) that
