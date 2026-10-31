@@ -419,6 +419,10 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         // Face ID, and must answer with the real error instead of an auth failure
         let meta: KeyMetadata
         do { meta = try Self.loadMetadata(alias: alias) } catch {
+            // a wrapped Ed25519 key under this alias is the other key class, not a missing key
+            if (try? Self.loadWrapMetadata(alias: alias)) != nil {
+                return call.reject("Key type mismatch", "E_TYPE_MISMATCH")
+            }
             return call.reject("Key not found", "E_KEY_NOT_FOUND")
         }
         guard meta.type == type else { return call.reject("Key type mismatch", "E_TYPE_MISMATCH") }
@@ -1067,6 +1071,13 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                     call.reject("Authentication failed", "E_AUTH_FAILED")
                 default:
                     call.reject("Signing failed", "E_SIGN")
+                }
+            } catch PqSecureStorageError.keyNotFound {
+                // a hardware key under this alias is the other key class, not a missing key
+                if Self.aliasExists(alias) {
+                    call.reject("Key type mismatch", "E_TYPE_MISMATCH")
+                } else {
+                    call.reject("Key not found", "E_KEY_NOT_FOUND")
                 }
             } catch {
                 os_log("wrappedSign failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
