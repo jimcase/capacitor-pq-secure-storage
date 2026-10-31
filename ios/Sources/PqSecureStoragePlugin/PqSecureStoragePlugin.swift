@@ -1187,6 +1187,19 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     private static let maxCryptoInputB64 = maxCryptoInput * 2 // reject before decoding (base64 bounds it)
     private static let ssService = "pq.securestorage"
 
+    // metadata-only read of a store item, no prompt. Used to tell a missing row from an unreadable one.
+    private static func ssMetaStatus(account: String) -> OSStatus {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: ssService,
+            kSecAttrAccount as String: account,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+        ]
+        return SecItemCopyMatching(q as CFDictionary, nil)
+    }
+
     @objc func setItem(_ call: CAPPluginCall) {
         guard let key = call.getString("key"), let value = call.getString("value") else {
             call.reject("Missing key or value", "E_MISSING_PARAMS"); return
@@ -1326,15 +1339,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             case errSecItemNotFound:
                 // after an enrollment change some OS versions answer NotFound for a data read of the
                 // dead item. A metadata read still sees the row, so tell the two apart.
-                let meta: [String: Any] = [
-                    kSecClass as String: kSecClassGenericPassword,
-                    kSecAttrService as String: Self.ssService,
-                    kSecAttrAccount as String: account,
-                    kSecReturnAttributes as String: true,
-                    kSecMatchLimit as String: kSecMatchLimitOne,
-                    kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
-                ]
-                let metaStatus = SecItemCopyMatching(meta as CFDictionary, nil)
+                let metaStatus = Self.ssMetaStatus(account: account)
                 if metaStatus == errSecSuccess || metaStatus == errSecInteractionNotAllowed {
                     call.reject("Biometric enrollment changed; item invalidated", "E_KEY_INVALIDATED")
                 } else {
@@ -1376,18 +1381,26 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             let status = SecItemDelete(query as CFDictionary)
             if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Remove failed", "E_DECRYPT") }
         }
-        switch SecItemCopyMatching(probe as CFDictionary, &probeOut) {
-        case errSecItemNotFound:
-            // a dead biometric item can read as NotFound but still be there; del() deletes it without a prompt
-            del()
-        case errSecInteractionNotAllowed:
-            // biometric item: confirm so a silent bridge caller can't delete it
+        let confirmDel: () -> Void = {
             Self.authenticate(reason: "Authenticate to delete your secret") { result in
                 switch result {
                 case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
                 case .success: del()
                 }
             }
+        }
+        switch SecItemCopyMatching(probe as CFDictionary, &probeOut) {
+        case errSecItemNotFound:
+            // a dead biometric item can read as NotFound but still be there. Only a metadata miss
+            // means absent; if the row is there, confirm first like any biometric item.
+            switch Self.ssMetaStatus(account: account) {
+            case errSecItemNotFound: call.resolve()
+            case errSecSuccess, errSecInteractionNotAllowed: confirmDel()
+            default: call.reject("Remove failed", "E_DECRYPT")
+            }
+        case errSecInteractionNotAllowed:
+            // biometric item: confirm so a silent bridge caller can't delete it
+            confirmDel()
         case errSecSuccess:
             // silent item: delete without a prompt (matches Android / the @evva drop-in)
             del()
