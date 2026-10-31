@@ -27,7 +27,9 @@ All notable changes to this project are documented here. The format is based on
   `requireBiometric: false` showed the same text as a normal rotation, so one approval could leave an
   identity key with no biometric gate. Android now titles that prompt "Replace this key with one that
   does not need biometrics" and iOS "Replace your key with one that does not need Face ID or Touch
-  ID". The text for a biometric replacement is unchanged.
+  ID". The text for a biometric replacement is unchanged. On iOS with Face ID the system shows no
+  text at all (Face ID ignores the reason), so only Android and Touch ID users see this warning. A
+  host should confirm a downgrade in its own UI before calling.
 
 ### Fixed
 
