@@ -534,7 +534,8 @@ class PqSecureStoragePlugin : Plugin() {
 
         try {
             val priv = keystore().getKey(alias, null) as? java.security.PrivateKey
-                ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
+                ?: return if (sigPrefs().contains(sigPubKey(alias))) call.reject("Key type mismatch", "E_TYPE_MISMATCH")
+                else call.reject("Key not found", "E_KEY_NOT_FOUND")
             // the Keystore keeps no type for the key, so compare the asked one with the key itself
             val pub = (keystore().getCertificate(alias) ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")).publicKey
             val rawLen = if (pub is java.security.interfaces.ECPublicKey) 33 else rawFromSpki(pub.encoded).size
