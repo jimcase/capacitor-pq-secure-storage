@@ -37,11 +37,10 @@ internal object Policy {
         else -> null
     }
 
-    // Replacement prompt title. If the new key is silent it says so, so a downgrade does not look
-    // like a normal rotation.
+    // a downgrade must not read like a normal rotation
     fun replacementPrompt(newRequiresBiometric: Boolean): String =
         if (newRequiresBiometric) "Authorize key replacement"
-        else "Authorize replacing this key with one that signs without biometrics"
+        else "Replace this key with one that does not need biometrics"
 
     const val MAX_STORE_ITEMS = 512
     const val MAX_STORE_TOTAL_CHARS = 16 * 1024 * 1024

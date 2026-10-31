@@ -38,10 +38,9 @@ enum InputPolicy {
         return text.isEmpty ? def : text
     }
 
-    // Replacement prompt text. If the new key is silent it says so, so a downgrade does not look
-    // like a normal rotation.
+    // a downgrade must not read like a normal rotation
     static func replacementReason(newRequiresBiometric: Bool) -> String {
-        newRequiresBiometric ? "Authenticate to replace your key" : "Replace your key with one that does not require Face ID"
+        newRequiresBiometric ? "Authenticate to replace your key" : "Replace your key with one that does not need Face ID or Touch ID"
     }
 
     // Base64 from JS the way Android reads it: spaces and line breaks skipped, missing padding

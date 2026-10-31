@@ -76,6 +76,6 @@ final class InputPolicyTests: XCTestCase {
     }
 
     func testTheReplacementPromptNamesTheDropWhenTheNewKeyIsSilent() {
-        XCTAssertEqual(InputPolicy.replacementReason(newRequiresBiometric: false), "Replace your key with one that does not require Face ID")
+        XCTAssertEqual(InputPolicy.replacementReason(newRequiresBiometric: false), "Replace your key with one that does not need Face ID or Touch ID")
     }
 }

@@ -131,5 +131,5 @@ class PolicyTest {
     @Test fun mldsaIsToldApartByPublicKeyLength() { assertFalse(Policy.hardwareTypeMismatch("ML-DSA", 1952, "PQC_MLDSA_65")); assertTrue(Policy.hardwareTypeMismatch("ML-DSA", 1952, "PQC_MLDSA_87")) }
 
     @Test fun replacementPromptIsTheUsualOneWhenTheNewKeyStaysBiometric() { assertEquals("Authorize key replacement", Policy.replacementPrompt(true)) }
-    @Test fun replacementPromptNamesTheDropWhenTheNewKeyIsSilent() { assertEquals("Authorize replacing this key with one that signs without biometrics", Policy.replacementPrompt(false)) }
+    @Test fun replacementPromptNamesTheDropWhenTheNewKeyIsSilent() { assertEquals("Replace this key with one that does not need biometrics", Policy.replacementPrompt(false)) }
 }
