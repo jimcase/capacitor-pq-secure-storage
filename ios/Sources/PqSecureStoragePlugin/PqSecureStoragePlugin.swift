@@ -391,7 +391,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         // optional host-supplied text shown in the prompt so the user sees what they authorize
         // prompt text only, not a consent guarantee (see definitions.ts). Cap so a caller can't
         // push a giant string or shove real content off-screen.
-        let reason = String((call.getString("description") ?? "Authenticate to sign with your PQ key").prefix(200))
+        let reason = InputPolicy.promptReason(call.getString("description"), default: "Authenticate to sign with your PQ key")
         if type == "ED25519" {
             return wrappedSign(alias: alias, reason: reason, msg: raw, call: call)
         }
