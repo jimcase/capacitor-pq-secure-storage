@@ -20,7 +20,7 @@ Your keys stay in the Secure Enclave and the Android Keystore, gated by a biomet
 ## Features
 
 - **ML-DSA signing** (FIPS 204, levels 65/87), hardware-backed (iOS Secure Enclave, Android Keystore).
-- **AES-256-GCM at rest** with the key held in the TEE / Keychain.
+- **Encryption at rest**: Secure Enclave ECIES on iOS, AES-256-GCM with a Keystore key in the TEE on Android.
 - **ML-KEM** (FIPS 203, levels 768/1024) for receiving data encrypted to your public key.
 - **Secure storage** (`setItem` / `getItem` / ...), a biometric-gated key-value store.
 
@@ -56,7 +56,7 @@ biometric-gated. Use it for development or non-critical data only.
 |---|---|---|
 | ML-DSA sign | Secure Enclave (hardware) | Keystore (hardware) |
 | ML-KEM decapsulate | Secure Enclave (hardware) | software (BouncyCastle), private wrapped by a Keystore AES key (TEE) |
-| AES at rest | Keychain / CryptoKit | Keystore AES-256-GCM (TEE) |
+| Encryption at rest | Secure Enclave ECIES (P-256 key, never leaves the enclave) | Keystore AES-256-GCM (TEE) |
 | Secure storage | Keychain, per-item access control | per-item Keystore AES-256-GCM key (StrongBox where available), biometric bound to the item Cipher |
 
 iOS decapsulates ML-KEM inside the Secure Enclave; Android does not, because the Android Keystore
@@ -674,6 +674,10 @@ up. The plugin cannot migrate at-rest keys.
 
 An alias that 7.0.x left with both a hardware and a wrapped Ed25519 key cannot be regenerated. That
 state is not supported: recreate the key under a new alias.
+
+No rollback on iOS: a 7.1.0 build reads wrapped Ed25519 keys written by 7.2.0 as `E_TAMPERED`,
+because their public entry gained a version field. Do not regenerate them on 7.1.0, upgrade again
+instead. Keys written by 7.1.0 keep working on 7.2.0.
 
 ## Error codes
 
