@@ -794,9 +794,16 @@ class PqSecureStoragePlugin : Plugin() {
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
         val oid = mlkemOidOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         val input = decodeCapped(call, data) ?: return
+        val pubRaw = try {
+            decodeBase64Capped(pubStr)
+        } catch (e: IllegalArgumentException) {
+            return call.reject("Invalid public key", "E_INVALID_ARGS")
+        } catch (e: InputTooLargeException) {
+            return call.reject("Invalid public key", "E_INVALID_ARGS")
+        }
         try {
             // the peer sends a raw public key; rebuild the SPKI wrapper JCA needs to parse it
-            val pubKey = mlkemPublicFromRaw(Base64.decode(pubStr, Base64.DEFAULT), oid)
+            val pubKey = mlkemPublicFromRaw(pubRaw, oid)
             // encapsulate (software, no alias/biometric) -> frame = kemCt || nonce(12) || aead(+tag)
             val frame = MlKemCrypto.encapAndSeal(bc, pubKey, input)
             val ret = JSObject()
