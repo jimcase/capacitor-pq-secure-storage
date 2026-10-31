@@ -109,6 +109,10 @@ class PqSecureStoragePlugin : Plugin() {
                 sigGenerating.remove(alias)
                 return call.reject("Alias already exists", "E_ALIAS_EXISTS")
             }
+            if (!Policy.canAddAlias(sigPrefs().all.keys.count { it.endsWith(".pub") }, exists)) {
+                sigGenerating.remove(alias)
+                return call.reject("Too many aliases", "E_STORE_FULL")
+            }
             val runGeneration: () -> Unit = {
                 try {
                     val (seed, pub) = ed25519Keygen()
@@ -649,6 +653,10 @@ class PqSecureStoragePlugin : Plugin() {
             if (!overwrite && exists) {
                 kemGenerating.remove(alias)
                 return call.reject("Alias already exists", "E_ALIAS_EXISTS")
+            }
+            if (!Policy.canAddAlias(kemPrefs().all.keys.count { it.endsWith(".pub") }, exists)) {
+                kemGenerating.remove(alias)
+                return call.reject("Too many aliases", "E_STORE_FULL")
             }
 
             // the heavy path: generate the keypair, wrap the private, rotate the wrap key
@@ -1241,14 +1249,25 @@ class PqSecureStoragePlugin : Plugin() {
         val alias: String
         val existing: SecretKey?
         val hasItem: Boolean
+        val itemsNow: Int
+        val charsNow: Long
         try {
             alias = itemKeyAlias(key)
             existing = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
-            hasItem = storeItems().contains(nameTag(key))
+            val tag = nameTag(key)
+            hasItem = storeItems().contains(tag)
+            val all = storeItems().all
+            itemsNow = all.size
+            charsNow = all.entries.sumOf { (k, v) -> if (k == tag) 0L else ((v as? String)?.length ?: 0).toLong() }
         } catch (e: Exception) {
             logd("setItem: key lookup failed for key=$key", e)
             done()
             return call.reject("Store failed", "E_ENCRYPT")
+        }
+        val entryChars = Policy.storedEntryEstimate(key.toByteArray(Charsets.UTF_8).size, value.toByteArray(Charsets.UTF_8).size)
+        if (!Policy.storeHasRoom(itemsNow, charsNow, hasItem, entryChars)) {
+            done()
+            return call.reject("Store full", "E_STORE_FULL")
         }
         // an item's tier is fixed at creation; a change must go through removeItem. Enforce it even
         // when the key was invalidated by an enrollment change (isAuthRequired reads metadata, still
@@ -1407,7 +1426,7 @@ class PqSecureStoragePlugin : Plugin() {
     }
 
     @PluginMethod
-    fun keys(call: PluginCall) {
+    fun keys(call: PluginCall): Unit = guarded(call, "E_DECRYPT") {
         val arr = JSArray()
         // prefs keys are hashed; recover the real names from the encrypted encName field
         for ((_, v) in storeItems().all) {

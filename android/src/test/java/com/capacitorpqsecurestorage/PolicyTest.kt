@@ -1,7 +1,9 @@
 package com.capacitorpqsecurestorage
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.security.KeyPairGenerator
@@ -118,4 +120,11 @@ class PolicyTest {
         assertNull(Policy.booleanOption(1, false))
         assertNull(Policy.booleanOption(Any(), true))
     }
+
+    @Test fun storeRejectsOneItemOverTheCap() { assertFalse(Policy.storeHasRoom(512, 0L, replacing = false, newEntryChars = 1)) }
+    @Test fun storeAcceptsAReplacementAtTheCap() { assertTrue(Policy.storeHasRoom(512, 0L, replacing = true, newEntryChars = 1)) }
+    @Test fun storeRejectsWhenTheTextBudgetIsExceeded() { assertFalse(Policy.storeHasRoom(1, Policy.MAX_STORE_TOTAL_CHARS - 10L, replacing = false, newEntryChars = 11)) }
+    @Test fun storeAcceptsExactlyTheTextBudget() { assertTrue(Policy.storeHasRoom(1, Policy.MAX_STORE_TOTAL_CHARS - 10L, replacing = false, newEntryChars = 10)) }
+    @Test fun entryEstimateCoversTheBase64Growth() { assertTrue(Policy.storedEntryEstimate(10, 262144) >= 349_600) }
+    @Test fun aliasCapAllowsAnOverwrite() { assertTrue(Policy.canAddAlias(256, exists = true)); assertFalse(Policy.canAddAlias(256, exists = false)) }
 }
