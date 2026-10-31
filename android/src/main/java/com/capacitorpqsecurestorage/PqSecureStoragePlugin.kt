@@ -1291,9 +1291,9 @@ class PqSecureStoragePlugin : Plugin() {
             if (!bio) {
                 cipher.updateAAD(key.toByteArray(Charsets.UTF_8))
                 val ct = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-                storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
+                val committed = storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
                 done()
-                call.resolve()
+                if (committed) call.resolve() else call.reject("Store failed", "E_ENCRYPT")
             } else {
                 // a biometric item's own key gates the WRITE too (encrypt needs the key), so the
                 // prompt here is the same gate that blocks a silent bridge caller from overwriting it
@@ -1303,9 +1303,9 @@ class PqSecureStoragePlugin : Plugin() {
                     onError = { done() }) { boundCipher ->
                     boundCipher.updateAAD(key.toByteArray(Charsets.UTF_8))
                     val ct = boundCipher.doFinal(value.toByteArray(Charsets.UTF_8))
-                    storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
+                    val committed = storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
                     done()
-                    call.resolve()
+                    if (committed) call.resolve() else call.reject("Store failed", "E_ENCRYPT")
                 }
             }
         } catch (e: Exception) {
