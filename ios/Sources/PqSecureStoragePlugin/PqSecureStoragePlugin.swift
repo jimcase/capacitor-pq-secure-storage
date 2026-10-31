@@ -1407,7 +1407,16 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             // means absent; if the row is there, confirm first like any biometric item.
             switch Self.ssMetaStatus(account: account) {
             case errSecItemNotFound: call.resolve()
-            case errSecSuccess, errSecInteractionNotAllowed: confirmDel()
+            case errSecSuccess, errSecInteractionNotAllowed:
+                // with no biometric enrolled a biometryCurrentSet item can't be live and the prompt
+                // can't run, so delete it or the name stays locked
+                var enrollErr: NSError?
+                if !LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &enrollErr),
+                   (enrollErr as? LAError)?.code == .biometryNotEnrolled {
+                    del()
+                } else {
+                    confirmDel()
+                }
             default: call.reject("Remove failed", "E_DECRYPT")
             }
         case errSecInteractionNotAllowed:
