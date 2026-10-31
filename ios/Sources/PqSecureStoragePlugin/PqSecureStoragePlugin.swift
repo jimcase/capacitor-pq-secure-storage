@@ -1428,8 +1428,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         ]
         var out: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &out)
+        if status == errSecItemNotFound { return call.resolve(["keys": []]) }
+        guard status == errSecSuccess else {
+            call.reject("List failed", "E_DECRYPT"); return
+        }
         var result: [String] = []
-        if status == errSecSuccess, let items = out as? [[String: Any]] {
+        if let items = out as? [[String: Any]] {
             for item in items {
                 // the account is the HMAC tag; the real name is the encrypted generic attr
                 if let enc = item[kSecAttrGeneric as String] as? Data, let name = try? Self.decName(enc) {
