@@ -251,10 +251,23 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         return { signature: toB64(sig) };
     }
 
-    async encryptAtRest(options: { keyAlias: string; data: string }): Promise<{ ciphertext: string }> {
+    async encryptAtRest(options: {
+        keyAlias: string;
+        data: string;
+        format?: FrameFormat;
+    }): Promise<{ ciphertext: string }> {
+        const fmt = this.formatArg(options.format);
         const key = this.getOrCreateAes(this.safeAlias(options.keyAlias));
         const input = this.decodeCapped(options.data);
-        return { ciphertext: toB64(this.guard('E_ENCRYPT', 'Encrypt failed', () => this.aesSeal(key, input))) };
+        return {
+            ciphertext: toB64(
+                this.guard('E_ENCRYPT', 'Encrypt failed', () => {
+                    if (fmt !== 2) return this.aesSeal(key, input);
+                    const header = frameHeader(FrameSuite.AT_REST_AES_GCM);
+                    return concat(header, this.aesSeal(key, input, header));
+                }),
+            ),
+        };
     }
 
     async decryptAtRest(options: {
@@ -263,11 +276,19 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
     }): Promise<{ plaintext: string; outdated: boolean }> {
         const key = this.get(`pqss.aes.${this.safeAlias(options.keyAlias)}`);
         if (!key) this.fail('E_KEY_NOT_FOUND', 'Key not found');
-        const input = this.decodeCapped(options.data);
-        return {
-            plaintext: toB64(this.guard('E_DECRYPT', 'Decrypt failed', () => this.aesOpen(key, input))),
-            outdated: true,
-        };
+        const buf = this.decodeCapped(options.data);
+        const r = openFrame(
+            buf,
+            'encryptAtRest',
+            (s) => s === FrameSuite.AT_REST_AES_GCM,
+            (h, _s, body) => this.aesOpen(key, body, h),
+            (f) => this.aesOpen(key, f),
+        );
+        if (!r.ok) {
+            if (r.unsupported) this.fail('E_UNSUPPORTED', 'Unsupported frame');
+            this.fail('E_DECRYPT', 'Decrypt failed');
+        }
+        return { plaintext: toB64(r.value), outdated: r.readAs === 1 };
     }
 
     async generateKemKeyPair(options: {
