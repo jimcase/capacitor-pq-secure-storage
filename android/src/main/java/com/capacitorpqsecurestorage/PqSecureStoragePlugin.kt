@@ -334,10 +334,10 @@ class PqSecureStoragePlugin : Plugin() {
         // if KeyMint implements it
         val variants = mutableListOf("ECDSA_256R1", "ED25519")
         if (ok) { variants.add("PQC_MLDSA_65"); variants.add("PQC_MLDSA_87") }
-        ret.put("supportedVariants", variants)
+        ret.put("supportedVariants", JSArray(variants))
         // ML-KEM works via software (BouncyCastle) on any API; the private key is wrapped by a
         // Keystore AES key. AndroidKeyStore does not expose ML-KEM to apps, so it is NOT in the SEP.
-        ret.put("supportedKem", listOf("PQC_MLKEM_768", "PQC_MLKEM_1024"))
+        ret.put("supportedKem", JSArray(listOf("PQC_MLKEM_768", "PQC_MLKEM_1024")))
         ret.put("kemInSecureEnclave", false)
         ret.put("atRestSuite", Frames.AT_REST_AES_GCM)
         call.resolve(ret)
@@ -420,17 +420,29 @@ class PqSecureStoragePlugin : Plugin() {
 
     @Volatile private var pqcCache: Boolean? = null
 
-    // whether AndroidKeyStore actually exposes ML-DSA keygen on this device. Probe it, don't guess an
-    // API level: Keystore ML-DSA depends on KeyMint, not just the OS version. getInstance resolves the
-    // algorithm without generating a key, so it is cheap and side-effect free.
+    // whether this device's Keystore can really make an ML-DSA key. getInstance alone is not enough:
+    // on some devices the algorithm resolves and KeyMint then rejects every keygen. So make a throwaway
+    // key and delete it. No unlock or auth requirement on it, so it works with the phone locked and a
+    // failure caused by the lock never gets cached. Serialized so two callers can't race the probe alias.
+    @Synchronized
     private fun pqcSigningSupported(): Boolean {
         pqcCache?.let { return it }
-        val ok = try {
-            KeyPairGenerator.getInstance("ML-DSA-65", KEYSTORE_PROVIDER)
-            true
-        } catch (e: Exception) {
-            logd("ML-DSA keystore probe failed", e); false
-        }
+        val probeAlias = "__pq_mldsa_probe__"
+        val ok = Policy.probe(
+            make = {
+                try {
+                    val kpg = KeyPairGenerator.getInstance("ML-DSA-65", KEYSTORE_PROVIDER)
+                    kpg.initialize(
+                        KeyGenParameterSpec.Builder(probeAlias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY).build()
+                    )
+                    kpg.generateKeyPair()
+                } catch (e: Exception) {
+                    logd("ML-DSA keystore probe failed", e)
+                    throw e
+                }
+            },
+            cleanup = { keystore().deleteEntry(probeAlias) }
+        )
         pqcCache = ok
         return ok
     }

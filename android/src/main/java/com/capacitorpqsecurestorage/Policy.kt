@@ -40,6 +40,21 @@ internal object Policy {
         else -> null
     }
 
+    // Whether [make] works. [cleanup] runs either way and a failure in it never changes the answer,
+    // so a probe key is never left behind and never turns a working Keystore into a "no".
+    fun probe(make: () -> Unit, cleanup: () -> Unit): Boolean =
+        try {
+            make()
+            true
+        } catch (e: Exception) {
+            false
+        } finally {
+            try {
+                cleanup()
+            } catch (e: Exception) {
+            }
+        }
+
     // a downgrade must not read like a normal rotation
     fun replacementPrompt(newRequiresBiometric: Boolean): String =
         if (newRequiresBiometric) "Authorize key replacement"
