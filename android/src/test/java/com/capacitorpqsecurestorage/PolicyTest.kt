@@ -135,6 +135,26 @@ class PolicyTest {
     @Test fun replacementPromptIsTheUsualOneWhenTheNewKeyStaysBiometric() { assertEquals("Authorize key replacement", Policy.replacementPrompt(true)) }
     @Test fun replacementPromptNamesTheDropWhenTheNewKeyIsSilent() { assertEquals("Replace this key with one that does not need biometrics", Policy.replacementPrompt(false)) }
 
+    @Test
+    fun aProbeThatWorksIsTrueAndCleansUp() {
+        var cleaned = false
+        assertTrue(Policy.probe(make = {}, cleanup = { cleaned = true }))
+        assertTrue(cleaned)
+    }
+
+    @Test
+    fun aProbeThatThrowsIsFalseAndStillCleansUp() {
+        var cleaned = false
+        assertFalse(Policy.probe(make = { throw IllegalStateException("keymint") }, cleanup = { cleaned = true }))
+        assertTrue(cleaned)
+    }
+
+    @Test
+    fun aCleanupThatThrowsDoesNotChangeTheAnswer() {
+        assertTrue(Policy.probe(make = {}, cleanup = { throw IllegalStateException("gone") }))
+        assertFalse(Policy.probe(make = { throw IllegalStateException("x") }, cleanup = { throw IllegalStateException("gone") }))
+    }
+
     @Test fun aPromptWhileTheSensorIsBusyIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_HW_UNAVAILABLE)) }
     @Test fun aPromptWithNoSensorIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_HW_NOT_PRESENT)) }
     @Test fun aPromptWithNothingEnrolledIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_NO_BIOMETRICS)) }
