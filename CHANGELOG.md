@@ -26,7 +26,7 @@ All notable changes to this project are documented here. The format is based on
   Enclave cannot make an ML-KEM-768 key. On iOS the plugin checks it once per process when the check
   succeeds, and a failed check runs again on the next call.
 - Encryption at rest under a Secure Enclave ML-KEM-768 key on iOS 26+ (`format: 2`, suite `0x12`). The
-  alias key comes from one encapsulation saved in the Keychain (about 4.7 KB per alias) and one
+  alias key comes from one encapsulation saved in the Keychain (about 2.5 KB per alias) and one
   decapsulation in the Secure Enclave per call. No biometric prompt.
 
 ### Changed

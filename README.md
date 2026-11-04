@@ -2,8 +2,8 @@
 
 Capacitor plugin for post-quantum signing (ML-DSA), ML-KEM encryption and secure storage on iOS and
 Android. Private keys live in the iOS Secure Enclave and the Android Keystore, and can require a
-biometric for every use. iOS is verified on a device. Android is not verified on a physical device
-yet, see [Verification status](#verification-status).
+biometric for every use. Both platforms are checked on a phone. On the Android phone tested,
+ML-DSA is not available in hardware, see [Verification status](#verification-status).
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/jimcase/capacitor-pq-secure-storage/master/hero.png" alt="capacitor-pq-secure-storage: hardware-backed post-quantum crypto" />
@@ -63,9 +63,9 @@ What works below the ML-DSA / ML-KEM floor:
 - **Android without Keystore ML-DSA**: everything but ML-DSA. `supportsPqc` is false,
   `supportedVariants` lists `ECDSA_256R1` and `ED25519`, and an ML-DSA `generateKeyPair` rejects
   `E_KEYGEN`.
-- **Simulator and emulator**: the iOS simulator has no Secure Enclave, so signing, ML-KEM keys and
-  at-rest fail there. Android emulators run the store, at-rest and ML-KEM, but have no Keystore
-  ML-DSA.
+- **Simulator and emulator**: on the iOS simulator the unsigned test build has no Keychain access,
+  so signing, ML-KEM keys, the store and at-rest fail there. Android emulators run the store,
+  at-rest and ML-KEM, but have no Keystore ML-DSA.
 
 On the **web** there is no secure hardware, so the plugin uses a software backend (@noble) with keys
 in `localStorage`. Operations work and `supportsPqc` is `true`, but nothing is hardware-backed or
@@ -94,11 +94,19 @@ uses.
 
 | Platform | Verified on |
 |---|---|
-| iOS | iPhone 15 Pro / iOS 26, July 2026, on the 7.0.0 / 8.0.0 code. ML-DSA keygen in the Secure Enclave, Face ID on every sign, signatures verified off-device. Not yet checked on a device: at-rest, the store, ECDSA, Ed25519, and the fixes of the two October 2026 audits. |
-| Android | Emulator only. The store, at-rest and ML-KEM paths run there. ML-DSA signing has not run on a real Keystore yet, because emulators do not have it. TEE / StrongBox placement is NOT confirmed on a physical device. |
+| iOS | iPhone 16 / iOS 27.0.1, November 2026, this code. ML-DSA-65 and 87 in the Secure Enclave with Face ID on every sign, ECDSA, Ed25519, the store, at-rest with suite `0x12` (`atRestSuite` 18) and older frames, ML-KEM 768 and 1024, frames shared with the web both ways. Earlier: iPhone 15 Pro / iOS 26, July 2026, on the 7.0.0 / 8.0.0 code. |
+| Android | Samsung Galaxy A57 / Android 17, November 2026, this code. The store, at-rest (`0x10`), ML-KEM 768 and 1024, ECDSA and Ed25519, biometric prompts and their cancel paths, frames shared with the web both ways. All keys in the TEE (security level checked); no StrongBox on that phone. ML-DSA does NOT work there: the Keystore rejects every ML-DSA key. |
 
-<!-- placeholder: replace the next line with the 7.2.0 / 8.2.0 device results -->
-**Placeholder:** device results for 7.2.0 and 8.2.0 are being collected and will be added here.
+Known issues found on these phones, to be fixed in a later release:
+
+- iOS: `keys()` does not list biometric items. A plain `clear()` still removes them, but `clear()`
+  on a `withPrefix` view leaves them.
+- Android: on the Android 17 phone tested, `supportsPqc` is true and `supportedVariants` lists the
+  ML-DSA types, yet every ML-DSA `generateKeyPair` rejects `E_KEYGEN`.
+- Android: `supportedVariants` and `supportedKem` reach JavaScript as a string such as
+  `"[ECDSA_256R1, ED25519]"`, not as an array.
+
+The full list of checks and their results is in `DEVICE-VERIFICATION.md`, section Results so far.
 
 On Android, read `hardwareBacked` from `getHardwareCapabilities()` at runtime and gate seed-tier
 trust on it. It comes from a probe AES key, not from your ML-DSA key, and the plugin does not
@@ -224,7 +232,7 @@ tells you which one before you call:
 - Android and the web write `0x10`, AES-256-GCM.
 - iOS 26+ writes `0x12` when the Secure Enclave can make an ML-KEM-768 key. The first call for an
   alias makes that key and does one encapsulation to it. Both are saved in one Keychain item, about
-  4.7 KB (see [Limits](#limits)). Every encrypt and every decrypt then decapsulates in the Secure
+  2.5 KB (see [Limits](#limits)). Every encrypt and every decrypt then decapsulates in the Secure
   Enclave, and the 32-byte result is the AES-256 key for that call. Like the P-256 key, it never
   prompts and works only while the device is unlocked.
 - iOS below 26, or iOS 26+ when the Secure Enclave cannot make that key, writes `0x11`: the ECIES
@@ -410,8 +418,8 @@ await mine.clear(); // only the items under mylib_
 
 `clear()` on a view removes item by item, with one prompt per biometric item. It keeps going after a
 cancelled or failed one and rejects at the end with the first error. The items that were not removed
-stay in the store. It finds the items with `keys()`, and on iOS it is not yet checked on a device
-that `keys()` lists biometric items.
+stay in the store. It finds the items with `keys()`, and on iOS `keys()` does not list biometric
+items, so a view's `clear()` leaves them (a plain `clear()` removes them).
 
 Only store keys get the prefix, and it counts toward the 512-unit key limit. Key aliases (signing,
 KEM, at-rest) are shared by every caller. A prefix is a plain string prefix: a view on `app_` also
@@ -471,7 +479,7 @@ prefs cannot be pulled/edited via `adb backup`/`restore`.
 | Android ML-KEM aliases | 256 | `E_STORE_FULL` |
 | Android Ed25519 aliases | 256 | `E_STORE_FULL` |
 | v2 frame overhead | 32 bytes per frame (`0x10`, `0x12`), about 85 bytes (`0x11`), 4 bytes more than v1 (`encryptTo`) | none, it only adds to the size |
-| iOS `0x12` key material | about 4.7 KB in the Keychain per alias (measured on the iOS 26.2 simulator), made once | none |
+| iOS `0x12` key material | about 2.5 KB in the Keychain per alias (2577 bytes on an iPhone 16 / iOS 27), made once | none |
 | Frames per AES at-rest key (Android, web, iOS `0x12`) | 2^32 (12-byte random nonce) | not enforced |
 
 Hardware signing keys (ML-DSA, ECDSA) have no cap in the plugin, and iOS and the web have no store
@@ -569,7 +577,9 @@ P-256 keys are made in the Secure Enclave (iOS) or the Keystore (Android). Ed255
 software key whose private is encrypted by a hardware key and opened only to sign. Rejects if
 the alias exists unless `overwrite` is true. Distinct aliases give independent keypairs (use
 that for KERI rotation, one alias per key). On Android an ML-DSA type on a device without
-Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first.
+Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first. On some Android 17
+phones `supportedVariants` lists ML-DSA and the Keystore still rejects the key, so handle
+`E_KEYGEN` too.
 
 `requireBiometric` (default `true`) is baked into the key: `true` makes every `sign` prompt
 for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
@@ -876,8 +886,9 @@ keys() => Promise<{ keys: string[]; }>
 ```
 
 List the names of stored secrets. No prompt. Rejects `E_DECRYPT` when the store cannot be
-listed, so a prefixed `clear()` fails instead of deleting nothing. On iOS it is not yet
-checked on a device that biometric items are listed (see DEVICE-VERIFICATION.md).
+listed, so a prefixed `clear()` fails instead of deleting nothing. On iOS it does not list
+biometric items (checked on a device), so a prefixed `clear()` leaves them; a plain `clear()`
+removes them.
 
 **Returns:** <code>Promise&lt;{ keys: string[]; }&gt;</code>
 
