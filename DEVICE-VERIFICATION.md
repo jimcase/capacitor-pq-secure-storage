@@ -148,6 +148,9 @@ build and the plugin version. The current state is in [Results so far](#results-
   with `outdated: false` for ML-KEM-768 (the spec runs 768 only). [manual] The same for 1024, with the
   test app's `type` field on `PQC_MLKEM_1024`. The frame starts with `50 51 02 01` (768) or
   `50 51 02 02` (1024).
+- [ ] **B10.** [manual] A biometric ML-KEM key (made with `requireBiometric: true`) given a v2 frame
+  with a changed body byte prompts exactly once, then rejects `E_CRYPTO`. The prompted path keeps that
+  code, the silent path answers `E_DECRYPT` for the same frame.
 
 ### C. Concurrency and prompts
 
@@ -361,6 +364,7 @@ iOS has no `E_BUSY` latch, so these record what happens.
 | Everything else on iOS | Not run on a device yet |
 | Everything on Android | Not run on a phone yet. B1 to B3 pass on an emulator; A3 fails there (no Keystore ML-DSA) |
 | B8, B9 (Android `0x10` and v2 ML-KEM frames) | Not run yet on a phone. The e2e specs for them pass on an Android emulator |
+| B10 (Android biometric ML-KEM key, changed v2 frame) | Not run yet |
 | E9 to E12 (iOS `0x12`: `atRestSuite`, round trip and timing, older frames, Keychain item), E13 to E20 | Not run yet |
 | X4 (web and phone, `encryptTo` with `format: 2`) | Not run yet |
 

@@ -32,7 +32,9 @@ All notable changes to this project are documented here. The format is based on
 ### Changed
 
 - `decrypt` and `decryptAtRest` return one more field, `outdated`, and `getHardwareCapabilities` one
-  more, `atRestSuite`. Nothing breaks: existing fields and frames are unchanged.
+  more, `atRestSuite`. Existing fields and frames are unchanged, but typed mocks or implementations of
+  `PqSecureStoragePlugin` or `HardwareCapabilities` stop compiling until they add `outdated` to the
+  decrypt results and `atRestSuite` to the capabilities.
 - No rollback for `format: 2` data: 7.2.0 and earlier cannot read frames made with it. Frames without
   a header keep working in both directions.
 
