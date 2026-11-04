@@ -505,7 +505,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
         let p256 = try? Self.atRestKey(alias: alias, create: false)
-        guard kem != nil || p256 != nil else { return call.reject("Key not found", "E_KEY_NOT_FOUND") }
+        // an alias written only with format 2 has just the ML-KEM item, other frames still get the read rule
+        var hasKem = kem != nil
+        if !hasKem, p256 == nil, #available(iOS 26.0, *) {
+            hasKem = (try? Self.atRestKemItem(alias: alias, create: false)) != nil
+        }
+        guard hasKem || p256 != nil else { return call.reject("Key not found", "E_KEY_NOT_FOUND") }
         let ecies: (Data) throws -> Data = { ct in
             guard let priv = p256 else { throw PqSecureStorageError.keyNotFound }
             var err: Unmanaged<CFError>?
