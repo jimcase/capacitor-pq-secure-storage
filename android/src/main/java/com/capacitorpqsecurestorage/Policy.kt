@@ -52,7 +52,8 @@ internal object Policy {
         BiometricPrompt.ERROR_NO_BIOMETRICS,
         BiometricPrompt.ERROR_LOCKOUT,
         BiometricPrompt.ERROR_LOCKOUT_PERMANENT,
-        BiometricPrompt.ERROR_SECURITY_UPDATE_REQUIRED -> "E_BIOMETRY_UNAVAILABLE"
+        BiometricPrompt.ERROR_SECURITY_UPDATE_REQUIRED,
+        BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL -> "E_BIOMETRY_UNAVAILABLE"
         else -> "E_AUTH_FAILED"
     }
 

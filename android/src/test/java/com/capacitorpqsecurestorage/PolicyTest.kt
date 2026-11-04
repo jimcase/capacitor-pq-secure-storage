@@ -141,6 +141,7 @@ class PolicyTest {
     @Test fun aLockoutIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_LOCKOUT)) }
     @Test fun aPermanentLockoutIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_LOCKOUT_PERMANENT)) }
     @Test fun aSensorThatWaitsForASecurityUpdateIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_SECURITY_UPDATE_REQUIRED)) }
+    @Test fun aDeviceWithNoPinOrPasswordIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL)) }
 
     // the user or the system ended a prompt that could run: the host must not read it as no biometric
     @Test
@@ -153,7 +154,7 @@ class PolicyTest {
     @Test
     fun otherPromptErrorsStayAuthFailed() {
         for (code in listOf(BiometricPrompt.ERROR_TIMEOUT, BiometricPrompt.ERROR_UNABLE_TO_PROCESS, BiometricPrompt.ERROR_NO_SPACE,
-                BiometricPrompt.ERROR_VENDOR, BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL)) {
+                BiometricPrompt.ERROR_VENDOR)) {
             assertEquals("code $code", "E_AUTH_FAILED", Policy.promptErrorCode(code))
         }
     }
