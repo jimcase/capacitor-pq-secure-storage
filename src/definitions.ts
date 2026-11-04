@@ -1,5 +1,6 @@
 export type SignatureType = 'PQC_MLDSA_65' | 'PQC_MLDSA_87' | 'ECDSA_256R1' | 'ED25519';
 export type KemType = 'PQC_MLKEM_768' | 'PQC_MLKEM_1024';
+export type FrameFormat = 1 | 2;
 
 /** Named signature-type values, so you can write MLDSA_65 instead of the raw string. */
 export const SignatureType = {
@@ -14,6 +15,12 @@ export const KemType = {
     MLKEM_768: 'PQC_MLKEM_768',
     MLKEM_1024: 'PQC_MLKEM_1024',
 } as const satisfies Record<string, KemType>;
+
+/** Named frame-format values: V1 (no header, the default) / V2 (4-byte header with the suite). */
+export const FrameFormat = {
+    V1: 1,
+    V2: 2,
+} as const satisfies Record<string, FrameFormat>;
 
 /**
  * When a stored item is reachable, honored per item on both platforms: iOS maps it to the Keychain
@@ -68,6 +75,14 @@ export interface HardwareCapabilities {
      * On Android it is done in software with the private key wrapped by a Keystore key.
      */
     kemInSecureEnclave: boolean;
+    /**
+     * The suite id `encryptAtRest` writes on this device when called with `format: 2`, and the one
+     * `decryptAtRest` compares against for `outdated`. `0x10`: AES-256-GCM in the Keystore (Android)
+     * or the web fallback. `0x11`: ECIES under a Secure Enclave P-256 key (iOS below 26, or iOS 26+
+     * when the Secure Enclave cannot create an ML-KEM-768 key). `0x12`: AES-256-GCM with a key from
+     * a Secure Enclave ML-KEM-768 decapsulation (iOS 26+). The iOS value is probed once per process.
+     */
+    atRestSuite: number;
 }
 
 export interface PqSecureStoragePlugin {
@@ -130,11 +145,26 @@ export interface PqSecureStoragePlugin {
      * The key is made per alias on first use, works only while the device is unlocked, and never
      * prompts. Returns the blob to store; it opens only on the same device and alias. Rejects
      * `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
+     *
+     * `format` (default `1`) picks the frame: `1` is the plain frame of every earlier version, `2`
+     * puts a 4-byte header (`PQ`, version, suite) in front so a later release can change the
+     * algorithm without breaking stored data. Any other value rejects `E_INVALID_ARGS`. You do not
+     * pick the suite, the platform does: `atRestSuite` in `getHardwareCapabilities` says which one.
+     * On iOS 26+ with `atRestSuite` `0x12` the key is derived from an ML-KEM-768 key in the Secure
+     * Enclave. The `0x11` suite does not authenticate its header.
      */
-    encryptAtRest(options: { keyAlias: string; data: string }): Promise<{ ciphertext: string }>;
+    encryptAtRest(options: { keyAlias: string; data: string; format?: FrameFormat }): Promise<{ ciphertext: string }>;
 
-    /** Decrypt a blob produced by `encryptAtRest` under the same alias. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB. */
-    decryptAtRest(options: { keyAlias: string; data: string }): Promise<{ plaintext: string }>;
+    /**
+     * Decrypt a blob produced by `encryptAtRest` under the same alias, in either format. Rejects
+     * `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB, and `E_UNSUPPORTED` if the blob looks like a
+     * frame from a newer version of the plugin.
+     *
+     * `outdated` is `true` when the blob was read as a plain (format 1) frame or its suite is not
+     * the current `atRestSuite`. Re-encrypt it with `format: 2` and store it again to migrate. An
+     * app that never passes `format: 2` will see `outdated: true` on every read.
+     */
+    decryptAtRest(options: { keyAlias: string; data: string }): Promise<{ plaintext: string; outdated: boolean }>;
 
     /**
      * Generate an ML-KEM keypair under an alias and return the raw public key. Rejects if the alias
@@ -163,11 +193,32 @@ export interface PqSecureStoragePlugin {
      * opens on another.
      * It does not say who sent it; sign the payload if the recipient must know. Rejects
      * `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
+     *
+     * `format` (default `1`) picks the frame: `1` is the plain frame described above, `2` puts a
+     * 4-byte header (`PQ`, version, suite from `type`) in front and authenticates it with the
+     * ChaCha20-Poly1305 tag. Any other value rejects `E_INVALID_ARGS`.
      */
-    encryptTo(options: { recipientPublicKey: string; type: KemType; data: string }): Promise<{ ciphertext: string }>;
+    encryptTo(options: {
+        recipientPublicKey: string;
+        type: KemType;
+        data: string;
+        format?: FrameFormat;
+    }): Promise<{ ciphertext: string }>;
 
-    /** Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics only if the key requires it. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB. */
-    decrypt(options: { keyAlias: string; type: KemType; data: string }): Promise<{ plaintext: string }>;
+    /**
+     * Decrypt data addressed to the aliased ML-KEM key, in either format. Prompts for biometrics
+     * only if the key requires it, once per call. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds
+     * 10 MiB, and `E_UNSUPPORTED` if the frame looks like one from a newer version of the plugin.
+     *
+     * `outdated` is `true` when the frame was read as a plain (format 1) frame. Re-encrypt it with
+     * `format: 2` to migrate. An app that never passes `format: 2` will see `outdated: true` on
+     * every read.
+     */
+    decrypt(options: {
+        keyAlias: string;
+        type: KemType;
+        data: string;
+    }): Promise<{ plaintext: string; outdated: boolean }>;
 
     /**
      * Store a secret string under a key. `value` is stored verbatim. Each item is encrypted under

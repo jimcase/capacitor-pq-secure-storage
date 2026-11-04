@@ -11,6 +11,8 @@ const PqSecureStorage = enhance(plugin);
 
 export * from './definitions.js';
 export * from './algorithms.js';
+export { FrameSuite, FRAME_SUITES, parseFrameHeader } from './frames.js';
+export type { FrameSuiteInfo } from './frames.js';
 export type { JsonValue, JsonMethods } from './json.js';
 export type { PrefixMethods } from './enhance.js';
 export { PqSecureStorage };

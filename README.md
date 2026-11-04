@@ -498,7 +498,7 @@ as the reason, but Face ID does not show it. Rejects `E_INPUT_TOO_LARGE` if `dat
 ### encryptAtRest(...)
 
 ```typescript
-encryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ ciphertext: string; }>
+encryptAtRest(options: { keyAlias: string; data: string; format?: FrameFormat; }) => Promise<{ ciphertext: string; }>
 ```
 
 Encrypt data with an AES-256-GCM key in the Keystore (Android) or with ECIES under a Secure
@@ -507,9 +507,16 @@ The key is made per alias on first use, works only while the device is unlocked,
 prompts. Returns the blob to store; it opens only on the same device and alias. Rejects
 `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
 
-| Param         | Type                                             |
-| ------------- | ------------------------------------------------ |
-| **`options`** | <code>{ keyAlias: string; data: string; }</code> |
+`format` (default `1`) picks the frame: `1` is the plain frame of every earlier version, `2`
+puts a 4-byte header (`PQ`, version, suite) in front so a later release can change the
+algorithm without breaking stored data. Any other value rejects `E_INVALID_ARGS`. You do not
+pick the suite, the platform does: `atRestSuite` in `getHardwareCapabilities` says which one.
+On iOS 26+ with `atRestSuite` `0x12` the key is derived from an ML-KEM-768 key in the Secure
+Enclave. The `0x11` suite does not authenticate its header.
+
+| Param         | Type                                                                                              |
+| ------------- | ------------------------------------------------------------------------------------------------- |
+| **`options`** | <code>{ keyAlias: string; data: string; format?: <a href="#frameformat">FrameFormat</a>; }</code> |
 
 **Returns:** <code>Promise&lt;{ ciphertext: string; }&gt;</code>
 
@@ -519,16 +526,22 @@ prompts. Returns the blob to store; it opens only on the same device and alias. 
 ### decryptAtRest(...)
 
 ```typescript
-decryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ plaintext: string; }>
+decryptAtRest(options: { keyAlias: string; data: string; }) => Promise<{ plaintext: string; outdated: boolean; }>
 ```
 
-Decrypt a blob produced by `encryptAtRest` under the same alias. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
+Decrypt a blob produced by `encryptAtRest` under the same alias, in either format. Rejects
+`E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB, and `E_UNSUPPORTED` if the blob looks like a
+frame from a newer version of the plugin.
+
+`outdated` is `true` when the blob was read as a plain (format 1) frame or its suite is not
+the current `atRestSuite`. Re-encrypt it with `format: 2` and store it again to migrate. An
+app that never passes `format: 2` will see `outdated: true` on every read.
 
 | Param         | Type                                             |
 | ------------- | ------------------------------------------------ |
 | **`options`** | <code>{ keyAlias: string; data: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ plaintext: string; }&gt;</code>
+**Returns:** <code>Promise&lt;{ plaintext: string; outdated: boolean; }&gt;</code>
 
 --------------------
 
@@ -577,7 +590,7 @@ Return the raw ML-KEM public key for an alias. Android and iOS verify an integri
 ### encryptTo(...)
 
 ```typescript
-encryptTo(options: { recipientPublicKey: string; type: KemType; data: string; }) => Promise<{ ciphertext: string; }>
+encryptTo(options: { recipientPublicKey: string; type: KemType; data: string; format?: FrameFormat; }) => Promise<{ ciphertext: string; }>
 ```
 
 Encrypt data to a recipient's raw ML-KEM public key. Pure software, no alias or biometrics.
@@ -587,9 +600,13 @@ opens on another.
 It does not say who sent it; sign the payload if the recipient must know. Rejects
 `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
 
-| Param         | Type                                                                                             |
-| ------------- | ------------------------------------------------------------------------------------------------ |
-| **`options`** | <code>{ recipientPublicKey: string; type: <a href="#kemtype">KemType</a>; data: string; }</code> |
+`format` (default `1`) picks the frame: `1` is the plain frame described above, `2` puts a
+4-byte header (`PQ`, version, suite from `type`) in front and authenticates it with the
+ChaCha20-Poly1305 tag. Any other value rejects `E_INVALID_ARGS`.
+
+| Param         | Type                                                                                                                                              |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`options`** | <code>{ recipientPublicKey: string; type: <a href="#kemtype">KemType</a>; data: string; format?: <a href="#frameformat">FrameFormat</a>; }</code> |
 
 **Returns:** <code>Promise&lt;{ ciphertext: string; }&gt;</code>
 
@@ -599,16 +616,22 @@ It does not say who sent it; sign the payload if the recipient must know. Reject
 ### decrypt(...)
 
 ```typescript
-decrypt(options: { keyAlias: string; type: KemType; data: string; }) => Promise<{ plaintext: string; }>
+decrypt(options: { keyAlias: string; type: KemType; data: string; }) => Promise<{ plaintext: string; outdated: boolean; }>
 ```
 
-Decrypt data addressed to the aliased ML-KEM key. Prompts for biometrics only if the key requires it. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds 10 MiB.
+Decrypt data addressed to the aliased ML-KEM key, in either format. Prompts for biometrics
+only if the key requires it, once per call. Rejects `E_INPUT_TOO_LARGE` if `data` exceeds
+10 MiB, and `E_UNSUPPORTED` if the frame looks like one from a newer version of the plugin.
+
+`outdated` is `true` when the frame was read as a plain (format 1) frame. Re-encrypt it with
+`format: 2` to migrate. An app that never passes `format: 2` will see `outdated: true` on
+every read.
 
 | Param         | Type                                                                                   |
 | ------------- | -------------------------------------------------------------------------------------- |
 | **`options`** | <code>{ keyAlias: string; type: <a href="#kemtype">KemType</a>; data: string; }</code> |
 
-**Returns:** <code>Promise&lt;{ plaintext: string; }&gt;</code>
+**Returns:** <code>Promise&lt;{ plaintext: string; outdated: boolean; }&gt;</code>
 
 --------------------
 
@@ -742,14 +765,15 @@ no biometric, so silent.
 
 #### HardwareCapabilities
 
-| Prop                     | Type                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ------------------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **`supportsPqc`**        | <code>boolean</code>         | Whether ML-DSA signing is available. iOS: iOS 26+ with a Secure Enclave (ML-KEM comes with it). Android: the Keystore offers ML-DSA (probed at runtime); ML-KEM works even when this is false, see `supportedKem`. True on the web fallback, which is software only.                                                                                                                                                                                               |
-| **`hardwareBacked`**     | <code>boolean</code>         | Android: a probe AES key in the Keystore reports TEE or StrongBox, not software. iOS: a Secure Enclave is present (reported on iOS 26+ only, false below). False on the web fallback. Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android this is about the AES and wrap keys only. ML-KEM is always software there (the private is wrapped by a hardware key), and where an ML-DSA key lives needs a per-key check (see DEVICE-VERIFICATION.md). |
-| **`biometricGated`**     | <code>boolean</code>         | True when a biometric is enrolled and can gate keys and items (Android: `BIOMETRIC_STRONG`). iOS reports false below iOS 26. False on the web fallback.                                                                                                                                                                                                                                                                                                            |
-| **`supportedVariants`**  | <code>SignatureType[]</code> | Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519).                                                                                                                                                                                                                                                                                                                                                                                           |
-| **`supportedKem`**       | <code>KemType[]</code>       | ML-KEM variants available on this device.                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| **`kemInSecureEnclave`** | <code>boolean</code>         | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key.                                                                                                                                                                                                                                                                                                     |
+| Prop                     | Type                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`supportsPqc`**        | <code>boolean</code>         | Whether ML-DSA signing is available. iOS: iOS 26+ with a Secure Enclave (ML-KEM comes with it). Android: the Keystore offers ML-DSA (probed at runtime); ML-KEM works even when this is false, see `supportedKem`. True on the web fallback, which is software only.                                                                                                                                                                                                                   |
+| **`hardwareBacked`**     | <code>boolean</code>         | Android: a probe AES key in the Keystore reports TEE or StrongBox, not software. iOS: a Secure Enclave is present (reported on iOS 26+ only, false below). False on the web fallback. Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android this is about the AES and wrap keys only. ML-KEM is always software there (the private is wrapped by a hardware key), and where an ML-DSA key lives needs a per-key check (see DEVICE-VERIFICATION.md).                     |
+| **`biometricGated`**     | <code>boolean</code>         | True when a biometric is enrolled and can gate keys and items (Android: `BIOMETRIC_STRONG`). iOS reports false below iOS 26. False on the web fallback.                                                                                                                                                                                                                                                                                                                                |
+| **`supportedVariants`**  | <code>SignatureType[]</code> | Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519).                                                                                                                                                                                                                                                                                                                                                                                                               |
+| **`supportedKem`**       | <code>KemType[]</code>       | ML-KEM variants available on this device.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| **`kemInSecureEnclave`** | <code>boolean</code>         | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key.                                                                                                                                                                                                                                                                                                                         |
+| **`atRestSuite`**        | <code>number</code>          | The suite id `encryptAtRest` writes on this device when called with `format: 2`, and the one `decryptAtRest` compares against for `outdated`. `0x10`: AES-256-GCM in the Keystore (Android) or the web fallback. `0x11`: ECIES under a Secure Enclave P-256 key (iOS below 26, or iOS 26+ when the Secure Enclave cannot create an ML-KEM-768 key). `0x12`: AES-256-GCM with a key from a Secure Enclave ML-KEM-768 decapsulation (iOS 26+). The iOS value is probed once per process. |
 
 
 ### Type Aliases
@@ -776,6 +800,17 @@ Named KEM-type values: MLKEM_768 / MLKEM_1024.
 type KemType =
   | 'PQC_MLKEM_768'
   | 'PQC_MLKEM_1024';
+```
+
+
+#### FrameFormat
+
+Named frame-format values: V1 (no header, the default) / V2 (4-byte header with the suite).
+
+```ts
+type FrameFormat =
+  | 1
+  | 2;
 ```
 
 
