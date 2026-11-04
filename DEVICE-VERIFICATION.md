@@ -139,6 +139,13 @@ build and the plugin version. The current state is in [Results so far](#results-
   Expected `E_STORE_FULL` at about 47 items (the 16 MiB cap). Then a loop of small values stops at
   512 items. Restart the app: `getItem`, `keys()` and `clear()` still work. Note after how many
   items it stopped, and `adb shell getprop dalvik.vm.heapgrowthlimit`.
+- [ ] **B8.** [e2e] Frame suite `0x10`. `getHardwareCapabilities()` reports `atRestSuite: 16`.
+  `encryptAtRest` with `format: 2` then `decryptAtRest` round-trips with `outdated: false`. A blob made
+  with `format: 1` reads with `outdated: true`. [manual] The v2 blob starts with `50 51 02 10` and is
+  32 bytes longer than the plaintext.
+- [ ] **B9.** [e2e] `encryptTo` with `format: 2` to the own public key, then `decrypt`, round-trips
+  with `outdated: false` for ML-KEM-768 and 1024. [manual] The frame starts with `50 51 02 01` (768)
+  or `50 51 02 02` (1024).
 
 ### C. Concurrency and prompts
 
@@ -193,6 +200,11 @@ build and the plugin version. The current state is in [Results so far](#results-
 
 ### E. Store and at-rest
 
+Suite `0x12` (E9 to E20) has not run end to end on a device yet. The iOS simulator cannot run it: the
+unsigned build has no Keychain access, so every key operation fails there. Suite `0x11` has no device
+to run on, because there is no iPhone below iOS 26 at hand. Its header parsing is covered by unit
+tests, and its body is the ECIES output of the plain frame, the same code that E2 checks.
+
 - [ ] **E1.** [e2e] Silent item: `setItem`, `getItem`, `keys` and `clear` round-trip.
 - [ ] **E2.** [e2e] `encryptAtRest` then `decryptAtRest` under the same alias round-trips.
   [manual] Under another alias it fails.
@@ -226,6 +238,57 @@ build and the plugin version. The current state is in [Results so far](#results-
 - [ ] **E8.** [manual] N-7: `keys()` with the device locked and the app alive in the background
   (S4): does it list, return `[]`, or reject `E_DECRYPT`? A view's `clear()` uses `keys()`, so it
   must not resolve having deleted nothing: `[]` here with items in the store is a fail.
+- [ ] **E9.** [e2e] `getHardwareCapabilities()` on the iPhone 16 reports `atRestSuite: 18` (`0x12`).
+  Console shows no "at-rest ml-kem probe failed" line. If it reports 17, the Secure Enclave cannot do
+  the ML-KEM-768 round trip: note the model and the iOS build.
+- [ ] **E10.** [e2e] `encryptAtRest` with `format: 2` on a new alias, then `decryptAtRest`, round-trips
+  with `outdated: false`. [manual] The frame starts with `50 51 02 12` and is 32 bytes longer than the
+  plaintext. Note in ms, from the log, the first `getHardwareCapabilities()` of a new process (the
+  check), `decryptAtRest` and `encryptAtRest` of `0x12`, and the same two calls with `format: 1`
+  (ECIES) to compare.
+- [ ] **E11.** [manual] Older frames. A blob made without `format`, or with `format: 1`, starts with
+  `04` and reads with `outdated: true`. So does a blob made by 7.2.0 before the update, and a `0x11`
+  blob if you have one. Encrypt the plaintext again with `format: 2` and it reads with
+  `outdated: false`. The old blob under the same alias still reads: the P-256 key and the ML-KEM item
+  live side by side.
+- [ ] **E12.** [manual, debug build] The Keychain has a generic password with account
+  `<alias>.atrest.mlkem` (service `com.capacitorpqsecurestorage.keys`). Note its size: 1088 bytes of ciphertext plus the key
+  representation, about 4.7 KB on the simulator. A new alias written only with `format: 2` has no
+  `pq.atrest.<alias>` P-256 key. No at-rest call (`encryptAtRest`, `decryptAtRest`, `format` 1 or 2)
+  shows a Face ID / Touch ID prompt.
+- [ ] **E13.** [manual] Kill and relaunch the app, then read the `0x12` blobs of the earlier launch.
+  This rebuilds the Secure Enclave key from the stored representation in a new process.
+- [ ] **E14.** [manual] Changed `0x12` blobs, edited in the console before `decryptAtRest`. A changed
+  byte of the body: `E_DECRYPT`. The suite byte changed to `11`: `E_DECRYPT` when the alias also has a
+  P-256 key, `E_KEY_NOT_FOUND` when it does not. The version byte changed to `03`: `E_UNSUPPORTED`
+  when either key exists, `E_KEY_NOT_FOUND` when neither does. A `0x12` blob under an alias that never
+  wrote one: `E_KEY_NOT_FOUND`.
+- [ ] **E15.** [manual, debug build] Make a plain (or `0x11`) blob and a `0x12` blob under one alias,
+  then delete only the `<alias>.atrest.mlkem` item. `decryptAtRest` of the `0x12` blob answers
+  `E_KEY_NOT_FOUND` even though the P-256 key exists, and the other blob still reads.
+- [ ] **E16.** [manual] Parallel calls. In a new process, 10 `getHardwareCapabilities()` at once all
+  give the same `atRestSuite`, and Console shows no burst of "probe failed" lines. Then 10 `encryptAtRest` with
+  `format: 2` at once on a new alias: all 10 blobs read back, and the Keychain holds one
+  `<alias>.atrest.mlkem` item. If an extension shares the access group, a first write from the app and
+  one from the extension at the same time must leave one item and two blobs that both read.
+- [ ] **E17.** [manual] Locked device (S4). Start the app in the background with the phone locked, for
+  example from a background task that calls `getHardwareCapabilities()`. Note the `atRestSuite` it
+  gives and whether the "probe failed" line shows. Unlock without killing the process and call again:
+  it must say 18, an `encryptAtRest` with `format: 2` must write `50 51 02 12`, and reading it gives
+  `outdated: false`. While locked, note the code of `decryptAtRest` on a `0x12` blob (`E_KEY_NOT_FOUND`
+  expected, and it is temporary: it reads again after unlock). `encryptAtRest` with `format: 2` on an
+  existing alias while locked must not replace the key: after unlock the older blobs still read.
+- [ ] **E18.** [manual] `decrypt` on the iPhone for ML-KEM-768 and for 1024, silent keys. A plain
+  (`format: 1`) frame reads with `outdated: true`. A `format: 2` frame reads with `outdated: false`. The
+  same v2 frame with a changed body byte: `E_DECRYPT`. The same frame with the version byte changed to
+  `03`: `E_UNSUPPORTED`.
+- [ ] **E19.** [manual] A biometric ML-KEM key (made with `requireBiometric: true`) given a v2 frame
+  with a changed body byte prompts exactly once, then rejects `E_DECRYPT`. The two reading tries share
+  the one prompt.
+- [ ] **E20.** [manual, optional] A device that cannot do `0x12`: an iOS 26 phone with an older Secure
+  Enclave, or any iPhone below iOS 26. `atRestSuite` is 17 (`0x11`), `encryptAtRest` with `format: 2`
+  writes `50 51 02 11` followed by the plain ECIES output, and it reads with `outdated: false`. Note
+  the model and the iOS build. Not run, if there is no such device.
 
 ### F. Concurrency
 
@@ -262,6 +325,11 @@ iOS has no `E_BUSY` latch, so these record what happens.
 - [ ] **X3.** [manual] No passcode or PIN fallback in any prompt, on either phone. Both platforms
   sign with a biometric only; Android binds the prompt to the key operation, iOS lets the Secure
   Enclave check the biometric when the key is used.
+- [ ] **X4.** [e2e] `encryptTo` with `format: 2` between the web and each phone, both ways and for both
+  sizes: the web encrypts to the phone's public key and the phone decrypts, then the phone encrypts to a
+  web key and the web decrypts. Every read gives `outdated: false`. This is the `device.e2e.ts` spec of
+  the device harness (an extra spec for USB phones, kept outside the repo), with a `format: 2` variant
+  of its web and device cases.
 
 ## Troubleshooting
 
@@ -276,6 +344,9 @@ iOS has no `E_BUSY` latch, so these record what happens.
 | No prompt on iOS | The key or item is silent, or Face ID is denied for the app (`E_AUTH_FAILED`) | Check `requireBio`, and Settings > the app > Face ID |
 | App crashes on the first Face ID prompt | `NSFaceIDUsageDescription` missing | Add it to `Info.plist` (S3) |
 | App crashes on an unknown alias | Plugin bug: it must reject `E_KEY_NOT_FOUND` | Report it with the log |
+| The e2e on a reused Android emulator runs an old build (no `atRestSuite`, no `format` field in the test app) | `test-app/scripts/e2e.sh` reuses the app already installed, and the debug APK has `versionCode` 1, so the new APK is not installed | `adb uninstall com.capacitorpqsecurestorage.testapp`, then run again |
+| On the iOS simulator every key operation fails (`E_ENCRYPT`, `E_KEYGEN`, even `setItem`), yet `atRestSuite` says 18 | The unsigned simulator build of the test app (`CODE_SIGNING_ALLOWED=NO`) has no Keychain access. The capabilities call only needs CryptoKit | Run E9 to E20 on a phone with a signed build. The simulator runs the core specs only |
+| `decryptAtRest` answers `E_KEY_NOT_FOUND` on iOS for a key you made | A Keychain item that cannot be read right now (the device is locked) counts as absent | Try again after unlocking the phone |
 
 ## Results so far
 
@@ -284,7 +355,13 @@ iOS has no `E_BUSY` latch, so these record what happens.
 | D2, D4, D5 (keygen in the Secure Enclave, a prompt on every sign, off-device verify) | Pass, iPhone 15 Pro / iOS 26, 2026-07-14, 7.0.0 code |
 | Everything else on iOS | Not run on a device yet |
 | Everything on Android | Not run on a phone yet. B1 to B3 pass on an emulator; A3 fails there (no Keystore ML-DSA) |
+| B8, B9 (Android `0x10` and v2 ML-KEM frames) | Not run yet on a phone. The e2e specs for them pass on an Android emulator |
+| E9 to E12 (iOS `0x12`: `atRestSuite`, round trip and timing, older frames, Keychain item), E13 to E20 | Not run yet |
+| X4 (web and phone, `encryptTo` with `format: 2`) | Not run yet |
 
 So the iOS Secure Enclave path (ML-DSA keygen, a biometric on every sign, off-device verification)
 is confirmed on one device. Android hardware is not: until A4 to A7 pass on a phone, the Android
 hardware claims rest on emulator runs only.
+
+Until E9 to E12 pass on an iPhone, suite `0x12` is covered only by unit tests of the parts that need no
+Keychain or Secure Enclave. Suite `0x11` has no device to run on.

@@ -26,6 +26,9 @@ yet, see [Verification status](#verification-status).
   encrypted at rest by a hardware key.
 - **ML-KEM** (FIPS 203, levels 768/1024) for receiving data encrypted to your public key.
 - **Encryption at rest**: Secure Enclave ECIES on iOS, AES-256-GCM with a Keystore key in the TEE on Android.
+  On iOS 26+ with `format: 2`, the key comes from an ML-KEM-768 key in the Secure Enclave.
+- **Self-describing frames** (`format: 2`): a 4-byte header says which algorithm made a blob, and
+  reads tell you when to re-encrypt it.
 - **Secure storage** (`setItem` / `getItem` / ...), a key-value store where each item can require a biometric.
 - **Web fallback** in software (@noble), for development.
 
@@ -36,6 +39,7 @@ yet, see [Verification status](#verification-status).
 - [Verification status](#verification-status)
 - [Install](#install)
 - [Usage](#usage)
+  - [Frame formats](#frame-formats)
 - [Limits](#limits)
 - [Security model](#security-model)
 - [API reference](#api-reference)
@@ -75,7 +79,7 @@ the page's origin can read the keys. Use it for development or non-critical data
 | ECDSA P-256 sign | Secure Enclave | Keystore |
 | Ed25519 sign | software key, private in the Keychain (biometric access control with `requireBiometric`) | software key (BouncyCastle), private wrapped by a Keystore AES key |
 | ML-KEM decapsulate | Secure Enclave | software (BouncyCastle), private wrapped by a Keystore AES key (TEE) |
-| Encryption at rest | Secure Enclave ECIES (P-256 key that never leaves the enclave, AES-GCM inside) | Keystore AES-256-GCM (TEE) |
+| Encryption at rest | Secure Enclave ECIES (P-256 key that never leaves the enclave, AES-GCM inside). With `format: 2` on iOS 26+: AES-256-GCM under a key from a Secure Enclave ML-KEM-768 key | Keystore AES-256-GCM (TEE) |
 | Secure storage | one Keychain item per key, per-item access control | one Keystore AES-256-GCM key per item (StrongBox where available), biometric bound to the item's cipher |
 
 iOS decapsulates ML-KEM inside the Secure Enclave; Android does not, because the Android Keystore
@@ -163,7 +167,7 @@ Exclude the plugin's prefs from backup (see the backup section below) and set
 
 ```ts
 const caps = await PqSecureStorage.getHardwareCapabilities();
-// { supportsPqc, hardwareBacked, biometricGated, supportedVariants, supportedKem, kemInSecureEnclave }
+// { supportsPqc, hardwareBacked, biometricGated, supportedVariants, supportedKem, kemInSecureEnclave, atRestSuite }
 // check supportedVariants / supportedKem before you pick a type.
 // gate seed-tier trust on hardwareBacked (false on web), not on supportsPqc (true on web too)
 ```
@@ -212,6 +216,38 @@ const { ciphertext } = await PqSecureStorage.encryptAtRest({ keyAlias: 'db', dat
 const { plaintext } = await PqSecureStorage.decryptAtRest({ keyAlias: 'db', data: ciphertext });
 ```
 
+Pass `format: 2` to write a frame that says how it was made (see [Frame formats](#frame-formats)).
+You do not pick the algorithm, the platform does, and `atRestSuite` from `getHardwareCapabilities`
+tells you which one before you call:
+
+- Android and the web write `0x10`, AES-256-GCM.
+- iOS 26+ writes `0x12` when the Secure Enclave can make an ML-KEM-768 key. The first call for an
+  alias makes that key and does one encapsulation to it. Both are saved in one Keychain item, about
+  4.7 KB (see [Limits](#limits)). Every encrypt and every decrypt then decapsulates in the Secure
+  Enclave, and the 32-byte result is the AES-256 key for that call. Like the P-256 key, it never
+  prompts and works only while the device is unlocked.
+- iOS below 26, or iOS 26+ when the Secure Enclave cannot make that key, writes `0x11`: the ECIES
+  output of the plain frame with the header in front.
+
+`decryptAtRest` opens both formats and returns `outdated`. It is `true` for a plain frame and for a
+suite other than `atRestSuite`, so you know which blobs to encrypt again:
+
+```ts
+const { plaintext, outdated } = await PqSecureStorage.decryptAtRest({ keyAlias: 'db', data: stored });
+if (outdated) {
+  const { ciphertext } = await PqSecureStorage.encryptAtRest({ keyAlias: 'db', data: plaintext, format: 2 });
+  save(ciphertext); // your storage, the plugin keeps nothing
+}
+```
+
+The P-256 key of an alias stays after a move to `0x12`, because older frames still need it. The
+plugin has no call to delete it.
+
+On iOS, `E_KEY_NOT_FOUND` from `decryptAtRest` can be temporary. A Keychain item that cannot be read
+right now (for example the device is locked) counts as absent, and a `0x12` frame whose ML-KEM item is
+absent rejects `E_KEY_NOT_FOUND` even when the P-256 key exists. Try again once the device is
+unlocked before you treat the key as lost.
+
 ### ML-KEM
 
 ```ts
@@ -235,10 +271,102 @@ const { plaintext } = await PqSecureStorage.decrypt({
 }); // prompts if the key was made with requireBiometric (the default)
 ```
 
-The frame is the same on every platform: the ML-KEM ciphertext (1088 bytes for 768, 1568 for
-1024), a 12-byte nonce, then the ChaCha20-Poly1305 ciphertext and tag, keyed with the raw FIPS 203
-shared secret (no KDF, no associated data). So a sender can also build it with any FIPS 203
-library. `encryptTo` does not say who sent a frame: sign the payload if the recipient must know.
+The frame without a header (v1, the default) is the same on every platform: the ML-KEM ciphertext
+(1088 bytes for 768, 1568 for 1024), a 12-byte nonce, then the ChaCha20-Poly1305 ciphertext and tag,
+keyed with the raw FIPS 203 shared secret (no KDF, no associated data). So a sender can also build it
+with any FIPS 203 library. With `format: 2` the same frame gets a 4-byte header in front, see
+[Frame formats](#frame-formats). `encryptTo` does not say who sent a frame: sign the payload if the
+recipient must know.
+
+### Frame formats
+
+By default `encryptTo` and `encryptAtRest` return a plain frame (v1): nothing in it says which
+algorithm made it. With `format: 2` they return a v2 frame, which starts with a 4-byte header. A later
+release can then change an algorithm and still read what is stored, because every frame says what it
+is. A missing or null `format` is 1, and the output is then byte for byte what earlier versions
+wrote. Any value other than 1 or 2 rejects `E_INVALID_ARGS`.
+
+The header:
+
+| Bytes | Value | Meaning |
+|---|---|---|
+| 0 to 1 | `50 51` | the mark, `PQ` in ASCII |
+| 2 | `02` | format version |
+| 3 | suite id | what made the frame, see below |
+
+The suites:
+
+| Id | Method | Body after the header | Written with `format: 2` by |
+|---|---|---|---|
+| `0x01` | `encryptTo` | ML-KEM-768 ciphertext (1088), nonce (12), ChaCha20-Poly1305 ciphertext, tag (16). Key: the FIPS 203 shared secret | every platform, for `PQC_MLKEM_768` |
+| `0x02` | `encryptTo` | the same with ML-KEM-1024 (ciphertext 1568) | every platform, for `PQC_MLKEM_1024` |
+| `0x10` | `encryptAtRest` | nonce (12), AES-256-GCM ciphertext, tag (16). Key: the alias key in the Keystore (Android) or in `localStorage` (web) | Android, web |
+| `0x11` | `encryptAtRest` | the ECIES output of the plain frame, under the Secure Enclave P-256 key of the alias | iOS below 26, and iOS 26+ when the Secure Enclave cannot make an ML-KEM-768 key |
+| `0x12` | `encryptAtRest` | the same body as `0x10`. Key: one Secure Enclave ML-KEM-768 decapsulation per call | iOS 26+ |
+
+`0x01` to `0x0F` are for `encryptTo` and `0x10` to `0x1F` for `encryptAtRest`. The rest is reserved.
+The table is exported as `FRAME_SUITES` (with `FrameSuite` and `parseFrameHeader`) for anyone who
+wants to look at a frame. In `encryptTo` the suite comes from `type`. In `encryptAtRest` the platform
+chooses it and you cannot ask for another: `atRestSuite` says which one this device writes. On iOS
+26+ the plugin checks that once per process: it makes a throwaway Secure Enclave ML-KEM-768 key and
+runs one encapsulation and one decapsulation with it, and nothing is stored. Only a success is kept.
+A check that fails (for example while the device is locked) is repeated on the next call, so
+`atRestSuite` and what `format: 2` writes always agree.
+
+Each platform opens only its own at-rest suites: Android and the web `0x10`, iOS `0x11` and, from iOS
+26, `0x12`. Any other suite rejects `E_DECRYPT`.
+
+Every suite except `0x11` uses the four header bytes as the associated data of its AEAD, so a changed
+version or suite makes the tag fail. `0x11` cannot: the Secure Enclave ECIES call takes no associated
+data, so its header is not authenticated. That does not open anything. Someone who edits the header
+of a `0x11` frame only sends it down another way of reading, and that way fails. The ECIES body keeps
+its own authentication, so the plaintext cannot change.
+
+How a frame is read, by `decrypt` and `decryptAtRest`. You do not say which format it is:
+
+1. If it starts with `50 51 02`, the suite is known, the suite belongs to the method (`0x01` to `0x0F`
+   for `decrypt`, `0x10` to `0x1F` for `decryptAtRest`) and this device can open it, it is tried as v2.
+   For `decrypt` the suite must also match `type`. If that works, you get the plaintext.
+2. Otherwise, or if that fails, the whole frame is tried as v1.
+3. If both fail, the error is `E_UNSUPPORTED` when the frame starts with `50 51` and the version is not
+   `02`, or the version is `02` and the suite is not known. That is most likely a frame from a newer
+   version of the plugin. For any other frame the error is the one earlier versions gave
+   (`E_DECRYPT`, `E_BAD_CIPHERTEXT`, and on Android `E_CRYPTO` after a biometric prompt).
+
+The second step is needed because a v1 frame can start with `50 51 02` by chance (1 in 2^24, for
+`encryptTo` and for at rest on Android and the web), and it would never open without it. An iOS
+v1 at-rest frame starts with `04`, so it never clashes. A key that needs a biometric prompts once for
+both tries. The minimum length check of `decrypt` (`E_BAD_CIPHERTEXT`) is still the v1 one.
+
+`outdated` tells an app when to write a frame again. `decrypt` returns `true` when the frame was read
+as v1. `decryptAtRest` returns `true` when it was read as v1 or when its suite is not `atRestSuite`,
+the one this device writes today. To move stored data to the current format:
+
+1. Read the frame with `decrypt` or `decryptAtRest`.
+2. If `outdated` is `true`, encrypt the plaintext again with `format: 2`.
+3. Store the new frame in place of the old one.
+
+The plugin never does this for you, because the app owns the stored frames. An iPhone that goes from
+iOS 25 to 26 starts to report its `0x11` frames as outdated, and they move to `0x12` the same way. An
+app that never passes `format: 2` sees `outdated: true` on every read. That is only information and
+changes nothing.
+
+```ts
+const { ciphertext } = await PqSecureStorage.encryptTo({
+  recipientPublicKey: publicKey,
+  type: KemType.MLKEM_768,
+  data: base64,
+  format: 2,
+});
+const { plaintext, outdated } = await PqSecureStorage.decrypt({
+  keyAlias: 'inbox',
+  type: KemType.MLKEM_768,
+  data: ciphertext,
+}); // outdated: false
+```
+
+Frames made with `format: 2` do not open on 7.2.0 or earlier. Check what the reader runs before you
+send one.
 
 ### Secure storage
 
@@ -341,6 +469,9 @@ prefs cannot be pulled/edited via `adb backup`/`restore`.
 | Android store | 512 items and 16 MiB of stored text | `E_STORE_FULL` |
 | Android ML-KEM aliases | 256 | `E_STORE_FULL` |
 | Android Ed25519 aliases | 256 | `E_STORE_FULL` |
+| v2 frame overhead | 32 bytes per frame (`0x10`, `0x12`), about 85 bytes (`0x11`), 4 bytes more than v1 (`encryptTo`) | none, it only adds to the size |
+| iOS `0x12` key material | about 4.7 KB in the Keychain per alias (measured on the iOS 26.2 simulator), made once | none |
+| Frames per AES at-rest key (Android, web, iOS `0x12`) | 2^32 (12-byte random nonce) | not enforced |
 
 Hardware signing keys (ML-DSA, ECDSA) have no cap in the plugin, and iOS and the web have no store
 cap beyond the per-item bounds. There is no call to delete a signing, KEM or at-rest key. Signing
@@ -354,6 +485,10 @@ The plugin treats the JS in the webview as untrusted. What it is built to resist
   read a private key, and it cannot use a biometric key or item without a real biometric match.
 - **A copy of the app's files or of a backup.** Private keys stay in the Secure Enclave or the
   Keystore, and store values and wrapped keys are encrypted under keys that never leave the device.
+- **A quantum computer, for data at rest on iOS.** With `atRestSuite` `0x12` and `format: 2`, the
+  at-rest key comes from ML-KEM-768 in the Secure Enclave, so `encryptAtRest` on iOS does not depend on
+  classical public-key crypto. Frames written before (plain or `0x11`) still do, until you encrypt
+  them again. `0x11` does not authenticate its header, see [Frame formats](#frame-formats).
 
 What it does not protect against:
 
@@ -371,7 +506,10 @@ What it does not protect against:
   (`BiometricPrompt.CryptoObject`), and on iOS the Secure Enclave checks the biometric itself when a
   key is used.
 - **Software keys in memory.** ML-KEM decapsulation on Android and Ed25519 signing on both platforms
-  run in software: the private key is in app memory for the length of the call.
+  run in software: the private key is in app memory for the length of the call. The same goes for the
+  `0x12` at-rest key on iOS 26+: the Secure Enclave hands back the AES-256 key of the alias on each
+  call, and the plugin keeps it only until the call ends. Android and the web already work this way
+  with their at-rest key.
 - **A change of the biometric enrollment.** Biometric keys and items are bound to the current set of
   fingerprints or faces. When it changes (for example a new fingerprint), they can never be used
   again. Keys cannot be exported or backed up, so keep a recovery path, for example a seed phrase
@@ -859,6 +997,22 @@ From 7.1.0:
   because their public entry gained a version field. Do not regenerate them on 7.1.0, upgrade again
   instead. Keys written by 7.1.0 keep working on 7.2.0.
 
+From 7.2.0:
+
+- Everything is additive. Without `format` the four crypto calls give the same bytes as before, and
+  every frame that opened before still opens.
+- `decrypt` and `decryptAtRest` return one more field, `outdated`. `getHardwareCapabilities` returns
+  one more field, `atRestSuite`.
+- To move stored data to the new frames, read it, check `outdated`, and encrypt it again with
+  `format: 2` when it suits you. See [Frame formats](#frame-formats).
+- Frames made with `format: 2` do not open on 7.2.0 or earlier (the header looks like ciphertext, so
+  the read fails). Turn `format: 2` on for `encryptTo` only when every reader runs
+  7.3.0 / 8.3.0 or later, and for at rest only in a build you will not roll back.
+- On iOS 26+ the plugin checks once per process that the Secure Enclave can make an ML-KEM-768 key,
+  the first time `getHardwareCapabilities`, `encryptAtRest` with `format: 2` or an `outdated` check
+  of a v2 frame needs the answer. It makes a throwaway key and does one encapsulation and one
+  decapsulation, so that first call is a little slower.
+
 ## Error codes
 
 Every rejection carries a `code`:
@@ -866,18 +1020,18 @@ Every rejection carries a `code`:
 | Code | Meaning |
 |---|---|
 | `E_MISSING_PARAMS` | A required parameter is missing |
-| `E_INVALID_ARGS` | Store key or value out of bounds, invalid base64, a recipient key that is too long, or an option of the wrong type |
+| `E_INVALID_ARGS` | Store key or value out of bounds, invalid base64, a recipient key that is too long, an option of the wrong type, or `format` outside 1 and 2 |
 | `E_BAD_ALIAS` | Key alias outside `A-Z a-z 0-9 _ -` (1 to 64 characters) or starting with `__pq` |
 | `E_AUTH_FAILED` | Biometric cancelled or failed, or no biometric can be used (none enrolled, or Face ID denied for the app) |
 | `E_KEY_INVALIDATED` | The biometric enrollment changed since the key or item was made, so it can't be used any more. Android reports it when such a key or item is used. On iOS only `getItem` and `setItem` report it; a signing or KEM key killed this way fails with another code, such as `E_SIGN` or `E_DECRYPT` |
 | `E_ENCRYPT` | Encryption failed, or `setItem` could not write the item |
-| `E_DECRYPT` | Decryption failed (wrong key, tampered data, GCM-tag mismatch). Also `keys()` when the store cannot be listed |
+| `E_DECRYPT` | Decryption failed (wrong key, tampered data, GCM-tag mismatch, or a frame suite this device cannot open). Also `keys()` when the store cannot be listed |
 | `E_CRYPTO` | Android: the cipher operation after a biometric prompt failed |
 | `E_KEYGEN` | Key generation failed. Android also answers it for an ML-DSA type when the Keystore has no ML-DSA: check `supportedVariants` first |
 | `E_SIGN` | Signing failed |
 | `E_PUBKEY` | Android: reading a public key failed |
-| `E_KEY_NOT_FOUND` | No key exists for that alias. Android `getItem` also answers it when the item's Keystore key is gone |
-| `E_UNSUPPORTED` | Unknown key or KEM type, or not on this device (iOS below 26, or no Secure Enclave) |
+| `E_KEY_NOT_FOUND` | No key exists for that alias. Android `getItem` also answers it when the item's Keystore key is gone. On iOS `decryptAtRest` it can be temporary: a Keychain item that cannot be read right now (for example the device is locked) counts as absent, and a `0x12` frame whose ML-KEM item is absent answers it even when the P-256 key exists. Try again after unlocking before you treat the key as lost |
+| `E_UNSUPPORTED` | Unknown key or KEM type, or not on this device (iOS below 26, or no Secure Enclave), or a frame written by a newer version of the plugin (unknown header version or suite) |
 | `E_ALIAS_EXISTS` | Alias already exists (pass `overwrite: true` to replace). An Ed25519 alias and a hardware-key alias never replace each other, even with `overwrite` |
 | `E_NO_ACTIVITY` | Android: no foreground `FragmentActivity` to host the prompt |
 | `E_TAMPERED` | Integrity check failed on a stored public key or item |
