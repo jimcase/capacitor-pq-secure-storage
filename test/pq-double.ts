@@ -1,16 +1,22 @@
-// Software double of the native plugin surface. Mirrors the crypto the Swift
-// (SecureEnclave.MLKEM + AES.GCM) and Kotlin (BouncyCastle ML-KEM + Keystore AES) do, so the
-// wire format and round-trip can be unit-tested here. The native side keeps the private key
-// in hardware; the double keeps it in a Map.
+// software doubles of the plugin surface, for unit tests. models the v1 and v2 frames: the ML-KEM
+// frame every platform uses and the android and web at-rest frame (AES-256-GCM). the ios at-rest
+// suites (secure enclave ECIES and ML-KEM) are not modeled here. private keys sit in a Map, not in
+// hardware.
 import { ml_kem768, ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { randomBytes } from '@noble/post-quantum/utils.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { gcm } from '@noble/ciphers/aes.js';
-import type { KemType } from '../src/definitions';
+import type { FrameFormat, KemType } from '../src/definitions';
+import { FrameSuite, KEM_SUITE, formatOption, frameHeader, openFrame } from '../src/frames';
 
 const b64 = (u: Uint8Array) => Buffer.from(u).toString('base64');
 const unb64 = (s: string) => new Uint8Array(Buffer.from(s, 'base64'));
-const kemOf = (t: KemType) => (t === 'PQC_MLKEM_768' ? ml_kem768 : ml_kem1024);
+type Kem = Pick<typeof ml_kem768, 'keygen' | 'encapsulate' | 'decapsulate'>;
+function fmtOf(raw: unknown): FrameFormat {
+    const f = formatOption(raw);
+    if (f === null) throw new Error('format must be 1 or 2');
+    return f;
+}
 // ML-KEM ciphertext sizes (FIPS 203): needed to slice the frame on decrypt
 export const KEM_CT_LEN: Record<KemType, number> = {
     PQC_MLKEM_768: 1088,
@@ -31,31 +37,50 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 export class PqSecureStorageDouble {
     private aesKeys = new Map<string, Uint8Array>();
     private kemKeys = new Map<string, { type: KemType; secretKey: Uint8Array; publicKey: Uint8Array }>();
+    private kem?: Kem;
 
-    // symmetric at rest: AES-256-GCM, frame = nonce(12) || aeadCt(+tag16)
-    async encryptAtRest(o: { keyAlias: string; data: string }) {
+    // a test can inject its own KEM, used for both types
+    constructor(opts?: { kem?: Kem }) {
+        this.kem = opts?.kem;
+    }
+
+    private kemOf(t: KemType): Kem {
+        return this.kem ?? (t === 'PQC_MLKEM_768' ? ml_kem768 : ml_kem1024);
+    }
+
+    // symmetric at rest: AES-256-GCM. v1 frame = nonce(12) || aeadCt(+tag16), v2 puts the 4-byte
+    // header in front and uses it as AAD
+    async encryptAtRest(o: { keyAlias: string; data: string; format?: FrameFormat }) {
+        const fmt = fmtOf(o.format);
         let key = this.aesKeys.get(o.keyAlias);
         if (!key) {
             key = randomBytes(32);
             this.aesKeys.set(o.keyAlias, key);
         }
         const nonce = randomBytes(12);
-        const ct = gcm(key, nonce).encrypt(unb64(o.data));
-        return { ciphertext: b64(concat(nonce, ct)) };
+        const header = fmt === 2 ? frameHeader(FrameSuite.AT_REST_AES_GCM) : undefined;
+        const ct = gcm(key, nonce, header).encrypt(unb64(o.data));
+        return { ciphertext: b64(concat(header ?? new Uint8Array(0), nonce, ct)) };
     }
 
     async decryptAtRest(o: { keyAlias: string; data: string }) {
         const key = this.aesKeys.get(o.keyAlias);
         if (!key) throw new Error(`No at-rest key for alias ${o.keyAlias}`);
-        const buf = unb64(o.data);
-        const nonce = buf.subarray(0, 12);
-        const ct = buf.subarray(12);
-        return { plaintext: b64(gcm(key, nonce).decrypt(ct)) };
+        const open = (f: Uint8Array, aad?: Uint8Array) => gcm(key, f.subarray(0, 12), aad).decrypt(f.subarray(12));
+        const r = openFrame(
+            unb64(o.data),
+            'encryptAtRest',
+            (s) => s === FrameSuite.AT_REST_AES_GCM,
+            (h, _s, body) => open(body, h),
+            (f) => open(f),
+        );
+        if (!r.ok) throw new Error(r.unsupported ? 'Unsupported frame' : 'Decrypt failed');
+        return { plaintext: b64(r.value), outdated: r.readAs === 1 };
     }
 
     // asymmetric ML-KEM
     async generateKemKeyPair(o: { keyAlias: string; type: KemType; requireBiometric?: boolean }) {
-        const { publicKey, secretKey } = kemOf(o.type).keygen();
+        const { publicKey, secretKey } = this.kemOf(o.type).keygen();
         this.kemKeys.set(o.keyAlias, { type: o.type, secretKey, publicKey });
         return { publicKey: b64(publicKey) };
     }
@@ -66,32 +91,40 @@ export class PqSecureStorageDouble {
         return { publicKey: b64(k.publicKey) };
     }
 
-    // public-key op, no stored key. frame = kemCt || nonce(12) || aeadCt(+tag16)
-    async encryptTo(o: { recipientPublicKey: string; type: KemType; data: string }) {
-        const { cipherText, sharedSecret } = kemOf(o.type).encapsulate(unb64(o.recipientPublicKey));
+    // public-key op, no stored key. v1 frame = kemCt || nonce(12) || aeadCt(+tag16), v2 puts the
+    // 4-byte header in front and uses it as AAD
+    async encryptTo(o: { recipientPublicKey: string; type: KemType; data: string; format?: FrameFormat }) {
+        const fmt = fmtOf(o.format);
+        const { cipherText, sharedSecret } = this.kemOf(o.type).encapsulate(unb64(o.recipientPublicKey));
         const nonce = randomBytes(12);
-        const aead = chacha20poly1305(sharedSecret, nonce).encrypt(unb64(o.data));
-        return { ciphertext: b64(concat(cipherText, nonce, aead)) };
+        const header = fmt === 2 ? frameHeader(KEM_SUITE[o.type]) : undefined;
+        const aead = chacha20poly1305(sharedSecret, nonce, header).encrypt(unb64(o.data));
+        return { ciphertext: b64(concat(header ?? new Uint8Array(0), cipherText, nonce, aead)) };
     }
 
     async decrypt(o: { keyAlias: string; type: KemType; data: string }) {
         const k = this.kemKeys.get(o.keyAlias);
         if (!k) throw new Error(`No KEM key for alias ${o.keyAlias}`);
-        const buf = unb64(o.data);
         const ctLen = KEM_CT_LEN[o.type];
-        const kemCt = buf.subarray(0, ctLen);
-        const nonce = buf.subarray(ctLen, ctLen + 12);
-        const aead = buf.subarray(ctLen + 12);
-        const sharedSecret = kemOf(o.type).decapsulate(kemCt, k.secretKey);
-        return { plaintext: b64(chacha20poly1305(sharedSecret, nonce).decrypt(aead)) };
+        const kem = this.kemOf(o.type);
+        const open = (f: Uint8Array, aad?: Uint8Array) => {
+            const sharedSecret = kem.decapsulate(f.subarray(0, ctLen), k.secretKey);
+            return chacha20poly1305(sharedSecret, f.subarray(ctLen, ctLen + 12), aad).decrypt(f.subarray(ctLen + 12));
+        };
+        const r = openFrame(
+            unb64(o.data),
+            'encryptTo',
+            (s) => s === KEM_SUITE[o.type],
+            (h, _s, body) => open(body, h),
+            (f) => open(f),
+        );
+        if (!r.ok) throw new Error(r.unsupported ? 'Unsupported frame' : 'Decrypt failed');
+        return { plaintext: b64(r.value), outdated: r.readAs === 1 };
     }
 }
 
-// Secure storage double. Models the Android two-tier envelope: the store owns TWO ML-KEM-1024
-// keypairs, one silent and one biometric. setItem picks the tier from requireBiometric and records
-// the mode with the item; getItem decapsulates with the matching keypair. Distinct keypairs mean a
-// bio item is not readable via the silent private. The Map stands in for SharedPreferences; the
-// native side wraps each private in the TEE (silent = no-auth key, bio = auth-required key).
+// store double: keeps the tier per item and seals values to one ML-KEM keypair per tier. it does
+// not model the native stores (android: a keystore AES key per item, ios: a keychain item per key).
 type StoreKeypair = { publicKey: Uint8Array; secretKey: Uint8Array };
 
 export class SecureStorageDouble {
