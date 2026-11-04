@@ -1,4 +1,5 @@
 import Capacitor
+import CryptoKit
 import LocalAuthentication
 import XCTest
 @testable import CapacitorPqSecureStorage
@@ -82,6 +83,42 @@ final class PqSecureStorageValidationTests: XCTestCase {
     func testEncryptToRejectsAnUndecodableRecipientKeyAsInvalidArgs() {
         let code = reject(options: ["recipientPublicKey": "***", "type": "PQC_MLKEM_768", "data": "AA=="]) { $0.encryptTo($1) }
         XCTAssertEqual(code, "E_INVALID_ARGS")
+    }
+
+    func testEncryptToRejectsABadFormatBeforeTouchingTheKey() {
+        for bad in ["2", 1.5, 3, true] as [Any] {
+            let code = reject(options: ["recipientPublicKey": "AA==", "type": "PQC_MLKEM_768", "data": "AA==", "format": bad]) { $0.encryptTo($1) }
+            XCTAssertEqual(code, "E_INVALID_ARGS")
+        }
+    }
+
+    func testDecryptRejectsANewerFrameVersionAsUnsupportedOnlyAfterTheKeyCheck() {
+        // no Keychain here so the alias is missing: E_KEY_NOT_FOUND comes first, which proves the order
+        let frame = Data([0x50, 0x51, 0x03, 0x01]) + Data(repeating: 0, count: 1200)
+        let code = reject(options: ["keyAlias": "none", "type": "PQC_MLKEM_768", "data": frame.base64EncodedString()]) { $0.decrypt($1) }
+        XCTAssertEqual(code, "E_KEY_NOT_FOUND")
+    }
+
+    @available(iOS 26.0, *)
+    func testEncryptToWritesAV2FrameOnlyWhenAsked() throws {
+        let priv = try MLKEM768.PrivateKey(seedRepresentation: Data(repeating: 7, count: 64), publicKey: nil)
+        let opts: [String: Any] = [
+            "recipientPublicKey": priv.publicKey.rawRepresentation.base64EncodedString(),
+            "type": "PQC_MLKEM_768", "data": Data("hola".utf8).base64EncodedString(),
+        ]
+        let v1 = Data(base64Encoded: resolved(options: opts) { $0.encryptTo($1) }?["ciphertext"] as? String ?? "")
+        let v1n = Data(base64Encoded: resolved(options: opts.merging(["format": NSNull()]) { $1 }) { $0.encryptTo($1) }?["ciphertext"] as? String ?? "")
+        let v2 = Data(base64Encoded: resolved(options: opts.merging(["format": 2]) { $1 }) { $0.encryptTo($1) }?["ciphertext"] as? String ?? "")
+        XCTAssertEqual(v1?.count, 1088 + 12 + 4 + 16)
+        XCTAssertEqual(v1n?.count, v1?.count)
+        XCTAssertEqual(v2?.count, 4 + 1088 + 12 + 4 + 16)
+        let f1 = try XCTUnwrap(v1)
+        let key1 = try priv.decapsulate(f1.prefix(1088))
+        XCTAssertEqual(try ChaChaPoly.open(try ChaChaPoly.SealedBox(combined: f1.dropFirst(1088)), using: key1), Data("hola".utf8))
+        let f2 = try XCTUnwrap(v2)
+        XCTAssertEqual(f2.prefix(4), Frames.header(suite: Frames.kemMlkem768))
+        let key2 = try priv.decapsulate(f2.dropFirst(4).prefix(1088))
+        XCTAssertEqual(try Frames.openChaCha(body: Data(f2.dropFirst(4 + 1088)), key: key2, header: Frames.header(suite: Frames.kemMlkem768)), Data("hola".utf8))
     }
 
     // biometric gating needs an enrolled biometric, not just a Secure Enclave
