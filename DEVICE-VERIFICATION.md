@@ -263,12 +263,11 @@ tests, and its body is the ECIES output of the plain frame, the same code that E
   shows a Face ID / Touch ID prompt.
 - [ ] **E13.** [manual] Kill and relaunch the app, then read the `0x12` blobs of the earlier launch.
   This rebuilds the Secure Enclave key from the stored representation in a new process.
-- [ ] **E14.** [manual] Changed `0x12` blobs, edited in the console before `decryptAtRest`. A changed
-  byte of the body: `E_DECRYPT`. The suite byte changed to `11`: `E_DECRYPT` when the alias also has a
-  P-256 key, `E_KEY_NOT_FOUND` when it does not. The version byte changed to `03`: `E_UNSUPPORTED`
-  when the alias has a P-256 key, `E_KEY_NOT_FOUND` when it does not, even if the ML-KEM item exists
-  (the ML-KEM key is loaded only for a version 2 `0x12` frame, so an alias made only with `format: 2`
-  answers `E_KEY_NOT_FOUND`). A `0x12` blob under an alias that never wrote one: `E_KEY_NOT_FOUND`.
+- [ ] **E14.** [manual] Changed `0x12` blobs, edited in the console before `decryptAtRest`, under an
+  alias that has the ML-KEM item, with or without a P-256 key (an alias written only with
+  `format: 2` has no P-256 key). A changed byte of the body: `E_DECRYPT`. The suite byte changed to
+  `11`: `E_DECRYPT`. The version byte changed to `03`: `E_UNSUPPORTED`. A blob of 2 bytes: `E_DECRYPT`.
+  A `0x12` blob under an alias that never wrote one: `E_KEY_NOT_FOUND`.
 - [ ] **E15.** [manual, debug build] Make a plain (or `0x11`) blob and a `0x12` blob under one alias,
   then delete only the `<alias>.atrest.mlkem` item. `decryptAtRest` of the `0x12` blob answers
   `E_KEY_NOT_FOUND` even though the P-256 key exists, and the other blob still reads.
