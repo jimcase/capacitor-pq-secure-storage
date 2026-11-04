@@ -66,6 +66,34 @@ final class PqSecureStorageValidationTests: XCTestCase {
         XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE")
     }
 
+    // the simulator reports a Secure Enclave, so keygen gets past that guard to the biometry check
+    private func skipUnlessKeygenReachesTheBiometryCheck() throws {
+        guard #available(iOS 26.0, *) else { throw XCTSkip("needs iOS 26") }
+        try XCTSkipUnless(SecureEnclave.isAvailable, "no Secure Enclave on this host")
+        try XCTSkipIf(LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil), "a biometric is usable on this simulator")
+    }
+
+    func testGenerateKeyPairWithRequireBiometricRejectsWhenNoBiometricCanBeUsed() throws {
+        try skipUnlessKeygenReachesTheBiometryCheck()
+        for type in ["PQC_MLDSA_65", "PQC_MLDSA_87", "ECDSA_256R1", "ED25519"] {
+            let code = reject(options: ["keyAlias": "audit-bio", "type": type, "requireBiometric": true]) { $0.generateKeyPair($1) }
+            XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE", type)
+        }
+        // requireBiometric defaults to true
+        let code = reject(options: ["keyAlias": "audit-bio", "type": "PQC_MLDSA_65"]) { $0.generateKeyPair($1) }
+        XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE")
+    }
+
+    func testGenerateKemKeyPairWithRequireBiometricRejectsWhenNoBiometricCanBeUsed() throws {
+        try skipUnlessKeygenReachesTheBiometryCheck()
+        for type in ["PQC_MLKEM_768", "PQC_MLKEM_1024"] {
+            let code = reject(options: ["keyAlias": "audit-bio", "type": type, "requireBiometric": true]) { $0.generateKemKeyPair($1) }
+            XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE", type)
+        }
+        let code = reject(options: ["keyAlias": "audit-bio", "type": "PQC_MLKEM_768"]) { $0.generateKemKeyPair($1) }
+        XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE")
+    }
+
     func testGenerateKeyPairRejectsAnOverwriteThatIsNotABoolean() {
         let code = reject(options: ["keyAlias": "audit-a", "type": "PQC_MLDSA_65", "overwrite": "yes"]) { $0.generateKeyPair($1) }
         XCTAssertEqual(code, "E_INVALID_ARGS")
