@@ -1433,6 +1433,14 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         SecItemDelete(q as CFDictionary)
     }
 
+    private static func clearIndex() {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: StoreIndex.service,
+        ]
+        SecItemDelete(q as CFDictionary)
+    }
+
     // every bio store item is biometryCurrentSet, so with no biometric enrolled none of them can be
     // live and a prompt can't run. Then a dead item is deleted without one or the name stays locked.
     private static func noBiometricEnrolled() -> Bool {
@@ -1735,11 +1743,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrService as String: Self.ssService,
             ]
             let status = SecItemDelete(query as CFDictionary)
-            let indexQuery: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: StoreIndex.service,
-            ]
-            SecItemDelete(indexQuery as CFDictionary)
+            Self.clearIndex()
             // also drop the store's name keys (a later setItem regenerates them)
             for acct in [Self.nameEncAccount, Self.nameTagAccount] {
                 SecItemDelete(Self.baseQuery(account: acct) as CFDictionary)
@@ -1758,8 +1762,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         ]
         var listOut: CFTypeRef?
         let listStatus = SecItemCopyMatching(listQuery as CFDictionary, &listOut)
-        // empty store still goes through wipe, for orphan index rows and the name keys
-        if listStatus == errSecItemNotFound { return wipe() }
+        // empty store: only the orphan index rows go (no secrets in them). Not wipe, that deletes the
+        // whole store service with no bio probe.
+        if listStatus == errSecItemNotFound {
+            Self.clearIndex()
+            return call.resolve()
+        }
         var hasBiometric = false
         var items: [[String: Any]] = []
         if listStatus == errSecInteractionNotAllowed {
