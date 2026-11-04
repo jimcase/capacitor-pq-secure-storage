@@ -214,11 +214,14 @@ build and the plugin version. The current state is in [Results so far](#results-
 - [ ] **D12.** [manual, debug build] `getPublicKey` / `getKemPublicKey` reject `E_TAMPERED` when the
   stored public entry is changed out of band.
 - [ ] **D13.** [manual] Face ID turned off for the test app (Settings > the app > Face ID), with a
-  biometric key and a biometric item made before: `getHardwareCapabilities()` answers
-  `biometricGated: false`. `generateKeyPair` with `requireBio` true and
-  `setItem({ requireBiometric: true })` reject `E_BIOMETRY_UNAVAILABLE`. `sign` with the biometric
-  key rejects `E_BIOMETRY_UNAVAILABLE` with no prompt. `getItem` of the biometric item: note the code
-  (`E_BIOMETRY_UNAVAILABLE` expected). Turn Face ID back on: everything works again.
+  biometric ML-DSA key, a biometric Ed25519 key and a biometric item made before:
+  `getHardwareCapabilities()` answers `biometricGated: false`. `generateKeyPair` with `requireBio`
+  true and `setItem({ requireBiometric: true })` reject `E_BIOMETRY_UNAVAILABLE`. `sign` with the
+  ML-DSA key rejects `E_BIOMETRY_UNAVAILABLE` with no prompt. `getItem` of the biometric item and
+  `sign` with the Ed25519 key: note each code (`E_BIOMETRY_UNAVAILABLE` expected). `E_DECRYPT` or
+  `E_SIGN` there means the Keychain answered another status than a cancel or an auth failure: note
+  it from the Xcode console, the `biometricGated` doc depends on it. Turn Face ID back on: everything
+  works again.
 - [ ] **D14.** [manual] Face ID not set up (Settings > Face ID & Passcode > Reset Face ID): the same
   `getHardwareCapabilities()`, `generateKeyPair` and `setItem` results as D13. Then E7.7 applies to
   the items made before: `removeItem` and `clear()` delete them with no prompt.
@@ -318,6 +321,11 @@ that E2 checks.
   Enclave, or any iPhone below iOS 26. `atRestSuite` is 17 (`0x11`), `encryptAtRest` with `format: 2`
   writes `50 51 02 11` followed by the plain ECIES output, and it reads with `outdated: false`. Note
   the model and the iOS build. Not run, if there is no such device.
+- [ ] **E21.** [manual] Passcode turned off (Settings > Face ID & Passcode > Turn Passcode Off, which
+  also turns Face ID off), with a biometric item made before: `removeItem` and `clear()` reject
+  `E_BIOMETRY_UNAVAILABLE` (the plugin deletes with no prompt only when no biometric is enrolled, and
+  a missing passcode is not that case). Set the passcode and Face ID up again: note whether the item
+  is still there (`hasItem`), and whether `removeItem` then deletes it after one prompt.
 
 ### F. Concurrency
 
@@ -416,7 +424,7 @@ fails. Earlier: D2, D4 and D5 passed on an iPhone 15 Pro / iOS 26 on 2026-07-14 
 | F2 | Pass: both calls resolve, the item is intact |
 | X1, X2, X3 | Partial: web and each phone pass both ways; direct iOS to Android not run; Android prompts are strong biometric only, iOS not looked at |
 | X4 | Pass on both phones, web to phone and phone to web, ML-KEM 768 and 1024 |
-| C5, C6, D13, D14 (`E_BIOMETRY_UNAVAILABLE`) | Not run yet |
+| C5, C6, D13, D14, E21 (`E_BIOMETRY_UNAVAILABLE`) | Not run yet |
 
 So the Secure Enclave paths, suite `0x12` and the Android TEE paths are confirmed on a phone.
 ML-DSA on Android is not: the one Android 17 phone tested lists it but cannot make the keys. Suite
