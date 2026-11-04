@@ -560,6 +560,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let dataStr = call.getString("data") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
+        guard let format = Self.formatArg(call) else { return }
         guard InputPolicy.recipientKeyWithinLimit(pubStr) else { return call.reject("Invalid public key", "E_INVALID_ARGS") }
         guard let pub = InputPolicy.base64Data(pubStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
@@ -575,11 +576,18 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
             let (kemCt, sharedSecret) = try PQKemKey.encapsulate(type: type, recipientPublicKey: pub)
-            let sealed = try ChaChaPoly.seal(raw, using: sharedSecret)
-            // frame = kemCt || nonce(12) || aeadCt(+tag16); ChaChaPoly.combined = nonce||ct||tag
             var frame = Data()
-            frame.append(kemCt)
-            frame.append(sealed.combined)
+            if format == 2 {
+                let header = Frames.header(suite: Frames.kemSuite(for: type)!)
+                frame.append(header)
+                frame.append(kemCt)
+                frame.append(try Frames.sealChaCha(raw, key: sharedSecret, header: header))
+            } else {
+                let sealed = try ChaChaPoly.seal(raw, using: sharedSecret)
+                // frame = kemCt || nonce(12) || aeadCt(+tag16); ChaChaPoly.combined = nonce||ct||tag
+                frame.append(kemCt)
+                frame.append(sealed.combined)
+            }
             call.resolve(["ciphertext": frame.base64EncodedString()])
         } catch {
             os_log("encryptTo failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
@@ -622,12 +630,33 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         let doDecrypt: (LAContext) -> Void = { context in
             do {
                 let key = try Self.loadKemKey(alias: alias, context: context)
-                let kemCt = frame.subdata(in: frame.startIndex..<(frame.startIndex + ctLen))
-                let aead = frame.subdata(in: (frame.startIndex + ctLen)..<frame.endIndex)
-                let sharedSecret = try key.decapsulate(kemCt)
-                let box = try ChaChaPoly.SealedBox(combined: aead)
-                let plain = try ChaChaPoly.open(box, using: sharedSecret)
-                call.resolve(["plaintext": plain.base64EncodedString()])
+                let opened = Frames.open(
+                    frame, forKem: true, suiteOk: { $0 == Frames.kemSuite(for: type) },
+                    openV2: { head, _, body in
+                        guard body.count > ctLen else { throw PqSecureStorageError.badCiphertext }
+                        let s = body.startIndex
+                        let sharedSecret = try key.decapsulate(body.subdata(in: s..<(s + ctLen)))
+                        return try Frames.openChaCha(body: body.subdata(in: (s + ctLen)..<body.endIndex), key: sharedSecret, header: head)
+                    },
+                    openV1: { whole in
+                        let kemCt = whole.subdata(in: whole.startIndex..<(whole.startIndex + ctLen))
+                        let aead = whole.subdata(in: (whole.startIndex + ctLen)..<whole.endIndex)
+                        let sharedSecret = try key.decapsulate(kemCt)
+                        let box = try ChaChaPoly.SealedBox(combined: aead)
+                        return try ChaChaPoly.open(box, using: sharedSecret)
+                    }
+                )
+                switch opened {
+                case .ok(let plain, let readAs):
+                    call.resolve(["plaintext": plain.base64EncodedString(), "outdated": readAs == 1])
+                case .failed(let unsupported):
+                    if unsupported {
+                        call.reject("Unsupported frame", "E_UNSUPPORTED")
+                    } else {
+                        os_log("decrypt failed", log: vcpLog, type: .error)
+                        call.reject("Decrypt failed", "E_DECRYPT")
+                    }
+                }
             } catch PqSecureStorageError.keyNotFound {
                 call.reject("Key not found", "E_KEY_NOT_FOUND")
             } catch {
@@ -681,6 +710,15 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     private static func boolArg(_ call: CAPPluginCall, _ name: String, default def: Bool) -> Bool? {
         guard let v = InputPolicy.booleanOption(call.getValue(name), default: def) else {
             call.reject("\(name) must be a boolean", "E_INVALID_ARGS")
+            return nil
+        }
+        return v
+    }
+
+    // format is 1 or 2, absent means 1. Anything else is rejected, not read as 1
+    private static func formatArg(_ call: CAPPluginCall) -> Int? {
+        guard let v = Frames.formatOption(call.getValue("format")) else {
+            call.reject("format must be 1 or 2", "E_INVALID_ARGS")
             return nil
         }
         return v
