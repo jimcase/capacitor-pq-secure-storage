@@ -65,7 +65,10 @@ export interface HardwareCapabilities {
      * True when a biometric is enrolled and can gate keys and items (Android: `BIOMETRIC_STRONG`).
      * iOS reports false below iOS 26. False on the web fallback. On Android, and on iOS 26+ with a
      * Secure Enclave, `false` means that creating a biometric key or item, or any call that has to
-     * show a biometric prompt, rejects `E_BIOMETRY_UNAVAILABLE`.
+     * show a biometric prompt, rejects `E_BIOMETRY_UNAVAILABLE`. One exception on iOS until it is
+     * checked on a device (D13 in DEVICE-VERIFICATION.md): with Face ID off for the app, `getItem`
+     * of a biometric item and `sign` with a biometric Ed25519 key may still answer `E_DECRYPT` /
+     * `E_SIGN`, since the Keychain runs those prompts and its status decides the code.
      */
     biometricGated: boolean;
     /** Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519). */
