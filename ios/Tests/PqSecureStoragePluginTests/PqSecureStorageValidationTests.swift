@@ -99,6 +99,30 @@ final class PqSecureStorageValidationTests: XCTestCase {
         XCTAssertEqual(code, "E_KEY_NOT_FOUND")
     }
 
+    func testEncryptAtRestRejectsABadFormatBeforeTouchingTheKey() {
+        for bad in ["2", 1.5, 3, true] as [Any] {
+            let code = reject(options: ["keyAlias": "audit-a", "data": "AA==", "format": bad]) { $0.encryptAtRest($1) }
+            XCTAssertEqual(code, "E_INVALID_ARGS")
+        }
+    }
+
+    func testDecryptAtRestWithoutAnyKeyIsKeyNotFound() {
+        // no Keychain here so the alias has no key at all: E_KEY_NOT_FOUND, not a failed open, so keys load first
+        let frame = Frames.header(suite: Frames.atRestSepMlkem) + Data(repeating: 0, count: 56)
+        let code = reject(options: ["keyAlias": "none", "data": frame.base64EncodedString()]) { $0.decryptAtRest($1) }
+        XCTAssertEqual(code, "E_KEY_NOT_FOUND")
+    }
+
+    func testCapabilitiesReportAnAtRestSuite() {
+        let caps = resolved(options: [:]) { $0.getHardwareCapabilities($1) }
+        let suite = caps?["atRestSuite"] as? Int
+        if #available(iOS 26.0, *), caps?["hardwareBacked"] as? Bool == true {
+            XCTAssertTrue(suite == 0x11 || suite == 0x12)
+        } else {
+            XCTAssertEqual(suite, 0x11)
+        }
+    }
+
     @available(iOS 26.0, *)
     func testEncryptToWritesAV2FrameOnlyWhenAsked() throws {
         let priv = try MLKEM768.PrivateKey(seedRepresentation: Data(repeating: 7, count: 64), publicKey: nil)
