@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 
 // Argument checks the plugin makes before it touches the Keychain or the Secure Enclave. They sit
 // here, free of Capacitor, so unit tests can run them.
@@ -36,6 +37,15 @@ enum InputPolicy {
         guard let raw = raw else { return def }
         let text = String(raw.prefix(200)).trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? def : text
+    }
+
+    static func authErrorCode(_ code: LAError.Code?) -> String {
+        switch code {
+        case .biometryNotAvailable?, .biometryNotEnrolled?, .biometryLockout?, .passcodeNotSet?:
+            return "E_BIOMETRY_UNAVAILABLE"
+        default:
+            return "E_AUTH_FAILED"
+        }
     }
 
     // a downgrade must not read like a normal rotation
