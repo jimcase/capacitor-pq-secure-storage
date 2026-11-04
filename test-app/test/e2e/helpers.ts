@@ -36,6 +36,10 @@ export async function tap(label: string): Promise<string> {
   return log.getText();
 }
 
+export async function select(id: string, value: string): Promise<void> {
+  await $('#' + id).selectByAttribute('value', value);
+}
+
 // Satisfy a biometric prompt. iOS Simulator + Android emulator only; a real device prompt
 // cannot be automated (by design). Enroll once in a before hook, then match per prompt.
 export async function enrollBiometric(): Promise<void> {

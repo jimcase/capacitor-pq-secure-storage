@@ -4,6 +4,7 @@ import {
   type SignatureType,
   type KemType,
   type Accessibility,
+  type FrameFormat,
 } from 'capacitor-pq-secure-storage';
 
 const logEl = document.getElementById('log') as HTMLDivElement;
@@ -139,10 +140,15 @@ section(
   'Encrypt at rest (AES-256-GCM)',
   field('arAlias', 'keyAlias', 'aes-key'),
   field('arMsg', 'plaintext', 'secret at rest'),
+  field('arFormat', 'format', '1', ['1', '2']),
   buttonRow(
     btn('encryptAtRest', () =>
       run('encryptAtRest', async () => {
-        const r = await PqSecureStorage.encryptAtRest({ keyAlias: val('arAlias'), data: toB64(val('arMsg')) });
+        const r = await PqSecureStorage.encryptAtRest({
+          keyAlias: val('arAlias'),
+          data: toB64(val('arMsg')),
+          format: Number(val('arFormat')) as FrameFormat,
+        });
         lastCiphertextAtRest = r.ciphertext;
         return r;
       }),
@@ -151,7 +157,7 @@ section(
       run('decryptAtRest', async () => {
         if (!lastCiphertextAtRest) throw { message: 'encrypt first' };
         const r = await PqSecureStorage.decryptAtRest({ keyAlias: val('arAlias'), data: lastCiphertextAtRest });
-        return { plaintext: fromB64(r.plaintext) };
+        return { plaintext: fromB64(r.plaintext), outdated: r.outdated };
       }),
     ),
   ),
@@ -162,6 +168,7 @@ section(
   field('kemAlias', 'keyAlias', 'kem-key'),
   field('kemType', 'type', 'PQC_MLKEM_768', kemTypes),
   field('kemMsg', 'plaintext', 'kem message'),
+  field('kemFormat', 'format', '1', ['1', '2']),
   buttonRow(
     btn('generateKemKeyPair', () =>
       run('generateKemKeyPair', async () => {
@@ -182,6 +189,7 @@ section(
           recipientPublicKey: kemPublicKey,
           type: val('kemType') as KemType,
           data: toB64(val('kemMsg')),
+          format: Number(val('kemFormat')) as FrameFormat,
         });
         lastCiphertextKem = r.ciphertext;
         return { ciphertext: r.ciphertext.slice(0, 32) + '…' };
@@ -195,7 +203,7 @@ section(
           type: val('kemType') as KemType,
           data: lastCiphertextKem,
         });
-        return { plaintext: fromB64(r.plaintext) };
+        return { plaintext: fromB64(r.plaintext), outdated: r.outdated };
       }),
     ),
   ),
