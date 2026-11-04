@@ -1,5 +1,5 @@
 import { $, expect } from '@wdio/globals';
-import { switchToWebview, tap } from './helpers.js';
+import { select, switchToWebview, tap } from './helpers.js';
 
 // #log prepends the newest line, so the top line is the result of the last tap.
 function topLine(log: string): string {
@@ -67,5 +67,34 @@ describe('capacitor-pq-secure-storage: hardware-backed (device; on Android emula
     await tap('encryptTo (self)');
     const log = await tap('decrypt (last)');
     expect(topLine(log)).toContain('kem message');
+  });
+
+  it('reports an at-rest suite', async () => {
+    const log = await tap('getHardwareCapabilities');
+    expect(topLine(log)).toContain('atRestSuite');
+  });
+
+  it('round-trips a v2 at-rest frame and reports it current', async () => {
+    await select('arFormat', '2');
+    await tap('encryptAtRest');
+    const log = await tap('decryptAtRest (last)');
+    expect(topLine(log)).toContain('secret at rest');
+    expect(topLine(log)).toContain('"outdated":false');
+  });
+
+  it('reads a v1 at-rest frame and reports it outdated', async () => {
+    await select('arFormat', '1');
+    await tap('encryptAtRest');
+    const log = await tap('decryptAtRest (last)');
+    expect(topLine(log)).toContain('"outdated":true');
+  });
+
+  it('round-trips a v2 ML-KEM frame', async () => {
+    await select('kemFormat', '2');
+    await tap('generateKemKeyPair');
+    await tap('encryptTo (self)');
+    const log = await tap('decrypt (last)');
+    expect(topLine(log)).toContain('kem message');
+    expect(topLine(log)).toContain('"outdated":false');
   });
 });

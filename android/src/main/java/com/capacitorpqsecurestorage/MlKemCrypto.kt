@@ -37,7 +37,7 @@ internal object MlKemCrypto {
         return KeyFactory.getInstance("ML-KEM", bc).generatePublic(X509EncodedKeySpec(spki.encoded))
     }
 
-    fun encapAndSeal(bc: Provider, pub: PublicKey, plaintext: ByteArray): ByteArray {
+    fun encapAndSeal(bc: Provider, pub: PublicKey, plaintext: ByteArray, aad: ByteArray? = null): ByteArray {
         val kg = KeyGenerator.getInstance("ML-KEM", bc)
         kg.init(KEMGenerateSpec.Builder(pub, "AES", 256).withNoKdf().build(), SecureRandom())
         val enc = kg.generateKey() as SecretKeyWithEncapsulation
@@ -47,6 +47,7 @@ internal object MlKemCrypto {
         val aead = try {
             val cipher = Cipher.getInstance("ChaCha20-Poly1305")
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(sharedSecret, "ChaCha20"), IvParameterSpec(nonce))
+            if (aad != null) cipher.updateAAD(aad)
             cipher.doFinal(plaintext)
         } finally {
             sharedSecret.fill(0)
@@ -54,7 +55,7 @@ internal object MlKemCrypto {
         return kemCt + nonce + aead
     }
 
-    fun decapsulate(bc: Provider, priv: PrivateKey, frame: ByteArray, ctLen: Int): ByteArray {
+    fun decapsulate(bc: Provider, priv: PrivateKey, frame: ByteArray, ctLen: Int, aad: ByteArray? = null): ByteArray {
         val kemCt = frame.copyOfRange(0, ctLen)
         val nonce = frame.copyOfRange(ctLen, ctLen + 12)
         val aead = frame.copyOfRange(ctLen + 12, frame.size)
@@ -64,6 +65,7 @@ internal object MlKemCrypto {
         try {
             val cipher = Cipher.getInstance("ChaCha20-Poly1305")
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(shared, "ChaCha20"), IvParameterSpec(nonce))
+            if (aad != null) cipher.updateAAD(aad)
             return cipher.doFinal(aead)
         } finally {
             shared.fill(0)

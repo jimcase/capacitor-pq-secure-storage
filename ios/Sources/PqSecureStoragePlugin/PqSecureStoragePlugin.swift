@@ -269,7 +269,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 "biometricGated": bio,
                 "supportedVariants": hw ? ["ECDSA_256R1", "ED25519", "PQC_MLDSA_65", "PQC_MLDSA_87"] : [],
                 "supportedKem": hw ? ["PQC_MLKEM_768", "PQC_MLKEM_1024"] : [],
-                "kemInSecureEnclave": hw
+                "kemInSecureEnclave": hw,
+                "atRestSuite": Int(Self.atRestSuite())
             ])
         } else {
             call.resolve([
@@ -278,7 +279,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 "biometricGated": false,
                 "supportedVariants": [],
                 "supportedKem": [],
-                "kemInSecureEnclave": false
+                "kemInSecureEnclave": false,
+                "atRestSuite": Int(Frames.atRestSepEcies)
             ])
         }
     }
@@ -448,6 +450,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let dataStr = call.getString("data") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
+        guard let format = Self.formatArg(call) else { return }
         guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let raw = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
@@ -455,13 +458,20 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
+            if format == 2, #available(iOS 26.0, *), Self.atRestSuite() == Frames.atRestSepMlkem {
+                let header = Frames.header(suite: Frames.atRestSepMlkem)
+                let body = try Frames.sealGcm(raw, key: try Self.atRestKemKey(alias: alias, create: true), header: header)
+                return call.resolve(["ciphertext": (header + body).base64EncodedString()])
+            }
             let priv = try Self.atRestKey(alias: alias, create: true)
             guard let pub = SecKeyCopyPublicKey(priv) else { throw PqSecureStorageError.badCiphertext }
             var err: Unmanaged<CFError>?
             guard let ct = SecKeyCreateEncryptedData(pub, Self.atRestAlgo, raw as CFData, &err) as Data? else {
                 throw PqSecureStorageError.badCiphertext
             }
-            call.resolve(["ciphertext": ct.base64EncodedString()])
+            // 0x11 is today's ECIES output behind the header, SecKeyCreateEncryptedData takes no AAD
+            let frame = format == 2 ? Frames.header(suite: Frames.atRestSepEcies) + ct : ct
+            call.resolve(["ciphertext": frame.base64EncodedString()])
         } catch {
             os_log("encryptAtRest failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
             call.reject("Encrypt failed", "E_ENCRYPT")
@@ -479,18 +489,55 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
-        do {
-            let priv = try Self.atRestKey(alias: alias, create: false)
+        // keys load before Frames.open, it swallows errors. The ML-KEM one only for a 0x12 frame
+        let h = Frames.parse(raw)
+        var kem: SymmetricKey?
+        if #available(iOS 26.0, *), h?.version == Frames.version, h?.suite == Frames.atRestSepMlkem {
+            do {
+                kem = try Self.atRestKemKey(alias: alias, create: false)
+            } catch PqSecureStorageError.keyNotFound {
+                // only this key opens 0x12, and an iOS v1 frame never starts with the mark
+                return call.reject("Key not found", "E_KEY_NOT_FOUND")
+            } catch {
+                // a broken item or a SEP failure is not a missing key
+                os_log("decryptAtRest failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+                return call.reject("Decrypt failed", "E_DECRYPT")
+            }
+        }
+        let p256 = try? Self.atRestKey(alias: alias, create: false)
+        // an alias written only with format 2 has just the ML-KEM item, other frames still get the read rule
+        var hasKem = kem != nil
+        if !hasKem, p256 == nil, #available(iOS 26.0, *) {
+            hasKem = (try? Self.atRestKemItem(alias: alias, create: false)) != nil
+        }
+        guard hasKem || p256 != nil else { return call.reject("Key not found", "E_KEY_NOT_FOUND") }
+        let ecies: (Data) throws -> Data = { ct in
+            guard let priv = p256 else { throw PqSecureStorageError.keyNotFound }
             var err: Unmanaged<CFError>?
-            guard let plain = SecKeyCreateDecryptedData(priv, Self.atRestAlgo, raw as CFData, &err) as Data? else {
+            guard let plain = SecKeyCreateDecryptedData(priv, Self.atRestAlgo, ct as CFData, &err) as Data? else {
                 throw PqSecureStorageError.badCiphertext
             }
-            call.resolve(["plaintext": plain.base64EncodedString()])
-        } catch PqSecureStorageError.keyNotFound {
-            call.reject("Key not found", "E_KEY_NOT_FOUND")
-        } catch {
-            os_log("decryptAtRest failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
-            call.reject("Decrypt failed", "E_DECRYPT")
+            return plain
+        }
+        let opened = Frames.open(
+            raw, forKem: false,
+            suiteOk: { $0 == Frames.atRestSepEcies || ($0 == Frames.atRestSepMlkem && kem != nil) },
+            openV2: { head, suite, body in
+                guard suite == Frames.atRestSepMlkem, let kem = kem else { return try ecies(body) }
+                return try Frames.openGcm(body: body, key: kem, header: head)
+            },
+            openV1: ecies
+        )
+        switch opened {
+        case .ok(let plain, let readAs):
+            call.resolve(["plaintext": plain.base64EncodedString(), "outdated": readAs == 1 || h?.suite != Self.atRestSuite()])
+        case .failed(let unsupported):
+            if unsupported {
+                call.reject("Unsupported frame", "E_UNSUPPORTED")
+            } else {
+                os_log("decryptAtRest failed", log: vcpLog, type: .error)
+                call.reject("Decrypt failed", "E_DECRYPT")
+            }
         }
     }
 
@@ -560,6 +607,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let dataStr = call.getString("data") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
+        guard let format = Self.formatArg(call) else { return }
         guard InputPolicy.recipientKeyWithinLimit(pubStr) else { return call.reject("Invalid public key", "E_INVALID_ARGS") }
         guard let pub = InputPolicy.base64Data(pubStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
@@ -575,11 +623,18 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
             let (kemCt, sharedSecret) = try PQKemKey.encapsulate(type: type, recipientPublicKey: pub)
-            let sealed = try ChaChaPoly.seal(raw, using: sharedSecret)
-            // frame = kemCt || nonce(12) || aeadCt(+tag16); ChaChaPoly.combined = nonce||ct||tag
             var frame = Data()
-            frame.append(kemCt)
-            frame.append(sealed.combined)
+            if format == 2 {
+                let header = Frames.header(suite: Frames.kemSuite(for: type)!)
+                frame.append(header)
+                frame.append(kemCt)
+                frame.append(try Frames.sealChaCha(raw, key: sharedSecret, header: header))
+            } else {
+                let sealed = try ChaChaPoly.seal(raw, using: sharedSecret)
+                // frame = kemCt || nonce(12) || aeadCt(+tag16); ChaChaPoly.combined = nonce||ct||tag
+                frame.append(kemCt)
+                frame.append(sealed.combined)
+            }
             call.resolve(["ciphertext": frame.base64EncodedString()])
         } catch {
             os_log("encryptTo failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
@@ -622,12 +677,33 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         let doDecrypt: (LAContext) -> Void = { context in
             do {
                 let key = try Self.loadKemKey(alias: alias, context: context)
-                let kemCt = frame.subdata(in: frame.startIndex..<(frame.startIndex + ctLen))
-                let aead = frame.subdata(in: (frame.startIndex + ctLen)..<frame.endIndex)
-                let sharedSecret = try key.decapsulate(kemCt)
-                let box = try ChaChaPoly.SealedBox(combined: aead)
-                let plain = try ChaChaPoly.open(box, using: sharedSecret)
-                call.resolve(["plaintext": plain.base64EncodedString()])
+                let opened = Frames.open(
+                    frame, forKem: true, suiteOk: { $0 == Frames.kemSuite(for: type) },
+                    openV2: { head, _, body in
+                        guard body.count > ctLen else { throw PqSecureStorageError.badCiphertext }
+                        let s = body.startIndex
+                        let sharedSecret = try key.decapsulate(body.subdata(in: s..<(s + ctLen)))
+                        return try Frames.openChaCha(body: body.subdata(in: (s + ctLen)..<body.endIndex), key: sharedSecret, header: head)
+                    },
+                    openV1: { whole in
+                        let kemCt = whole.subdata(in: whole.startIndex..<(whole.startIndex + ctLen))
+                        let aead = whole.subdata(in: (whole.startIndex + ctLen)..<whole.endIndex)
+                        let sharedSecret = try key.decapsulate(kemCt)
+                        let box = try ChaChaPoly.SealedBox(combined: aead)
+                        return try ChaChaPoly.open(box, using: sharedSecret)
+                    }
+                )
+                switch opened {
+                case .ok(let plain, let readAs):
+                    call.resolve(["plaintext": plain.base64EncodedString(), "outdated": readAs == 1])
+                case .failed(let unsupported):
+                    if unsupported {
+                        call.reject("Unsupported frame", "E_UNSUPPORTED")
+                    } else {
+                        os_log("decrypt failed", log: vcpLog, type: .error)
+                        call.reject("Decrypt failed", "E_DECRYPT")
+                    }
+                }
             } catch PqSecureStorageError.keyNotFound {
                 call.reject("Key not found", "E_KEY_NOT_FOUND")
             } catch {
@@ -681,6 +757,15 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     private static func boolArg(_ call: CAPPluginCall, _ name: String, default def: Bool) -> Bool? {
         guard let v = InputPolicy.booleanOption(call.getValue(name), default: def) else {
             call.reject("\(name) must be a boolean", "E_INVALID_ARGS")
+            return nil
+        }
+        return v
+    }
+
+    // format is 1 or 2, absent means 1. Anything else is rejected, not read as 1
+    private static func formatArg(_ call: CAPPluginCall) -> Int? {
+        guard let v = Frames.formatOption(call.getValue("format")) else {
+            call.reject("format must be 1 or 2", "E_INVALID_ARGS")
             return nil
         }
         return v
@@ -754,9 +839,6 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     private static func privateAccount(for alias: String) -> String { "\(alias).private" }
     private static func publicAccount(for alias: String) -> String { "\(alias).pub" }
 
-    // HMAC key for the public-key integrity tag. Load-or-create, silent, device-only. Unlike
-    // Android (Keystore/hardware HMAC key), this key lives in the Keychain (readable in-process): the
-    // tag defends against offline/backup tampering of the stored public key, not an in-process attacker.
     // Serializes load-or-create of the shared internal keys. SecKeyCreateRandomKey does not dedupe by
     // tag, so two concurrent first calls would leave two keys under one tag and the tags would verify
     // or not depending on which one a lookup returns.
@@ -1133,6 +1215,82 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             throw PqSecureStorageError.badCiphertext
         }
         return key
+    }
+
+    // MARK: - At-rest key (per-alias Secure Enclave ML-KEM-768, iOS 26+)
+
+    // What encryptAtRest writes with format 2: 0x12, or 0x11 when an older SEP on iOS 26 can't do ML-KEM.
+    // Same steps as a real alias (create, rebuild, decapsulate): a key that is made but can't decapsulate
+    // would fail every write. Only a success is kept, a probe run while locked can fail and a kept 0x11
+    // makes apps migrate 0x12 frames down. CryptoKit SEP keys don't persist alone, nothing to delete.
+    // Own lock, never keyCreateLock.
+    private static let atRestProbeLock = NSLock()
+    private static var atRestMlkemOk = false
+
+    private static func atRestSuite() -> UInt8 {
+        atRestProbeLock.lock(); defer { atRestProbeLock.unlock() }
+        if !atRestMlkemOk, #available(iOS 26.0, *), SecureEnclave.isAvailable,
+           let access = SecAccessControlCreateWithFlags(
+               nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .privateKeyUsage, nil) {
+            do {
+                let k = try SecureEnclave.MLKEM768.PrivateKey(accessControl: access)
+                let enc = try k.publicKey.encapsulate()
+                let back = try SecureEnclave.MLKEM768.PrivateKey(dataRepresentation: k.dataRepresentation, authenticationContext: nil)
+                atRestMlkemOk = try back.decapsulate(enc.encapsulated) == enc.sharedSecret
+            } catch {
+                os_log("at-rest ml-kem probe failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+            }
+        }
+        return atRestMlkemOk ? Frames.atRestSepMlkem : Frames.atRestSepEcies
+    }
+
+    // One generic item per alias, kemCt (1088) || dataRepresentation, so creating it is one write. The
+    // kemCt is one encapsulation to the key itself, made at creation. Its shared secret is the alias'
+    // AES key: one SEP decapsulation per call, never stored or cached.
+    private static func atRestKemAccount(_ alias: String) -> String { "\(alias).atrest.mlkem" }
+
+    @available(iOS 26.0, *)
+    private static func atRestKemKey(alias: String, create: Bool) throws -> SymmetricKey {
+        let ctLen = 1088
+        let item = try atRestKemItem(alias: alias, create: create)
+        guard item.count > ctLen else { throw PqSecureStorageError.badCiphertext }
+        let s = item.startIndex
+        let priv = try SecureEnclave.MLKEM768.PrivateKey(
+            dataRepresentation: item.subdata(in: (s + ctLen)..<item.endIndex), authenticationContext: nil)
+        return try priv.decapsulate(item.subdata(in: s..<(s + ctLen)))
+    }
+
+    @available(iOS 26.0, *)
+    private static func atRestKemItem(alias: String, create: Bool) throws -> Data {
+        keyCreateLock.lock(); defer { keyCreateLock.unlock() }
+        let account = atRestKemAccount(alias)
+        var query = baseQuery(account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        if status == errSecSuccess, let item = out as? Data { return item }
+        guard create else { throw PqSecureStorageError.keyNotFound }
+        // only when there is really none: an item we can't read right now (locked) must not be replaced
+        guard status == errSecItemNotFound else { throw PqSecureStorageError.keychain(status) }
+        guard let access = SecAccessControlCreateWithFlags(
+            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .privateKeyUsage, nil
+        ) else { throw PqSecureStorageError.accessControlFailed }
+        let priv = try SecureEnclave.MLKEM768.PrivateKey(accessControl: access)
+        let item = try priv.publicKey.encapsulate().encapsulated + priv.dataRepresentation
+        var add = baseQuery(account: account)
+        add[kSecValueData as String] = item
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let st = SecItemAdd(add as CFDictionary, nil)
+        // never update: another process may have made it first and handed out frames under it
+        if st == errSecDuplicateItem {
+            out = nil
+            let again = SecItemCopyMatching(query as CFDictionary, &out)
+            guard again == errSecSuccess, let stored = out as? Data else { throw PqSecureStorageError.keychain(again) }
+            return stored
+        }
+        guard st == errSecSuccess else { throw PqSecureStorageError.keychain(st) }
+        return item
     }
 
     // MARK: - ML-KEM key persistence (separate accounts from signing keys)

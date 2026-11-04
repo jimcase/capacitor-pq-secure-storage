@@ -285,6 +285,13 @@ class PqSecureStoragePlugin : Plugin() {
         return v
     }
 
+    private fun formatArg(call: PluginCall): Int? {
+        val raw = if (call.data.isNull("format")) null else call.data.opt("format")
+        val v = Frames.formatOption(raw)
+        if (v == null) call.reject("format must be 1 or 2", "E_INVALID_ARGS")
+        return v
+    }
+
     // The Capacitor bridge rethrows anything that escapes a plugin method as a RuntimeException, which
     // takes the whole app down. Methods that touch the Keystore outside their own try use this.
     private inline fun guarded(call: PluginCall, code: String, body: () -> Unit) {
@@ -320,6 +327,7 @@ class PqSecureStoragePlugin : Plugin() {
         // Keystore AES key. AndroidKeyStore does not expose ML-KEM to apps, so it is NOT in the SEP.
         ret.put("supportedKem", listOf("PQC_MLKEM_768", "PQC_MLKEM_1024"))
         ret.put("kemInSecureEnclave", false)
+        ret.put("atRestSuite", Frames.AT_REST_AES_GCM)
         call.resolve(ret)
     }
 
@@ -581,14 +589,17 @@ class PqSecureStoragePlugin : Plugin() {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         if (!safeAlias(call, alias)) return
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
+        val fmt = formatArg(call) ?: return
         val input = decodeCapped(call, data) ?: return
         try {
             val key = getOrCreateAtRestKey(alias)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, key)
+            val header = if (fmt == 2) Frames.header(Frames.AT_REST_AES_GCM) else null
+            if (header != null) cipher.updateAAD(header)
             val iv = cipher.iv // 12 bytes
             val ct = cipher.doFinal(input) // includes tag
-            val frame = iv + ct // nonce(12) || aeadCt(+tag16)
+            val frame = if (header != null) header + iv + ct else iv + ct // [header ||] nonce(12) || aeadCt(+tag16)
             val ret = JSObject()
             ret.put("ciphertext", Base64.encodeToString(frame, Base64.NO_WRAP))
             call.resolve(ret)
@@ -608,14 +619,14 @@ class PqSecureStoragePlugin : Plugin() {
             val key = ks.getKey(atRestAlias(alias), null) as? SecretKey
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val frame = decodeCapped(call, data) ?: return
-            val iv = frame.copyOfRange(0, 12)
-            val ct = frame.copyOfRange(12, frame.size)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-            val plain = cipher.doFinal(ct)
-            val ret = JSObject()
-            ret.put("plaintext", Base64.encodeToString(plain, Base64.NO_WRAP))
-            call.resolve(ret)
+            val r = Frames.open(
+                frame,
+                forKem = false,
+                suiteOk = { it == Frames.AT_REST_AES_GCM },
+                openV2 = { h, _, body -> gcmOpen(key, body, h) },
+                openV1 = { gcmOpen(key, it, null) },
+            )
+            resolveOpen(call, r)
         } catch (e: Exception) {
             logd("decryptAtRest failed for alias=$alias", e)
             call.reject("Decrypt failed", "E_DECRYPT")
@@ -792,6 +803,7 @@ class PqSecureStoragePlugin : Plugin() {
         if (pubStr.length > MAX_RECIPIENT_KEY_B64) return call.reject("Invalid public key", "E_INVALID_ARGS")
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
+        val fmt = formatArg(call) ?: return
         val oid = mlkemOidOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         val input = decodeCapped(call, data) ?: return
         val pubRaw = try {
@@ -804,8 +816,13 @@ class PqSecureStoragePlugin : Plugin() {
         try {
             // the peer sends a raw public key; rebuild the SPKI wrapper JCA needs to parse it
             val pubKey = mlkemPublicFromRaw(pubRaw, oid)
-            // encapsulate (software, no alias/biometric) -> frame = kemCt || nonce(12) || aead(+tag)
-            val frame = MlKemCrypto.encapAndSeal(bc, pubKey, input)
+            // encapsulate (software, no alias/biometric) -> frame = [header ||] kemCt || nonce(12) || aead(+tag)
+            val frame = if (fmt == 2) {
+                val header = Frames.header(Frames.kemSuiteOf(type)!!)
+                header + MlKemCrypto.encapAndSeal(bc, pubKey, input, header)
+            } else {
+                MlKemCrypto.encapAndSeal(bc, pubKey, input)
+            }
             val ret = JSObject()
             ret.put("ciphertext", Base64.encodeToString(frame, Base64.NO_WRAP))
             call.resolve(ret)
@@ -849,17 +866,11 @@ class PqSecureStoragePlugin : Plugin() {
                 val hostActivity = activity as? FragmentActivity
                     ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
                 authenticateCipher(hostActivity, unwrapCipher, "Authenticate to decrypt with your PQ key", call) { boundCipher ->
-                    val plain = decapsulate(boundCipher.doFinal(wrapped), frame, ctLen)
-                    val ret = JSObject()
-                    ret.put("plaintext", Base64.encodeToString(plain, Base64.NO_WRAP))
-                    call.resolve(ret)
+                    resolveOpen(call, openKemFrame(boundCipher.doFinal(wrapped), frame, type, ctLen), "Operation failed", "E_CRYPTO")
                 }
             } else {
                 // no-auth wrap key: unwrap + decapsulate inline, no prompt
-                val plain = decapsulate(unwrapCipher.doFinal(wrapped), frame, ctLen)
-                val ret = JSObject()
-                ret.put("plaintext", Base64.encodeToString(plain, Base64.NO_WRAP))
-                call.resolve(ret)
+                resolveOpen(call, openKemFrame(unwrapCipher.doFinal(wrapped), frame, type, ctLen))
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
             logd("decrypt: key invalidated by biometric enrollment", e)
@@ -1022,6 +1033,29 @@ class PqSecureStoragePlugin : Plugin() {
 
     private fun getOrCreateAtRestKey(alias: String): SecretKey =
         getOrCreateAesKey(atRestAlias(alias), false, unlockRequired = true)
+
+    private fun gcmOpen(key: SecretKey, body: ByteArray, aad: ByteArray?): ByteArray {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, body.copyOfRange(0, 12)))
+        if (aad != null) cipher.updateAAD(aad)
+        return cipher.doFinal(body.copyOfRange(12, body.size))
+    }
+
+    private fun resolveOpen(call: PluginCall, r: Frames.Open<ByteArray>, failMsg: String = "Decrypt failed", failCode: String = "E_DECRYPT") {
+        when (r) {
+            is Frames.Open.Ok -> {
+                val ret = JSObject()
+                ret.put("plaintext", Base64.encodeToString(r.value, Base64.NO_WRAP))
+                ret.put("outdated", r.readAs == 1)
+                call.resolve(ret)
+            }
+            is Frames.Open.Failed -> {
+                logd("frame open failed, unsupported=${r.unsupported}")
+                if (r.unsupported) call.reject("Unsupported frame", "E_UNSUPPORTED")
+                else call.reject(failMsg, failCode)
+            }
+        }
+    }
 
     // a fresh wrap key per generation (versioned alias). On overwrite the old version is deleted
     // after the new state is persisted, so a restored pre-rotation wrapped private can no longer be
@@ -1347,12 +1381,18 @@ class PqSecureStoragePlugin : Plugin() {
         }
     }
 
-    // decapsulate the frame with the (already unwrapped) private. Wipes privBytes + shared secret
+    // open the frame (v2, then v1) with the (already unwrapped) private. Wipes privBytes + shared secret
     // (best-effort: JVM copies in SecretKeySpec/GC still linger).
-    private fun decapsulate(privBytes: ByteArray, frame: ByteArray, ctLen: Int): ByteArray {
+    private fun openKemFrame(privBytes: ByteArray, frame: ByteArray, type: String, ctLen: Int): Frames.Open<ByteArray> {
         try {
             val priv = KeyFactory.getInstance("ML-KEM", bc).generatePrivate(PKCS8EncodedKeySpec(privBytes))
-            return MlKemCrypto.decapsulate(bc, priv, frame, ctLen)
+            return Frames.open(
+                frame,
+                forKem = true,
+                suiteOk = { it == Frames.kemSuiteOf(type) },
+                openV2 = { h, _, body -> MlKemCrypto.decapsulate(bc, priv, body, ctLen, h) },
+                openV1 = { MlKemCrypto.decapsulate(bc, priv, it, ctLen) },
+            )
         } finally {
             privBytes.fill(0)
         }

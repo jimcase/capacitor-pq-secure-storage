@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- `format?: 1 | 2` on `encryptTo` and `encryptAtRest`. `2` puts a 4-byte header (`50 51`, version
+  `02`, suite) in front of the frame, so the algorithm is written in the blob and a later release can
+  change it without breaking stored data. Without `format` (or with `1`) the output has the same layout
+  and size as in 7.2.0. Any other value rejects `E_INVALID_ARGS`.
+- Five frame suites: `0x01` and `0x02` for `encryptTo` (ML-KEM-768 and 1024), `0x10` AES-256-GCM,
+  `0x11` Secure Enclave ECIES and `0x12` Secure Enclave ML-KEM for `encryptAtRest`. The header is the
+  associated data of every suite that has an AEAD, which is all but `0x11`. `FrameSuite`,
+  `FRAME_SUITES` and `parseFrameHeader` are exported to inspect a frame.
+- `decrypt` and `decryptAtRest` read v1 and v2 frames and you do not say which. A frame from a newer
+  version of the plugin (unknown header version or suite) rejects `E_UNSUPPORTED`.
+- `outdated` in the result of `decrypt` and `decryptAtRest`: `true` when the frame was read as v1, and
+  for at rest also when its suite is not `atRestSuite`. Read, see `true`, encrypt again with
+  `format: 2` and store it.
+- `atRestSuite` in `getHardwareCapabilities`: the suite `encryptAtRest({ format: 2 })` writes on this
+  device. `0x10` on Android and the web. On iOS `0x12`, or `0x11` below iOS 26 and when the Secure
+  Enclave cannot make an ML-KEM-768 key. On iOS the plugin checks it once per process when the check
+  succeeds, and a failed check runs again on the next call.
+- Encryption at rest under a Secure Enclave ML-KEM-768 key on iOS 26+ (`format: 2`, suite `0x12`). The
+  alias key comes from one encapsulation saved in the Keychain (about 2.5 KB per alias) and one
+  decapsulation in the Secure Enclave per call. No biometric prompt.
+
+### Changed
+
+- `decrypt` and `decryptAtRest` return one more field, `outdated`, and `getHardwareCapabilities` one
+  more, `atRestSuite`. Existing fields and frames are unchanged, but typed mocks or implementations of
+  `PqSecureStoragePlugin` or `HardwareCapabilities` stop compiling until they add `outdated` to the
+  decrypt results and `atRestSuite` to the capabilities.
+- No rollback for `format: 2` data: 7.2.0 and earlier cannot read frames made with it. Frames without
+  a header keep working in both directions.
+
 ## [7.2.0] - 2026-10-31
 
 Fixes from the second security audit of 7.1.0 (14 findings, none critical). Same code as 8.2.0, only
