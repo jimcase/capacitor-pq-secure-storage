@@ -1407,8 +1407,9 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     // index row of a store item, same account and encrypted name but no ACL, so keys() can list it
-    // with UISkip. A duplicate is a row left from before, just refresh its name in place.
-    private static func addIndex(account: String, encName: Data, protection: CFString) -> OSStatus {
+    // with UISkip. A duplicate is a row left from before, just refresh its name in place (unless
+    // updateOnDuplicate is false, then the row stays as it is).
+    private static func addIndex(account: String, encName: Data, protection: CFString, updateOnDuplicate: Bool = true) -> OSStatus {
         let match: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: StoreIndex.service,
@@ -1419,7 +1420,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         add[kSecValueData as String] = Data([0])
         add[kSecAttrAccessible as String] = protection
         let status = SecItemAdd(add as CFDictionary, nil)
-        guard status == errSecDuplicateItem else { return status }
+        guard status == errSecDuplicateItem, updateOnDuplicate else { return status }
         return SecItemUpdate(match as CFDictionary, [kSecAttrGeneric as String: encName] as CFDictionary)
     }
 
@@ -1576,6 +1577,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrService as String: Self.ssService,
                 kSecAttrAccount as String: account,
                 kSecReturnData as String: true,
+                kSecReturnAttributes as String: true,
                 kSecMatchLimit as String: kSecMatchLimitOne,
                 kSecUseAuthenticationContext as String: context,
             ]
@@ -1583,11 +1585,16 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             let status = SecItemCopyMatching(query as CFDictionary, &out)
             switch status {
             case errSecSuccess:
-                if let data = out as? Data, let value = String(data: data, encoding: .utf8) {
+                let attrs = out as? [String: Any]
+                if let data = attrs?[kSecValueData as String] as? Data, let value = String(data: data, encoding: .utf8) {
                     // bio items from before the index have no row, and this is the first time we have
-                    // the name with the item already unlocked. Best effort, never changes the read.
+                    // the name with the item already unlocked. Row gets the item's class, an existing
+                    // row is left alone. Best effort, never changes the read.
                     if let enc = try? Self.encName(key) {
-                        _ = Self.addIndex(account: account, encName: enc, protection: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+                        let cls = (attrs?[kSecAttrAccessible as String] as? String).map { $0 as CFString }
+                        _ = Self.addIndex(account: account, encName: enc,
+                                          protection: cls ?? kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                                          updateOnDuplicate: false)
                     }
                     call.resolve(["value": value])
                 } else {
@@ -1751,7 +1758,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         ]
         var listOut: CFTypeRef?
         let listStatus = SecItemCopyMatching(listQuery as CFDictionary, &listOut)
-        if listStatus == errSecItemNotFound { return call.resolve() }
+        // empty store still goes through wipe, for orphan index rows and the name keys
+        if listStatus == errSecItemNotFound { return wipe() }
         var hasBiometric = false
         var items: [[String: Any]] = []
         if listStatus == errSecInteractionNotAllowed {
