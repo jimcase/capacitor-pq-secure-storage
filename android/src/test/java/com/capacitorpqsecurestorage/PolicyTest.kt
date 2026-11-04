@@ -1,5 +1,7 @@
 package com.capacitorpqsecurestorage
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -132,4 +134,40 @@ class PolicyTest {
 
     @Test fun replacementPromptIsTheUsualOneWhenTheNewKeyStaysBiometric() { assertEquals("Authorize key replacement", Policy.replacementPrompt(true)) }
     @Test fun replacementPromptNamesTheDropWhenTheNewKeyIsSilent() { assertEquals("Replace this key with one that does not need biometrics", Policy.replacementPrompt(false)) }
+
+    @Test fun aPromptWhileTheSensorIsBusyIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_HW_UNAVAILABLE)) }
+    @Test fun aPromptWithNoSensorIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_HW_NOT_PRESENT)) }
+    @Test fun aPromptWithNothingEnrolledIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_NO_BIOMETRICS)) }
+    @Test fun aLockoutIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_LOCKOUT)) }
+    @Test fun aPermanentLockoutIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_LOCKOUT_PERMANENT)) }
+    @Test fun aSensorThatWaitsForASecurityUpdateIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_SECURITY_UPDATE_REQUIRED)) }
+
+    // the user or the system ended a prompt that could run: the host must not read it as no biometric
+    @Test
+    fun aCancelledPromptStaysAuthFailed() {
+        for (code in listOf(BiometricPrompt.ERROR_USER_CANCELED, BiometricPrompt.ERROR_NEGATIVE_BUTTON, BiometricPrompt.ERROR_CANCELED)) {
+            assertEquals("code $code", "E_AUTH_FAILED", Policy.promptErrorCode(code))
+        }
+    }
+
+    @Test
+    fun otherPromptErrorsStayAuthFailed() {
+        for (code in listOf(BiometricPrompt.ERROR_TIMEOUT, BiometricPrompt.ERROR_UNABLE_TO_PROCESS, BiometricPrompt.ERROR_NO_SPACE,
+                BiometricPrompt.ERROR_VENDOR, BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL)) {
+            assertEquals("code $code", "E_AUTH_FAILED", Policy.promptErrorCode(code))
+        }
+    }
+
+    @Test fun anUnknownPromptErrorIsAuthFailed() { assertEquals("E_AUTH_FAILED", Policy.promptErrorCode(999)); assertEquals("E_AUTH_FAILED", Policy.promptErrorCode(-1)) }
+
+    @Test fun aBiometricIsUsableOnlyOnSuccess() { assertTrue(Policy.biometryUsable(BiometricManager.BIOMETRIC_SUCCESS)) }
+
+    @Test
+    fun noBiometricIsUsableOnAnyOtherAnswer() {
+        for (r in listOf(BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED, BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE,
+                BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE, BiometricManager.BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED,
+                BiometricManager.BIOMETRIC_ERROR_UNSUPPORTED, BiometricManager.BIOMETRIC_STATUS_UNKNOWN)) {
+            assertFalse("answer $r", Policy.biometryUsable(r))
+        }
+    }
 }
