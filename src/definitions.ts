@@ -49,8 +49,10 @@ export const Accessibility = {
 export interface HardwareCapabilities {
     /**
      * Whether ML-DSA signing is available. iOS: iOS 26+ with a Secure Enclave (ML-KEM comes with
-     * it). Android: the Keystore offers ML-DSA (probed at runtime); ML-KEM works even when this is
-     * false, see `supportedKem`. True on the web fallback, which is software only.
+     * it). Android: the Keystore can make an ML-DSA-65 key. The first call in a process makes a
+     * throwaway key (no biometric) and deletes it, and the answer is kept until the process ends;
+     * ML-KEM works even when this is false, see `supportedKem`. True on the web fallback, which is
+     * software only.
      */
     supportsPqc: boolean;
     /**
@@ -72,7 +74,10 @@ export interface HardwareCapabilities {
      * `E_SIGN`, since the Keychain runs those prompts and its status decides the code.
      */
     biometricGated: boolean;
-    /** Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519). */
+    /**
+     * Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519). On Android the ML-DSA
+     * types come from the same throwaway key as `supportsPqc`.
+     */
     supportedVariants: SignatureType[];
     /** ML-KEM variants available on this device. */
     supportedKem: KemType[];
@@ -102,9 +107,7 @@ export interface PqSecureStoragePlugin {
      * software key whose private is encrypted by a hardware key and opened only to sign. Rejects if
      * the alias exists unless `overwrite` is true. Distinct aliases give independent keypairs (use
      * that for KERI rotation, one alias per key). On Android an ML-DSA type on a device without
-     * Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first. On some Android 17
-     * phones `supportedVariants` lists ML-DSA and the Keystore still rejects the key, so handle
-     * `E_KEYGEN` too.
+     * Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first.
      *
      * `requireBiometric` (default `true`) is baked into the key: `true` makes every `sign` prompt
      * for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
@@ -288,9 +291,10 @@ export interface PqSecureStoragePlugin {
 
     /**
      * List the names of stored secrets. No prompt. Rejects `E_DECRYPT` when the store cannot be
-     * listed, so a prefixed `clear()` fails instead of deleting nothing. On iOS it does not list
-     * biometric items (checked on a device), so a prefixed `clear()` leaves them; a plain `clear()`
-     * removes them.
+     * listed, so a prefixed `clear()` fails instead of deleting nothing. On iOS it lists biometric
+     * items too, from an index kept next to the store. A biometric item saved by an earlier version
+     * is listed after one `getItem` or `setItem` on it, and until then a prefixed `clear()` leaves
+     * it (a plain `clear()` removes it).
      */
     keys(): Promise<{ keys: string[] }>;
 

@@ -68,6 +68,25 @@ All notable changes to this project are documented here. The format is based on
   `E_BAD_ALIAS`, `E_UNSUPPORTED`) come before it.
 - If your code reads `E_AUTH_FAILED` as "no biometric", handle `E_BIOMETRY_UNAVAILABLE` too.
 
+### Fixed
+
+- iOS `keys()` did not list biometric items, so `withPrefix(...).clear()` left them in the store.
+  Each item now has an index row in the Keychain (service `pq.securestorage.index`, no access
+  control, the same keyed-hash account and encrypted name as the item), and `keys()` lists the rows
+  and the store together, with no prompt. `setItem` writes the row after the item (a failed row on
+  create undoes the item and rejects `E_ENCRYPT`), `getItem` adds a missing row, `removeItem`
+  deletes it and `clear()` deletes all of them. A silent item saved by an earlier version is listed
+  at once, a biometric one after one `getItem` or `setItem` on it. A plain `clear()` removes
+  everything as before.
+- Android reported ML-DSA on a phone whose Keystore cannot make the keys (`supportsPqc` true, both
+  ML-DSA types in `supportedVariants`, then `generateKeyPair` rejected `E_KEYGEN`). `supportsPqc` and
+  the ML-DSA entries of `supportedVariants` now come from making and deleting a throwaway ML-DSA-65
+  key (no biometric, no unlock requirement) the first time `getHardwareCapabilities` is called in a
+  process, and the answer is kept for the process. That first call does one key generation in the
+  Keystore. `generateKeyPair` is the same.
+- Android `supportedVariants` and `supportedKem` reached JavaScript as a string such as
+  `"[ECDSA_256R1, ED25519]"`. They are arrays now, as on iOS and the web.
+
 ## [8.2.0] - 2026-10-31
 
 Fixes from the second security audit of 8.1.0 (14 findings, none critical). Same code as 7.2.0, only

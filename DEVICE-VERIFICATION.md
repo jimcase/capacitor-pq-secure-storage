@@ -58,8 +58,19 @@ build and the plugin version. The current state is in [Results so far](#results-
 - [ ] **A2.** [manual] `getHardwareCapabilities()` answers `supportsPqc: true`,
   `hardwareBacked: true`, `biometricGated: true`, `supportedVariants` with `ECDSA_256R1`, `ED25519`,
   `PQC_MLDSA_65` and `PQC_MLDSA_87`, both `supportedKem`, and `kemInSecureEnclave: false`. The e2e
-  only checks that the call answers. If `supportsPqc` is false, the Keystore has no ML-DSA: note it
-  and skip the ML-DSA checks.
+  checks that the call answers and that `supportedKem` is an array. If `supportsPqc` is false, the
+  Keystore cannot make an ML-DSA key: note it and skip the ML-DSA checks. The plugin finds out by
+  making and deleting a throwaway ML-DSA-65 key the first time the call runs in a process. On the
+  Samsung A57 (the Keystore rejects every ML-DSA key, see A3) check:
+  1. `supportsPqc` is `false` and `supportedVariants` has no `PQC_MLDSA_65` or `PQC_MLDSA_87`.
+  2. `supportedVariants` and `supportedKem` are real arrays: `Array.isArray` is true for both,
+     `.length` is 2 for each (`ECDSA_256R1` and `ED25519`, and the two KEM types), and the log
+     shows `["ECDSA_256R1","ED25519"]`, not a quoted string.
+  3. Time the first `getHardwareCapabilities()` call in a fresh process (force-stop the app first)
+     and the second one right after, with `performance.now()` before and after the call. The first
+     does one key generation attempt in the Keystore, the second reads the kept answer. Note both
+     times.
+  4. [debug build] The Keystore has no `__pq_mldsa_probe__` alias after the call.
 - [ ] **A3.** [e2e] `generateKeyPair` and `sign` with a silent `PQC_MLDSA_65` key work. [manual]
   The public key decodes to 1952 bytes (2592 for `PQC_MLDSA_87`) and the signature to 3309 bytes
   (4627).
@@ -243,10 +254,40 @@ that E2 checks.
 - [ ] **E5.** [manual] Item names: `setItem("secret-name", ...)` then `getItem("secret-name")`
   round-trips and `keys()` returns `secret-name`. A raw Keychain dump (jailbroken or development
   device) shows `kSecAttrAccount` as an HMAC in base64, not the name.
-- [ ] **E6.** [manual] M-8: with one silent item and one `requireBiometric: true` item, `keys()`
-  lists both and `clear()` asks for Face ID / Touch ID before wiping. If `keys()` lists only the
-  silent one, the system hides access-controlled items from attribute queries, and a
-  `withPrefix(...).clear()` would leave them: the fix is an index item (audit fixes, option B).
+- [ ] **E6.** [manual] M-8: `keys()` lists biometric items too, from the index rows. iOS hides the
+  items themselves from that listing, so the index is what is under test. Use S4 for raw calls, and
+  note any prompt that shows where none is expected.
+  1. Empty store. `setItem` a `requireBiometric: true` item `a` and a silent item `b`, with no
+     prompt. `keys()` answers with no prompt and lists `a` and `b`, each once.
+  2. `withPrefix(...).clear()` on a view that holds both removes both, with one prompt (the
+     biometric item's). Then `keys()` is empty and `hasItem` is false for both.
+  3. Plain `clear()` with one biometric and one silent item: one prompt, then `keys()` is empty. A
+     new `setItem` is listed by `keys()`. `clear()` on a store with only one biometric item still
+     prompts.
+  4. Migration through `getItem`. With the previous build (branch `frames`) store a biometric item
+     `m`, then install this build over it. `keys()` does not list `m`. `getItem('m')` prompts and
+     returns the same value as before. After that `keys()` lists `m` with no prompt. Read `m` a few
+     more times: the value is the same, one prompt per read, and `keys()` still lists `m` once.
+  5. Migration through `setItem`. Same start, but `setItem('m', ...)` with `requireBiometric: true`
+     (the replace prompt) instead of the read. `keys()` lists `m` and `getItem('m')` returns the new
+     value.
+  6. A silent item stored by the previous build is listed by `keys()` with nothing done to it.
+  7. `setItem` on a name that already exists (silent, and biometric with its prompt): `keys()` lists
+     it once.
+  8. `removeItem` of a biometric item (prompt) and of a silent one (no prompt): `keys()` lists
+     neither afterwards. `removeItem` of a name that does not exist resolves.
+  9. Empty store with a row left over. `setItem('o', ...)` (silent is enough) and `keys()` lists
+     `o`. In a debug build delete the store item by hand and keep its row: `SecItemDelete` on
+     service `pq.securestorage` and the account of `o`, not on `pq.securestorage.index`. `keys()`
+     still lists `o` and `getItem('o')` returns `null`. `clear()` resolves with no prompt and
+     `keys()` is `[]`. Then `setItem('x', ...)`: `keys()` is `['x']` and `getItem('x')` reads it.
+  10. Mixed protection classes with the phone locked, unverified: with the previous build store a
+      silent item `s` with `accessibility: 'afterFirstUnlock'`, install this build and run
+      `getItem('s')` once with the phone unlocked (that adds its row with the item's class). Store
+      also a `whenUnlocked` silent item `u`. Lock the phone (after the first unlock) and run
+      `keys()` with the app alive in the background. Note whether it lists `s`, lists nothing, or
+      rejects `E_DECRYPT`. It is the same open question as E8.
+  11. No `keys()`, `hasItem` or silent `setItem` shows a prompt at any step.
 - [ ] **E7.** [manual] An item after a biometric enrollment change (2026-10-30 audit, and N-4).
   Store a biometric item, then change the enrollment (add a fingerprint, or reset Face ID and enroll
   again).
@@ -271,7 +312,8 @@ that E2 checks.
   is still there (`hasItem`), and whether `removeItem` then deletes it after one prompt.
 - [ ] **E8.** [manual] N-7: `keys()` with the device locked and the app alive in the background
   (S4): does it list, return `[]`, or reject `E_DECRYPT`? A view's `clear()` uses `keys()`, so it
-  must not resolve having deleted nothing: `[]` here with items in the store is a fail.
+  must not resolve having deleted nothing: `[]` here with items in the store is a fail. Run it with
+  items of different accessibility classes, as in E6 check 10.
 - [ ] **E9.** [e2e] `getHardwareCapabilities()` answers with an `atRestSuite` field (the spec only
   checks the name, so a phone that reports 17 passes it too). [manual] Read the value in the log on the
   iPhone 16: it must be `18` (`0x12`). Console shows no "at-rest ml-kem probe failed" line. If it
@@ -372,7 +414,7 @@ iOS has no `E_BUSY` latch, so these record what happens.
 
 | Issue | Probable cause | Fix |
 |---|---|---|
-| `supportsPqc: false` | Android: the Keystore has no ML-DSA (needs Android 17 and KeyMint support). iOS: below iOS 26, or no Secure Enclave | Use a newer phone or OS build, or note it as a device limit |
+| `supportsPqc: false` | Android: the Keystore cannot make an ML-DSA key (needs Android 17 and KeyMint support). iOS: below iOS 26, or no Secure Enclave | Use a newer phone or OS build, or note it as a device limit |
 | A4 or A5 says software | No ML-DSA in the TEE / StrongBox of this phone | Hardware limit of the device, record it |
 | Public key not 1952 / 2592 bytes | Bug in the raw key extraction | Report it with the phone model and OS build |
 | Signature does not verify | Wrong message bytes on the laptop side | Verify the exact bytes that went in as `data` (base64 decoded, UTF-8 for the test app) |
