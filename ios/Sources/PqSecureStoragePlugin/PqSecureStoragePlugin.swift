@@ -1406,6 +1406,32 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         return SecItemCopyMatching(q as CFDictionary, nil)
     }
 
+    // index row of a store item, same account and encrypted name but no ACL, so keys() can list it
+    // with UISkip. A duplicate is a row left from before, just refresh its name in place.
+    private static func addIndex(account: String, encName: Data, protection: CFString) -> OSStatus {
+        let match: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: StoreIndex.service,
+            kSecAttrAccount as String: account,
+        ]
+        var add = match
+        add[kSecAttrGeneric as String] = encName
+        add[kSecValueData as String] = Data([0])
+        add[kSecAttrAccessible as String] = protection
+        let status = SecItemAdd(add as CFDictionary, nil)
+        guard status == errSecDuplicateItem else { return status }
+        return SecItemUpdate(match as CFDictionary, [kSecAttrGeneric as String: encName] as CFDictionary)
+    }
+
+    private static func deleteIndex(account: String) {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: StoreIndex.service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(q as CFDictionary)
+    }
+
     // every bio store item is biometryCurrentSet, so with no biometric enrolled none of them can be
     // live and a prompt can't run. Then a dead item is deleted without one or the name stays locked.
     private static func noBiometricEnrolled() -> Bool {
@@ -1470,7 +1496,13 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         let create: () -> Void = {
             let status = SecItemAdd(addQuery as CFDictionary, nil)
             if status == errSecSuccess {
-                call.resolve()
+                // no index row means keys() can't see a bio item, so take the item back out
+                if Self.addIndex(account: account, encName: encodedName, protection: protection) == errSecSuccess {
+                    call.resolve()
+                } else {
+                    SecItemDelete(matchQuery as CFDictionary)
+                    call.reject("Store failed", "E_ENCRYPT")
+                }
             } else if status == errSecDuplicateItem {
                 // probe said not found but the row is there: a dead biometric item
                 call.reject("Item invalidated by a biometric change; removeItem first", "E_KEY_INVALIDATED")
@@ -1485,7 +1517,10 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             var q = matchQuery
             if let ctx = ctx { q[kSecUseAuthenticationContext as String] = ctx }
             let status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-            if status == errSecSuccess { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
+            guard status == errSecSuccess else { call.reject("Store failed", "E_ENCRYPT"); return }
+            // value is already stored, the index row is only a backfill here
+            _ = Self.addIndex(account: account, encName: encodedName, protection: protection)
+            call.resolve()
         }
 
         // probe the existing item's tier WITHOUT prompting. Request DATA so the biometry ACL (which
@@ -1549,6 +1584,11 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             switch status {
             case errSecSuccess:
                 if let data = out as? Data, let value = String(data: data, encoding: .utf8) {
+                    // bio items from before the index have no row, and this is the first time we have
+                    // the name with the item already unlocked. Best effort, never changes the read.
+                    if let enc = try? Self.encName(key) {
+                        _ = Self.addIndex(account: account, encName: enc, protection: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+                    }
                     call.resolve(["value": value])
                 } else {
                     call.reject("Decode failed", "E_DECRYPT")
@@ -1596,7 +1636,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrAccount as String: account,
             ]
             let status = SecItemDelete(query as CFDictionary)
-            if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Remove failed", "E_REMOVE") }
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                call.reject("Remove failed", "E_REMOVE"); return
+            }
+            // item first, then its row: an orphan row only lists a name that reads null
+            Self.deleteIndex(account: account)
+            call.resolve()
         }
         let confirmDel: () -> Void = {
             Self.authenticate(reason: "Authenticate to delete your secret") { result in
@@ -1612,7 +1657,9 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             // means absent; if the row is there, confirm first, unless no biometric is enrolled
             // (then the item is dead).
             switch Self.ssMetaStatus(account: account) {
-            case errSecItemNotFound: call.resolve()
+            case errSecItemNotFound:
+                Self.deleteIndex(account: account) // clean an orphan row
+                call.resolve()
             case errSecSuccess, errSecInteractionNotAllowed:
                 Self.noBiometricEnrolled() ? del() : confirmDel()
             default: call.reject("Remove failed", "E_REMOVE")
@@ -1652,29 +1699,26 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func keys(_ call: CAPPluginCall) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.ssService,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
-        ]
-        var out: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &out)
-        if status == errSecItemNotFound { return call.resolve(["keys": []]) }
-        guard status == errSecSuccess else {
+        // UISkip hides the bio items from the store listing, the index has no ACL so it lists them.
+        // The store listing still counts for silent items written before the index.
+        let list: (String) -> [[String: Any]]? = { service in
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecReturnAttributes as String: true,
+                kSecMatchLimit as String: kSecMatchLimitAll,
+                kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+            ]
+            var out: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &out)
+            if status == errSecItemNotFound { return [] }
+            guard status == errSecSuccess else { return nil }
+            return out as? [[String: Any]] ?? []
+        }
+        guard let index = list(StoreIndex.service), let store = list(Self.ssService) else {
             call.reject("List failed", "E_DECRYPT"); return
         }
-        var result: [String] = []
-        if let items = out as? [[String: Any]] {
-            for item in items {
-                // the account is the HMAC tag; the real name is the encrypted generic attr
-                if let enc = item[kSecAttrGeneric as String] as? Data, let name = try? Self.decName(enc) {
-                    result.append(name)
-                }
-            }
-        }
-        call.resolve(["keys": result])
+        call.resolve(["keys": StoreIndex.names(index: index, store: store, decrypt: { try? Self.decName($0) })])
     }
 
     @objc func clear(_ call: CAPPluginCall) {
@@ -1684,6 +1728,11 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrService as String: Self.ssService,
             ]
             let status = SecItemDelete(query as CFDictionary)
+            let indexQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: StoreIndex.service,
+            ]
+            SecItemDelete(indexQuery as CFDictionary)
             // also drop the store's name keys (a later setItem regenerates them)
             for acct in [Self.nameEncAccount, Self.nameTagAccount] {
                 SecItemDelete(Self.baseQuery(account: acct) as CFDictionary)
