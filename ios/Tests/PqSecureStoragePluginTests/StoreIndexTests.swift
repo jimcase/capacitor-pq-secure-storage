@@ -23,6 +23,20 @@ final class StoreIndexTests: XCTestCase {
         XCTAssertEqual(names, ["z"])
     }
 
+    func testAnEntryThatDoesNotDecryptIsSkipped() {
+        let only: (Data) -> String? = { $0 == Data("z".utf8) ? "z" : nil }
+        XCTAssertEqual(StoreIndex.names(index: [entry("a", "bad")], store: [entry("b", "z")], decrypt: only), ["z"])
+    }
+
+    func testAnUnreadableIndexEntryDoesNotHideTheStoreOne() {
+        let only: (Data) -> String? = { $0 == Data("x".utf8) ? "x" : nil }
+        XCTAssertEqual(StoreIndex.names(index: [entry("a", "bad")], store: [entry("a", "x")], decrypt: only), ["x"])
+    }
+
+    func testARepeatedAccountInOneListCountsOnce() {
+        XCTAssertEqual(StoreIndex.names(index: [entry("a", "x"), entry("a", "x")], store: [], decrypt: plain), ["x"])
+    }
+
     func testEmptyListsGiveNoNames() {
         XCTAssertEqual(StoreIndex.names(index: [], store: [], decrypt: plain), [])
     }
