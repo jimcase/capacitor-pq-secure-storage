@@ -8,8 +8,14 @@ import { randomBytes } from '@noble/post-quantum/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 
-import type { PqSecureStoragePlugin, SignatureType, KemType, HardwareCapabilities } from './definitions.js';
-import { FrameSuite } from './frames.js';
+import type {
+    PqSecureStoragePlugin,
+    SignatureType,
+    KemType,
+    HardwareCapabilities,
+    FrameFormat,
+} from './definitions.js';
+import { FrameSuite, KEM_SUITE, formatOption, frameHeader, openFrame } from './frames.js';
 
 // Software fallback for platforms without hardware PQC (the web, mainly). Uses @noble in pure
 // JS and persists keys/values in a Storage (localStorage by default). NOT hardware-backed and
@@ -127,6 +133,12 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         if (value !== undefined && value !== null && typeof value !== 'boolean') {
             this.fail('E_INVALID_ARGS', `${name} must be a boolean`);
         }
+    }
+
+    private formatArg(value: unknown): FrameFormat {
+        const f = formatOption(value);
+        if (f === null) this.fail('E_INVALID_ARGS', 'format must be 1 or 2');
+        return f;
     }
 
     // reject an oversized input before decoding it (the base64 string bounds the decoded size)
@@ -285,7 +297,9 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         recipientPublicKey: string;
         type: KemType;
         data: string;
+        format?: FrameFormat;
     }): Promise<{ ciphertext: string }> {
+        const fmt = this.formatArg(options.format);
         const input = this.decodeCapped(options.data);
         if (options.recipientPublicKey.length > MAX_RECIPIENT_KEY_B64) {
             this.fail('E_INVALID_ARGS', 'Invalid public key');
@@ -296,8 +310,9 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
             ciphertext: this.guard('E_ENCRYPT', 'Encrypt failed', () => {
                 const { cipherText, sharedSecret } = kem.encapsulate(pk);
                 const nonce = randomBytes(12);
-                const aead = chacha20poly1305(sharedSecret, nonce).encrypt(input);
-                return toB64(concat(cipherText, nonce, aead));
+                const header = fmt === 2 ? frameHeader(KEM_SUITE[options.type]) : undefined;
+                const aead = chacha20poly1305(sharedSecret, nonce, header).encrypt(input);
+                return toB64(concat(header ?? new Uint8Array(0), cipherText, nonce, aead));
             }),
         };
     }
@@ -315,12 +330,22 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         const buf = this.decodeCapped(options.data);
         if (buf.length <= ctLen + 12) this.fail('E_BAD_CIPHERTEXT', 'Malformed ciphertext');
         const kem = kemOf(options.type);
-        const plain = this.guard('E_DECRYPT', 'Decrypt failed', () => {
-            const sharedSecret = kem.decapsulate(buf.subarray(0, ctLen), kp.sk);
-            const nonce = buf.subarray(ctLen, ctLen + 12);
-            return chacha20poly1305(sharedSecret, nonce).decrypt(buf.subarray(ctLen + 12));
-        });
-        return { plaintext: toB64(plain), outdated: true };
+        const open = (f: Uint8Array, aad?: Uint8Array) => {
+            const sharedSecret = kem.decapsulate(f.subarray(0, ctLen), kp.sk);
+            return chacha20poly1305(sharedSecret, f.subarray(ctLen, ctLen + 12), aad).decrypt(f.subarray(ctLen + 12));
+        };
+        const r = openFrame(
+            buf,
+            'encryptTo',
+            (s) => s === KEM_SUITE[options.type],
+            (h, _s, body) => open(body, h),
+            (f) => open(f),
+        );
+        if (!r.ok) {
+            if (r.unsupported) this.fail('E_UNSUPPORTED', 'Unsupported frame');
+            this.fail('E_DECRYPT', 'Decrypt failed');
+        }
+        return { plaintext: toB64(r.value), outdated: r.readAs === 1 };
     }
 
     // requireBiometric/accessibility are accepted for API parity but ignored: the web fallback has
