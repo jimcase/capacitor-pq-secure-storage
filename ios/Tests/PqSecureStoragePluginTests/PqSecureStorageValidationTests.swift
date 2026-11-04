@@ -8,7 +8,7 @@ import XCTest
 // any Secure Enclave key operation, biometric or Keychain write are covered here (argument checks,
 // early rejections): the simulator cannot do those.
 final class PqSecureStorageValidationTests: XCTestCase {
-    private let storeKeys = ["audit-nonbool", "audit-wide"]
+    private let storeKeys = ["audit-nonbool", "audit-wide", "audit-bio"]
 
     override func tearDown() {
         for k in storeKeys {
@@ -57,6 +57,13 @@ final class PqSecureStorageValidationTests: XCTestCase {
     func testSetItemRejectsARequireBiometricThatIsNotABoolean() {
         let code = reject(options: ["key": "audit-nonbool", "value": "v", "requireBiometric": "true"]) { $0.setItem($1) }
         XCTAssertEqual(code, "E_INVALID_ARGS")
+    }
+
+    // the test host has no Face ID enrolled unless someone turned it on in the simulator
+    func testSetItemWithRequireBiometricRejectsWhenNoBiometricCanBeUsed() throws {
+        try XCTSkipIf(LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil), "a biometric is usable on this simulator")
+        let code = reject(options: ["key": "audit-bio", "value": "v", "requireBiometric": true]) { $0.setItem($1) }
+        XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE")
     }
 
     func testGenerateKeyPairRejectsAnOverwriteThatIsNotABoolean() {
