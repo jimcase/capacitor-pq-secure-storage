@@ -58,7 +58,8 @@ yet, see [Verification status](#verification-status).
 What works below the ML-DSA / ML-KEM floor:
 
 - **iOS 15 to 25**: secure storage, and encryption at rest (it needs a Secure Enclave). Every
-  signing type and ML-KEM reject `E_UNSUPPORTED`, and `getHardwareCapabilities` reports all false.
+  signing type and ML-KEM reject `E_UNSUPPORTED`, and `getHardwareCapabilities` reports false and
+  empty lists, with `atRestSuite` 17 (`0x11`).
 - **Android without Keystore ML-DSA**: everything but ML-DSA. `supportsPqc` is false,
   `supportedVariants` lists `ECDSA_256R1` and `ED25519`, and an ML-DSA `generateKeyPair` rejects
   `E_KEYGEN`.
@@ -999,10 +1000,12 @@ From 8.1.0:
 
 From 8.2.0:
 
-- Everything is additive. Without `format` the four crypto calls give the same layout and size as
-  before, and every frame that opened before still opens.
+- At runtime everything is additive. Without `format` the four crypto calls give the same layout and
+  size as before, and every frame that opened before still opens.
 - `decrypt` and `decryptAtRest` return one more field, `outdated`. `getHardwareCapabilities` returns
-  one more field, `atRestSuite`.
+  one more field, `atRestSuite`. Typed mocks or implementations of `PqSecureStoragePlugin` or
+  `HardwareCapabilities` stop compiling until they add `outdated` to the two decrypt results and
+  `atRestSuite` to the capabilities.
 - To move stored data to the new frames, read it, check `outdated`, and encrypt it again with
   `format: 2` when it suits you. See [Frame formats](#frame-formats).
 - Frames made with `format: 2` do not open on 8.2.0 or earlier (the header looks like ciphertext, so

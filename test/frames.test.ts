@@ -6,6 +6,7 @@ import {
     frameHeader,
     isAtRestSuite,
     isKemSuite,
+    isKnownSuite,
     openFrame,
     parseFrameHeader,
 } from '../src/frames';
@@ -28,6 +29,20 @@ describe('frame header', () => {
         expect(isKemSuite(0x01) && isKemSuite(0x0f) && !isKemSuite(0x10)).toBe(true);
         expect(isAtRestSuite(0x10) && isAtRestSuite(0x1f) && !isAtRestSuite(0x20)).toBe(true);
         expect(KEM_SUITE.PQC_MLKEM_1024).toBe(0x02);
+    });
+    it('keeps its own list of known suites when FRAME_SUITES is changed', () => {
+        const known = () => Array.from({ length: 256 }, (_, i) => i).filter(isKnownSuite);
+        expect(known()).toEqual([0x01, 0x02, 0x10, 0x11, 0x12]);
+        const table = FRAME_SUITES as Record<number, unknown>;
+        const saved = table[0x11];
+        try {
+            table[0x20] = { id: 0x20, method: 'encryptAtRest', description: 'x' };
+            delete table[0x11];
+            expect(known()).toEqual([0x01, 0x02, 0x10, 0x11, 0x12]);
+        } finally {
+            delete table[0x20];
+            table[0x11] = saved;
+        }
     });
     it('reads the format option like the boolean options', () => {
         expect(formatOption(undefined)).toBe(1);

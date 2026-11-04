@@ -42,7 +42,7 @@ export const FRAME_SUITES: Record<FrameSuite, FrameSuiteInfo> = {
         id: FrameSuite.AT_REST_SEP_ECIES,
         method: 'encryptAtRest',
         description:
-            'ECIES under a Secure Enclave P-256 key, same output as v1. The header is not authenticated. iOS below 26.',
+            'ECIES under a Secure Enclave P-256 key, same output as v1. The header is not authenticated. iOS below 26, and iOS 26+ when the Secure Enclave cannot make an ML-KEM-768 key.',
     },
     [FrameSuite.AT_REST_SEP_MLKEM]: {
         id: FrameSuite.AT_REST_SEP_MLKEM,
@@ -66,7 +66,9 @@ export function parseFrameHeader(frame: Uint8Array): { version: number; suite: n
     return { version: frame[2], suite: frame[3] };
 }
 
-export const isKnownSuite = (suite: number) => suite in FRAME_SUITES;
+// own copy, FRAME_SUITES is exported and a caller can change it
+const KNOWN_SUITES = new Set<number>([0x01, 0x02, 0x10, 0x11, 0x12]);
+export const isKnownSuite = (suite: number) => KNOWN_SUITES.has(suite);
 export const isKemSuite = (suite: number) => suite >= 0x01 && suite <= 0x0f;
 export const isAtRestSuite = (suite: number) => suite >= 0x10 && suite <= 0x1f;
 
