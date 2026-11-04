@@ -139,13 +139,15 @@ build and the plugin version. The current state is in [Results so far](#results-
   Expected `E_STORE_FULL` at about 47 items (the 16 MiB cap). Then a loop of small values stops at
   512 items. Restart the app: `getItem`, `keys()` and `clear()` still work. Note after how many
   items it stopped, and `adb shell getprop dalvik.vm.heapgrowthlimit`.
-- [ ] **B8.** [e2e] Frame suite `0x10`. `getHardwareCapabilities()` reports `atRestSuite: 16`.
-  `encryptAtRest` with `format: 2` then `decryptAtRest` round-trips with `outdated: false`. A blob made
-  with `format: 1` reads with `outdated: true`. [manual] The v2 blob starts with `50 51 02 10` and is
-  32 bytes longer than the plaintext.
+- [ ] **B8.** [e2e] Frame suite `0x10`. `getHardwareCapabilities()` answers with an `atRestSuite` field
+  (the spec only checks the name). `encryptAtRest` with `format: 2` then `decryptAtRest` round-trips
+  with `outdated: false`. A blob made with `format: 1` reads with `outdated: true`. [manual] Read the
+  value in the log: `atRestSuite` is `16`. The v2 blob starts with `50 51 02 10` and is 32 bytes longer
+  than the plaintext.
 - [ ] **B9.** [e2e] `encryptTo` with `format: 2` to the own public key, then `decrypt`, round-trips
-  with `outdated: false` for ML-KEM-768 and 1024. [manual] The frame starts with `50 51 02 01` (768)
-  or `50 51 02 02` (1024).
+  with `outdated: false` for ML-KEM-768 (the spec runs 768 only). [manual] The same for 1024, with the
+  test app's `type` field on `PQC_MLKEM_1024`. The frame starts with `50 51 02 01` (768) or
+  `50 51 02 02` (1024).
 
 ### C. Concurrency and prompts
 
@@ -238,14 +240,17 @@ tests, and its body is the ECIES output of the plain frame, the same code that E
 - [ ] **E8.** [manual] N-7: `keys()` with the device locked and the app alive in the background
   (S4): does it list, return `[]`, or reject `E_DECRYPT`? A view's `clear()` uses `keys()`, so it
   must not resolve having deleted nothing: `[]` here with items in the store is a fail.
-- [ ] **E9.** [e2e] `getHardwareCapabilities()` on the iPhone 16 reports `atRestSuite: 18` (`0x12`).
-  Console shows no "at-rest ml-kem probe failed" line. If it reports 17, the Secure Enclave cannot do
-  the ML-KEM-768 round trip: note the model and the iOS build.
+- [ ] **E9.** [e2e] `getHardwareCapabilities()` answers with an `atRestSuite` field (the spec only
+  checks the name, so a phone that reports 17 passes it too). [manual] Read the value in the log on the
+  iPhone 16: it must be `18` (`0x12`). Console shows no "at-rest ml-kem probe failed" line. If it
+  reports 17, the Secure Enclave cannot do the ML-KEM-768 round trip: note the model and the iOS
+  build.
 - [ ] **E10.** [e2e] `encryptAtRest` with `format: 2` on a new alias, then `decryptAtRest`, round-trips
   with `outdated: false`. [manual] The frame starts with `50 51 02 12` and is 32 bytes longer than the
-  plaintext. Note in ms, from the log, the first `getHardwareCapabilities()` of a new process (the
-  check), `decryptAtRest` and `encryptAtRest` of `0x12`, and the same two calls with `format: 1`
-  (ECIES) to compare.
+  plaintext. Time the calls in the Safari web inspector console (S4), with `performance.now()` before
+  and after each `await`, because the test app log has no timings. Note in ms the first
+  `getHardwareCapabilities()` of a new process (the check), `decryptAtRest` and `encryptAtRest` of
+  `0x12`, and the same two calls with `format: 1` (ECIES) to compare.
 - [ ] **E11.** [manual] Older frames. A blob made without `format`, or with `format: 1`, starts with
   `04` and reads with `outdated: true`. So does a blob made by 8.2.0 before the update, and a `0x11`
   blob if you have one. Encrypt the plaintext again with `format: 2` and it reads with
@@ -261,8 +266,9 @@ tests, and its body is the ECIES output of the plain frame, the same code that E
 - [ ] **E14.** [manual] Changed `0x12` blobs, edited in the console before `decryptAtRest`. A changed
   byte of the body: `E_DECRYPT`. The suite byte changed to `11`: `E_DECRYPT` when the alias also has a
   P-256 key, `E_KEY_NOT_FOUND` when it does not. The version byte changed to `03`: `E_UNSUPPORTED`
-  when either key exists, `E_KEY_NOT_FOUND` when neither does. A `0x12` blob under an alias that never
-  wrote one: `E_KEY_NOT_FOUND`.
+  when the alias has a P-256 key, `E_KEY_NOT_FOUND` when it does not, even if the ML-KEM item exists
+  (the ML-KEM key is loaded only for a version 2 `0x12` frame, so an alias made only with `format: 2`
+  answers `E_KEY_NOT_FOUND`). A `0x12` blob under an alias that never wrote one: `E_KEY_NOT_FOUND`.
 - [ ] **E15.** [manual, debug build] Make a plain (or `0x11`) blob and a `0x12` blob under one alias,
   then delete only the `<alias>.atrest.mlkem` item. `decryptAtRest` of the `0x12` blob answers
   `E_KEY_NOT_FOUND` even though the P-256 key exists, and the other blob still reads.

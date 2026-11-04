@@ -80,7 +80,8 @@ export interface HardwareCapabilities {
      * `decryptAtRest` compares against for `outdated`. `0x10`: AES-256-GCM in the Keystore (Android)
      * or the web fallback. `0x11`: ECIES under a Secure Enclave P-256 key (iOS below 26, or iOS 26+
      * when the Secure Enclave cannot create an ML-KEM-768 key). `0x12`: AES-256-GCM with a key from
-     * a Secure Enclave ML-KEM-768 decapsulation (iOS 26+). The iOS value is probed once per process.
+     * a Secure Enclave ML-KEM-768 decapsulation (iOS 26+). The iOS value is probed once per process
+     * when the probe succeeds; a failed probe runs again on the next call.
      */
     atRestSuite: number;
 }

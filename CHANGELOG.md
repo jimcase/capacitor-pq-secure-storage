@@ -10,8 +10,8 @@ All notable changes to this project are documented here. The format is based on
 
 - `format?: 1 | 2` on `encryptTo` and `encryptAtRest`. `2` puts a 4-byte header (`50 51`, version
   `02`, suite) in front of the frame, so the algorithm is written in the blob and a later release can
-  change it without breaking stored data. Without `format` (or with `1`) the output is byte for byte
-  what 8.2.0 wrote. Any other value rejects `E_INVALID_ARGS`.
+  change it without breaking stored data. Without `format` (or with `1`) the output has the same layout
+  and size as in 8.2.0. Any other value rejects `E_INVALID_ARGS`.
 - Five frame suites: `0x01` and `0x02` for `encryptTo` (ML-KEM-768 and 1024), `0x10` AES-256-GCM,
   `0x11` Secure Enclave ECIES and `0x12` Secure Enclave ML-KEM for `encryptAtRest`. The header is the
   associated data of every suite that has an AEAD, which is all but `0x11`. `FrameSuite`,
@@ -23,7 +23,8 @@ All notable changes to this project are documented here. The format is based on
   `format: 2` and store it.
 - `atRestSuite` in `getHardwareCapabilities`: the suite `encryptAtRest({ format: 2 })` writes on this
   device. `0x10` on Android and the web. On iOS `0x12`, or `0x11` below iOS 26 and when the Secure
-  Enclave cannot make an ML-KEM-768 key. On iOS the plugin checks it once per process.
+  Enclave cannot make an ML-KEM-768 key. On iOS the plugin checks it once per process when the check
+  succeeds, and a failed check runs again on the next call.
 - Encryption at rest under a Secure Enclave ML-KEM-768 key on iOS 26+ (`format: 2`, suite `0x12`). The
   alias key comes from one encapsulation saved in the Keychain (about 4.7 KB per alias) and one
   decapsulation in the Secure Enclave per call. No biometric prompt.
