@@ -63,7 +63,9 @@ export interface HardwareCapabilities {
     hardwareBacked: boolean;
     /**
      * True when a biometric is enrolled and can gate keys and items (Android: `BIOMETRIC_STRONG`).
-     * iOS reports false below iOS 26. False on the web fallback.
+     * iOS reports false below iOS 26. False on the web fallback. On Android, and on iOS 26+ with a
+     * Secure Enclave, `false` means that creating a biometric key or item, or any call that has to
+     * show a biometric prompt, rejects `E_BIOMETRY_UNAVAILABLE`.
      */
     biometricGated: boolean;
     /** Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519). */
@@ -108,7 +110,9 @@ export interface PqSecureStoragePlugin {
      * prompt says so on Android and Touch ID, but Face ID does not show this text (no dialog on a
      * first-try success), so confirm a downgrade in your own UI before calling. `overwrite` and
      * `requireBiometric` must be booleans when given; anything else rejects `E_INVALID_ARGS`. On
-     * Android a new wrapped Ed25519 alias past 256 existing ones rejects `E_STORE_FULL`.
+     * Android a new wrapped Ed25519 alias past 256 existing ones rejects `E_STORE_FULL`. On Android
+     * and iOS, `requireBiometric: true` with no usable biometric rejects `E_BIOMETRY_UNAVAILABLE`
+     * before anything is created.
      */
     generateKeyPair(options: {
         keyAlias: string;
@@ -177,7 +181,8 @@ export interface PqSecureStoragePlugin {
      * Overwriting a biometric key prompts. When the new key drops the biometric gate the prompt says
      * so on Android and Touch ID, but Face ID does not show this text (no dialog on a first-try
      * success), so confirm a downgrade in your own UI before calling. On Android a new alias past
-     * 256 existing ones rejects `E_STORE_FULL`.
+     * 256 existing ones rejects `E_STORE_FULL`. On Android and iOS, `requireBiometric: true` with
+     * no usable biometric rejects `E_BIOMETRY_UNAVAILABLE` before anything is created.
      */
     generateKemKeyPair(options: {
         keyAlias: string;
@@ -246,7 +251,8 @@ export interface PqSecureStoragePlugin {
      * are a keyed hash of the name, so a reader of the raw store sees neither values nor names.
      * `key` is 1 to 512 UTF-16 units and `value` at most 256K units, else `E_INVALID_ARGS`. The
      * Android store holds at most 512 items and 16 MiB of stored text; a write past that rejects
-     * `E_STORE_FULL`.
+     * `E_STORE_FULL`. On Android and iOS, `requireBiometric: true` with no usable biometric rejects
+     * `E_BIOMETRY_UNAVAILABLE` before the store is touched.
      */
     setItem(options: {
         key: string;

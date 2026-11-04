@@ -165,6 +165,16 @@ build and the plugin version. The current state is in [Results so far](#results-
   (replacement, then creation), and it succeeds, no `E_BUSY`.
 - [ ] **C4.** [manual] With a prompt open, rotate the screen. Does `onAuthenticationError` arrive
   (the call rejects), or does every later prompt answer `E_BUSY` until the app restarts?
+- [ ] **C5.** [manual] No fingerprint enrolled, face unlock only (or no biometric at all). Face
+  unlock must be a weak one, as on Samsung phones: on a Pixel 8 or later it is a strong biometric,
+  so remove it too there. `getHardwareCapabilities()` answers `biometricGated: false`.
+  `generateKeyPair` with `requireBio` true and `setItem({ requireBiometric: true })` reject
+  `E_BIOMETRY_UNAVAILABLE` with no prompt, and a later call works at once (no `E_BUSY`). Silent keys
+  and items still work.
+- [ ] **C6.** [manual] Lockout: `sign` with a biometric key and fail five fingerprints in a row. The
+  prompt closes and `sign` rejects `E_BIOMETRY_UNAVAILABLE`. A `sign` during the lockout rejects
+  `E_BIOMETRY_UNAVAILABLE` too (note whether a prompt shows first). After the lockout ends, cancel
+  a prompt: `E_AUTH_FAILED`.
 
 ## iOS (iOS 26 iPhone)
 
@@ -198,11 +208,20 @@ build and the plugin version. The current state is in [Results so far](#results-
 - [ ] **D10.** [manual] N-2: `sign` with `description: ''` (and `'   '`) on a biometric alias shows
   the prompt with the default text and the app stays alive.
 - [ ] **D11.** [manual] N-3: a silent Ed25519 key, then `generateKeyPair({ type: 'ED25519',
-  overwrite: true, requireBiometric: true })` with no biometric enrolled. Does `SecItemAdd` fail?
-  After that failed replacement, and after a cancelled one, `sign` with the old key still works and
-  `getPublicKey` returns the old public key.
+  overwrite: true, requireBiometric: true })` with no biometric enrolled. It rejects
+  `E_BIOMETRY_UNAVAILABLE` before any Keychain call. After that failed replacement, and after a
+  cancelled one, `sign` with the old key still works and `getPublicKey` returns the old public key.
 - [ ] **D12.** [manual, debug build] `getPublicKey` / `getKemPublicKey` reject `E_TAMPERED` when the
   stored public entry is changed out of band.
+- [ ] **D13.** [manual] Face ID turned off for the test app (Settings > the app > Face ID), with a
+  biometric key and a biometric item made before: `getHardwareCapabilities()` answers
+  `biometricGated: false`. `generateKeyPair` with `requireBio` true and
+  `setItem({ requireBiometric: true })` reject `E_BIOMETRY_UNAVAILABLE`. `sign` with the biometric
+  key rejects `E_BIOMETRY_UNAVAILABLE` with no prompt. `getItem` of the biometric item: note the code
+  (`E_BIOMETRY_UNAVAILABLE` expected). Turn Face ID back on: everything works again.
+- [ ] **D14.** [manual] Face ID not set up (Settings > Face ID & Passcode > Reset Face ID): the same
+  `getHardwareCapabilities()`, `generateKeyPair` and `setItem` results as D13. Then E7.7 applies to
+  the items made before: `removeItem` and `clear()` delete them with no prompt.
 
 ### E. Store and at-rest
 
@@ -241,7 +260,7 @@ that E2 checks.
   7. With every biometric removed from the phone: `removeItem` of a dead item deletes it with no
      prompt, and `clear()` wipes the dead items with no prompt.
   8. With Face ID denied for the app (Settings, `biometryNotAvailable`): note what `removeItem`
-     does. Expected today: `E_AUTH_FAILED`, and the item stays.
+     does. Expected: `E_BIOMETRY_UNAVAILABLE`, and the item stays.
 - [ ] **E8.** [manual] N-7: `keys()` with the device locked and the app alive in the background
   (S4): does it list, return `[]`, or reject `E_DECRYPT`? A view's `clear()` uses `keys()`, so it
   must not resolve having deleted nothing: `[]` here with items in the store is a fail.
@@ -351,7 +370,8 @@ iOS has no `E_BUSY` latch, so these record what happens.
 | Signature does not verify | Wrong message bytes on the laptop side | Verify the exact bytes that went in as `data` (base64 decoded, UTF-8 for the test app) |
 | KERIA rejects a signature | Wrong CESR code or key encoding | Check the codes in `SIGNATURE_ALGORITHMS` (`src/algorithms.ts`) and that the KERI layer encodes the raw public key |
 | No prompt on Android | The key or item is silent, or the host activity is not a `FragmentActivity` (`E_NO_ACTIVITY`) | Check `requireBio`, and that the activity extends Capacitor's `BridgeActivity` |
-| No prompt on iOS | The key or item is silent, or Face ID is denied for the app (`E_AUTH_FAILED`) | Check `requireBio`, and Settings > the app > Face ID |
+| `E_BIOMETRY_UNAVAILABLE` on Android with face unlock set up | Face unlock on most phones is a weak (Class 2) biometric, and the plugin needs a strong one | Enroll a fingerprint |
+| No prompt on iOS | The key or item is silent, or Face ID is denied for the app (`E_BIOMETRY_UNAVAILABLE`) | Check `requireBio`, and Settings > the app > Face ID |
 | App crashes on the first Face ID prompt | `NSFaceIDUsageDescription` missing | Add it to `Info.plist` (S3) |
 | App crashes on an unknown alias | Plugin bug: it must reject `E_KEY_NOT_FOUND` | Report it with the log |
 | The e2e on a reused Android emulator runs an old build (no `atRestSuite`, no `format` field in the test app) | `test-app/scripts/e2e.sh` reuses the app already installed, and the debug APK has `versionCode` 1, so the new APK is not installed | `adb uninstall com.capacitorpqsecurestorage.testapp`, then run again |
@@ -396,6 +416,7 @@ fails. Earlier: D2, D4 and D5 passed on an iPhone 15 Pro / iOS 26 on 2026-07-14 
 | F2 | Pass: both calls resolve, the item is intact |
 | X1, X2, X3 | Partial: web and each phone pass both ways; direct iOS to Android not run; Android prompts are strong biometric only, iOS not looked at |
 | X4 | Pass on both phones, web to phone and phone to web, ML-KEM 768 and 1024 |
+| C5, C6, D13, D14 (`E_BIOMETRY_UNAVAILABLE`) | Not run yet |
 
 So the Secure Enclave paths, suite `0x12` and the Android TEE paths are confirmed on a phone.
 ML-DSA on Android is not: the one Android 17 phone tested lists it but cannot make the keys. Suite
