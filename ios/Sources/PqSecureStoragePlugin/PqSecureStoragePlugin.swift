@@ -270,7 +270,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 "supportedVariants": hw ? ["ECDSA_256R1", "ED25519", "PQC_MLDSA_65", "PQC_MLDSA_87"] : [],
                 "supportedKem": hw ? ["PQC_MLKEM_768", "PQC_MLKEM_1024"] : [],
                 "kemInSecureEnclave": hw,
-                "atRestSuite": hw ? Int(Self.atRestSuite()) : Int(Frames.atRestSepEcies)
+                "atRestSuite": Int(Self.atRestSuite())
             ])
         } else {
             call.resolve([
@@ -496,7 +496,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             do {
                 kem = try Self.atRestKemKey(alias: alias, create: false)
             } catch PqSecureStorageError.keyNotFound {
-                // absent, the check below decides with the P-256 key
+                // only this key opens 0x12, and an iOS v1 frame never starts with the mark
+                return call.reject("Key not found", "E_KEY_NOT_FOUND")
             } catch {
                 // a broken item or a SEP failure is not a missing key
                 os_log("decryptAtRest failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
@@ -1213,28 +1214,30 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     // MARK: - At-rest key (per-alias Secure Enclave ML-KEM-768, iOS 26+)
 
-    // What encryptAtRest writes with format 2. Probed once per process, an older SEP on iOS 26 may not
-    // do ML-KEM and then it's 0x11. The probe runs the same steps as a real alias (create, rebuild from
-    // dataRepresentation, decapsulate), since a key that is made but can't decapsulate would fail every
-    // write. A CryptoKit SEP key only persists through its dataRepresentation, so nothing to delete.
-    private static let atRestProbe: UInt8 = {
-        guard #available(iOS 26.0, *), SecureEnclave.isAvailable,
-              let access = SecAccessControlCreateWithFlags(
-                  nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .privateKeyUsage, nil) else {
-            return Frames.atRestSepEcies
-        }
-        do {
-            let k = try SecureEnclave.MLKEM768.PrivateKey(accessControl: access)
-            let enc = try k.publicKey.encapsulate()
-            let back = try SecureEnclave.MLKEM768.PrivateKey(dataRepresentation: k.dataRepresentation, authenticationContext: nil)
-            return try back.decapsulate(enc.encapsulated) == enc.sharedSecret ? Frames.atRestSepMlkem : Frames.atRestSepEcies
-        } catch {
-            os_log("at-rest ml-kem probe failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
-            return Frames.atRestSepEcies
-        }
-    }()
+    // What encryptAtRest writes with format 2: 0x12, or 0x11 when an older SEP on iOS 26 can't do ML-KEM.
+    // Same steps as a real alias (create, rebuild, decapsulate): a key that is made but can't decapsulate
+    // would fail every write. Only a success is kept, a probe run while locked can fail and a kept 0x11
+    // makes apps migrate 0x12 frames down. CryptoKit SEP keys don't persist alone, nothing to delete.
+    // Own lock, never keyCreateLock.
+    private static let atRestProbeLock = NSLock()
+    private static var atRestMlkemOk = false
 
-    private static func atRestSuite() -> UInt8 { atRestProbe }
+    private static func atRestSuite() -> UInt8 {
+        atRestProbeLock.lock(); defer { atRestProbeLock.unlock() }
+        if !atRestMlkemOk, #available(iOS 26.0, *), SecureEnclave.isAvailable,
+           let access = SecAccessControlCreateWithFlags(
+               nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .privateKeyUsage, nil) {
+            do {
+                let k = try SecureEnclave.MLKEM768.PrivateKey(accessControl: access)
+                let enc = try k.publicKey.encapsulate()
+                let back = try SecureEnclave.MLKEM768.PrivateKey(dataRepresentation: k.dataRepresentation, authenticationContext: nil)
+                atRestMlkemOk = try back.decapsulate(enc.encapsulated) == enc.sharedSecret
+            } catch {
+                os_log("at-rest ml-kem probe failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+            }
+        }
+        return atRestMlkemOk ? Frames.atRestSepMlkem : Frames.atRestSepEcies
+    }
 
     // One generic item per alias, kemCt (1088) || dataRepresentation, so creating it is one write. The
     // kemCt is one encapsulation to the key itself, made at creation. Its shared secret is the alias'
@@ -1270,8 +1273,17 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         ) else { throw PqSecureStorageError.accessControlFailed }
         let priv = try SecureEnclave.MLKEM768.PrivateKey(accessControl: access)
         let item = try priv.publicKey.encapsulate().encapsulated + priv.dataRepresentation
-        let st = upsertKeychain(account: account, data: item,
-                                attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly])
+        var add = baseQuery(account: account)
+        add[kSecValueData as String] = item
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let st = SecItemAdd(add as CFDictionary, nil)
+        // never update: another process may have made it first and handed out frames under it
+        if st == errSecDuplicateItem {
+            out = nil
+            let again = SecItemCopyMatching(query as CFDictionary, &out)
+            guard again == errSecSuccess, let stored = out as? Data else { throw PqSecureStorageError.keychain(again) }
+            return stored
+        }
         guard st == errSecSuccess else { throw PqSecureStorageError.keychain(st) }
         return item
     }

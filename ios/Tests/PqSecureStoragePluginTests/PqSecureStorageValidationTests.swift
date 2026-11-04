@@ -116,7 +116,7 @@ final class PqSecureStorageValidationTests: XCTestCase {
     func testCapabilitiesReportAnAtRestSuite() {
         let caps = resolved(options: [:]) { $0.getHardwareCapabilities($1) }
         let suite = caps?["atRestSuite"] as? Int
-        if #available(iOS 26.0, *), caps?["hardwareBacked"] as? Bool == true {
+        if #available(iOS 26.0, *) {
             XCTAssertTrue(suite == 0x11 || suite == 0x12)
         } else {
             XCTAssertEqual(suite, 0x11)
