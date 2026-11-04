@@ -157,8 +157,9 @@ build and the plugin version. The current state is in [Results so far](#results-
 - [ ] **C1.** [manual] Two biometric calls back to back (for example `sign` then `getItem` on a
   biometric item) do not stack two prompts: the second rejects `E_BUSY` while the first prompt is
   open.
-- [ ] **C2.** [manual] Two `setItem` on the same key at the same time: one resolves, the other
-  rejects `E_BUSY`, and the item is not corrupted.
+- [ ] **C2.** [manual] Two `setItem` on the same key at the same time: the item is not corrupted.
+  On the Samsung A57 both calls resolved and the second value won (the bridge runs them one after
+  the other); `E_BUSY` was not seen.
 - [ ] **C3.** [manual] Biometric KEM overwrite (`generateKemKeyPair` with `overwrite: true` on a
   biometric key and `requireBiometric: true`, from the console): two prompts in sequence
   (replacement, then creation), and it succeeds, no `E_BUSY`.
@@ -205,10 +206,11 @@ build and the plugin version. The current state is in [Results so far](#results-
 
 ### E. Store and at-rest
 
-Suite `0x12` (E9 to E20) has not run end to end on a device yet. The iOS simulator cannot run it: the
-unsigned build has no Keychain access, so every key operation fails there. Suite `0x11` has no device
-to run on, because there is no iPhone below iOS 26 at hand. Its header parsing is covered by unit
-tests, and its body is the ECIES output of the plain frame, the same code that E2 checks.
+Suite `0x12` ran end to end on an iPhone 16 / iOS 27 on 2026-11-04 (see Results so far). The iOS
+simulator cannot run it: the unsigned build has no Keychain access, so every key operation fails
+there. Suite `0x11` has no device to run on, because there is no iPhone below iOS 26 at hand. Its
+header parsing is covered by unit tests, and its body is the plain (v1) ECIES frame, the same code
+that E2 checks.
 
 - [ ] **E1.** [e2e] Silent item: `setItem`, `getItem`, `keys` and `clear` round-trip.
 - [ ] **E2.** [e2e] `encryptAtRest` then `decryptAtRest` under the same alias round-trips.
@@ -261,7 +263,7 @@ tests, and its body is the ECIES output of the plain frame, the same code that E
   live side by side.
 - [ ] **E12.** [manual, debug build] The Keychain has a generic password with account
   `<alias>.atrest.mlkem` (service `com.capacitorpqsecurestorage.keys`). Note its size: 1088 bytes of ciphertext plus the key
-  representation, about 4.7 KB on the simulator. A new alias written only with `format: 2` has no
+  representation, 2577 bytes on an iPhone 16 / iOS 27. A new alias written only with `format: 2` has no
   `pq.atrest.<alias>` P-256 key. No at-rest call (`encryptAtRest`, `decryptAtRest`, `format` 1 or 2)
   shows a Face ID / Touch ID prompt.
 - [ ] **E13.** [manual] Kill and relaunch the app, then read the `0x12` blobs of the earlier launch.
@@ -358,19 +360,43 @@ iOS has no `E_BUSY` latch, so these record what happens.
 
 ## Results so far
 
+Run on 2026-11-04 on both lines (7.x and 8.x code of this change) with a Samsung Galaxy A57 /
+Android 17 (KeyMint 400, TEE, no StrongBox, one fingerprint enrolled) and an iPhone 16 / iOS 27.0.1
+(Face ID). The e2e suite passes 10 of 10 on the iPhone and 9 of 10 on the Samsung, where only ML-DSA
+fails. Earlier: D2, D4 and D5 passed on an iPhone 15 Pro / iOS 26 on 2026-07-14 (7.0.0 code).
+
 | Check | Result |
 |---|---|
-| D2, D4, D5 (keygen in the Secure Enclave, a prompt on every sign, off-device verify) | Pass, iPhone 15 Pro / iOS 26, 2026-07-14, 7.0.0 code |
-| Everything else on iOS | Not run on a device yet |
-| Everything on Android | Not run on a phone yet. B1 to B3 pass on an emulator; A3 fails there (no Keystore ML-DSA) |
-| B8, B9 (Android `0x10` and v2 ML-KEM frames) | Not run yet on a phone. The e2e specs for them pass on an Android emulator |
-| B10 (Android biometric ML-KEM key, changed v2 frame) | Not run yet |
-| E9 to E12 (iOS `0x12`: `atRestSuite`, round trip and timing, older frames, Keychain item), E13 to E20 | Not run yet |
-| X4 (web and phone, `encryptTo` with `format: 2`) | Not run yet |
+| A1 | Pass: SDK 37 |
+| A2 | Fail: `supportsPqc` true and both ML-DSA types listed, but ML-DSA keys cannot be made (A3). `supportedVariants` and `supportedKem` arrive as strings, not arrays |
+| A3 | Fail: every ML-DSA `generateKeyPair` rejects `E_KEYGEN`; keystore2 logs `TRANSACTION_FAILED` from KeyMint. The phone has no hardware ML-DSA |
+| A4, A5 | Partial: ML-DSA not possible. ECDSA and at-rest AES keys are security level TEE. An ECDSA attestation chain verifies to the Google root, KeyMint 400, TrustedEnvironment |
+| A6, A7, A8, A9, A10, A12 | Pass (A6 on ECDSA, because ML-DSA cannot be made) |
+| A11 | Partial: silent Ed25519 passes, the stored private is wrapped; a biometric Ed25519 sign was not run |
+| A13, A14 | Not done (lock the phone for 30 s; KERI end to end) |
+| B1, B2, B3, B7, B8, B9, B10 | Pass. B8: `50 51 02 10`, 32 bytes more than the plaintext. B10: one prompt, then `E_CRYPTO` |
+| B4 | Partial: `setItem`, `getItem` and `clear` prompt once; `removeItem` not run |
+| B5, B6 | Not done (locked phone; enrollment change) |
+| C1, C3 | Pass |
+| C2 | Differs from the old text: both calls resolve, the item is intact, no `E_BUSY` |
+| C4 | Partial: no stuck `E_BUSY` after a rotation |
+| D1, D2, D5, D6, D7, D9, D10 | Pass. D2: ML-DSA-65 and 87 sizes as in the README, signatures verify off-device |
+| D4, D8 | Partial: every sign prompts and verifies; the cancel step and the Keychain dump were not run |
+| D3, D11, D12 | Not done (relaunch then sign; enrollment change) |
+| E1, E2, E3, E4 | Pass. E3: the P-256 at-rest key is a Secure Enclave key and cannot be exported |
+| E5 | Partial: names hashed and read back; raw dump not run |
+| E6 | Fail: `keys()` does not list the biometric item. A plain `clear()` still removes it |
+| E7, E8, E17, E20 | Not done (enrollment change; locked phone; no such device for E20) |
+| E9 | Pass: `atRestSuite` 18 |
+| E10 | Pass: `50 51 02 12`, 32 bytes more than the plaintext, `outdated: false`; about 3 ms per encrypt or decrypt |
+| E11, E12, E13, E14, E15, E18 | Pass. E12: the item is 2577 bytes, no prompt on any at-rest call. E14 and E15 codes as written |
+| E16 | Partial: parallel calls agree and leave one item; not in a fresh process |
+| E19 | Partial: `E_DECRYPT` on the biometric key; the prompt count cannot be read on iOS |
+| F1 | A second biometric call while Face ID is pending: the first gets `E_AUTH_FAILED`, the second succeeds |
+| F2 | Pass: both calls resolve, the item is intact |
+| X1, X2, X3 | Partial: web and each phone pass both ways; direct iOS to Android not run; Android prompts are strong biometric only, iOS not looked at |
+| X4 | Pass on both phones, web to phone and phone to web, ML-KEM 768 and 1024 |
 
-So the iOS Secure Enclave path (ML-DSA keygen, a biometric on every sign, off-device verification)
-is confirmed on one device. Android hardware is not: until A4 to A7 pass on a phone, the Android
-hardware claims rest on emulator runs only.
-
-Until E9 to E12 pass on an iPhone, suite `0x12` is covered only by unit tests of the parts that need no
-Keychain or Secure Enclave. Suite `0x11` has no device to run on.
+So the Secure Enclave paths, suite `0x12` and the Android TEE paths are confirmed on a phone.
+ML-DSA on Android is not: the one Android 17 phone tested lists it but cannot make the keys. Suite
+`0x11` has no device to run on.

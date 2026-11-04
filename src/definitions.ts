@@ -96,7 +96,9 @@ export interface PqSecureStoragePlugin {
      * software key whose private is encrypted by a hardware key and opened only to sign. Rejects if
      * the alias exists unless `overwrite` is true. Distinct aliases give independent keypairs (use
      * that for KERI rotation, one alias per key). On Android an ML-DSA type on a device without
-     * Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first.
+     * Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first. On some Android 17
+     * phones `supportedVariants` lists ML-DSA and the Keystore still rejects the key, so handle
+     * `E_KEYGEN` too.
      *
      * `requireBiometric` (default `true`) is baked into the key: `true` makes every `sign` prompt
      * for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
@@ -276,8 +278,9 @@ export interface PqSecureStoragePlugin {
 
     /**
      * List the names of stored secrets. No prompt. Rejects `E_DECRYPT` when the store cannot be
-     * listed, so a prefixed `clear()` fails instead of deleting nothing. On iOS it is not yet
-     * checked on a device that biometric items are listed (see DEVICE-VERIFICATION.md).
+     * listed, so a prefixed `clear()` fails instead of deleting nothing. On iOS it does not list
+     * biometric items (checked on a device), so a prefixed `clear()` leaves them; a plain `clear()`
+     * removes them.
      */
     keys(): Promise<{ keys: string[] }>;
 
