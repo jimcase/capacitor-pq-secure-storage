@@ -28,6 +28,12 @@ All notable changes to this project are documented here. The format is based on
 - Encryption at rest under a Secure Enclave ML-KEM-768 key on iOS 26+ (`format: 2`, suite `0x12`). The
   alias key comes from one encapsulation saved in the Keychain (about 2.5 KB per alias) and one
   decapsulation in the Secure Enclave per call. No biometric prompt.
+- Error code `E_BIOMETRY_UNAVAILABLE`: the call needs a biometric and the device cannot give one now.
+  That is no biometric hardware, none enrolled (Android counts only a strong, Class 3 biometric, so a
+  weak face unlock is not enough), biometrics turned off or not allowed for the app (Face ID denied
+  in Settings), no passcode, the sensor temporarily unavailable, or a lockout after too many failed
+  tries. A host can now tell it from a cancel or a failed match, which stay `E_AUTH_FAILED`. The web
+  fallback never raises it.
 
 ### Changed
 
@@ -35,6 +41,25 @@ All notable changes to this project are documented here. The format is based on
   more, `atRestSuite`. Existing fields and frames are unchanged, but typed mocks or implementations of
   `PqSecureStoragePlugin` or `HardwareCapabilities` stop compiling until they add `outdated` to the
   decrypt results and `atRestSuite` to the capabilities.
+- Error codes, Android: `generateKeyPair` (hardware and Ed25519 keys) and `generateKemKeyPair` with
+  `requireBiometric: true` reject `E_BIOMETRY_UNAVAILABLE` before they touch the Keystore when no
+  strong biometric can be used (was `E_KEYGEN`), and so does `setItem({ requireBiometric: true })`
+  (was `E_ENCRYPT`). Every biometric prompt runs the same check before it shows, and a prompt that
+  ends with no sensor, nothing enrolled, the sensor unavailable, a lockout or a pending security
+  update rejects `E_BIOMETRY_UNAVAILABLE` (was `E_AUTH_FAILED`). A cancel, the Cancel button, a
+  timeout and a prompt that fails to start stay `E_AUTH_FAILED`.
+- Error codes, iOS: `generateKeyPair` (Ed25519 included) and `generateKemKeyPair` with
+  `requireBiometric: true`, and `setItem({ requireBiometric: true })`, reject `E_BIOMETRY_UNAVAILABLE`
+  before any Keychain or Secure Enclave call when no biometric can be used (they went on with the
+  creation). For `setItem` the check comes before the probe of the existing item, so a biometric item
+  killed by an enrollment change answers it too when no biometric is left (was `E_KEY_INVALIDATED`
+  or `E_AUTH_FAILED`). The prompt before `sign`, `decrypt`, a key overwrite, replacing a biometric
+  item, `removeItem` and `clear()` rejects `E_BIOMETRY_UNAVAILABLE` when no biometric can be used or
+  the prompt ends in a lockout (was `E_AUTH_FAILED`). `getItem` and Ed25519 `sign`, where the
+  Keychain shows the prompt, answer `E_BIOMETRY_UNAVAILABLE` for a failed or cancelled read when no
+  biometric can be used at that moment (was `E_AUTH_FAILED`). `removeItem` and `clear()` still
+  delete dead items with no prompt when no biometric is enrolled.
+- If your code reads `E_AUTH_FAILED` as "no biometric", handle `E_BIOMETRY_UNAVAILABLE` too.
 - No rollback for `format: 2` data: 7.2.0 and earlier cannot read frames made with it. Frames without
   a header keep working in both directions.
 
