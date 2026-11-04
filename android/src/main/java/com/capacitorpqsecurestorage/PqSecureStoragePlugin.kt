@@ -866,7 +866,7 @@ class PqSecureStoragePlugin : Plugin() {
                 val hostActivity = activity as? FragmentActivity
                     ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
                 authenticateCipher(hostActivity, unwrapCipher, "Authenticate to decrypt with your PQ key", call) { boundCipher ->
-                    resolveOpen(call, openKemFrame(boundCipher.doFinal(wrapped), frame, type, ctLen))
+                    resolveOpen(call, openKemFrame(boundCipher.doFinal(wrapped), frame, type, ctLen), "Operation failed", "E_CRYPTO")
                 }
             } else {
                 // no-auth wrap key: unwrap + decapsulate inline, no prompt
@@ -1041,7 +1041,7 @@ class PqSecureStoragePlugin : Plugin() {
         return cipher.doFinal(body.copyOfRange(12, body.size))
     }
 
-    private fun resolveOpen(call: PluginCall, r: Frames.Open<ByteArray>) {
+    private fun resolveOpen(call: PluginCall, r: Frames.Open<ByteArray>, failMsg: String = "Decrypt failed", failCode: String = "E_DECRYPT") {
         when (r) {
             is Frames.Open.Ok -> {
                 val ret = JSObject()
@@ -1049,9 +1049,11 @@ class PqSecureStoragePlugin : Plugin() {
                 ret.put("outdated", r.readAs == 1)
                 call.resolve(ret)
             }
-            is Frames.Open.Failed ->
+            is Frames.Open.Failed -> {
+                logd("frame open failed, unsupported=${r.unsupported}")
                 if (r.unsupported) call.reject("Unsupported frame", "E_UNSUPPORTED")
-                else call.reject("Decrypt failed", "E_DECRYPT")
+                else call.reject(failMsg, failCode)
+            }
         }
     }
 
