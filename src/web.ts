@@ -9,6 +9,7 @@ import { gcm } from '@noble/ciphers/aes.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 
 import type { PqSecureStoragePlugin, SignatureType, KemType, HardwareCapabilities } from './definitions.js';
+import { FrameSuite } from './frames.js';
 
 // Software fallback for platforms without hardware PQC (the web, mainly). Uses @noble in pure
 // JS and persists keys/values in a Storage (localStorage by default). NOT hardware-backed and
@@ -192,6 +193,7 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
             supportedVariants: ['PQC_MLDSA_65', 'PQC_MLDSA_87', 'ECDSA_256R1', 'ED25519'],
             supportedKem: ['PQC_MLKEM_768', 'PQC_MLKEM_1024'],
             kemInSecureEnclave: false,
+            atRestSuite: FrameSuite.AT_REST_AES_GCM,
         };
     }
 
@@ -243,11 +245,17 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         return { ciphertext: toB64(this.guard('E_ENCRYPT', 'Encrypt failed', () => this.aesSeal(key, input))) };
     }
 
-    async decryptAtRest(options: { keyAlias: string; data: string }): Promise<{ plaintext: string }> {
+    async decryptAtRest(options: {
+        keyAlias: string;
+        data: string;
+    }): Promise<{ plaintext: string; outdated: boolean }> {
         const key = this.get(`pqss.aes.${this.safeAlias(options.keyAlias)}`);
         if (!key) this.fail('E_KEY_NOT_FOUND', 'Key not found');
         const input = this.decodeCapped(options.data);
-        return { plaintext: toB64(this.guard('E_DECRYPT', 'Decrypt failed', () => this.aesOpen(key, input))) };
+        return {
+            plaintext: toB64(this.guard('E_DECRYPT', 'Decrypt failed', () => this.aesOpen(key, input))),
+            outdated: true,
+        };
     }
 
     async generateKemKeyPair(options: {
@@ -294,7 +302,11 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         };
     }
 
-    async decrypt(options: { keyAlias: string; type: KemType; data: string }): Promise<{ plaintext: string }> {
+    async decrypt(options: {
+        keyAlias: string;
+        type: KemType;
+        data: string;
+    }): Promise<{ plaintext: string; outdated: boolean }> {
         const kp = this.getKeypair('pqss.kem', this.safeAlias(options.keyAlias));
         if (!kp) this.fail('E_KEY_NOT_FOUND', 'Key not found');
         if (kp.type !== options.type) this.fail('E_TYPE_MISMATCH', 'Key type mismatch');
@@ -308,7 +320,7 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
             const nonce = buf.subarray(ctLen, ctLen + 12);
             return chacha20poly1305(sharedSecret, nonce).decrypt(buf.subarray(ctLen + 12));
         });
-        return { plaintext: toB64(plain) };
+        return { plaintext: toB64(plain), outdated: true };
     }
 
     // requireBiometric/accessibility are accepted for API parity but ignored: the web fallback has
