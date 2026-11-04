@@ -283,8 +283,8 @@ recipient must know.
 By default `encryptTo` and `encryptAtRest` return a plain frame (v1): nothing in it says which
 algorithm made it. With `format: 2` they return a v2 frame, which starts with a 4-byte header. A later
 release can then change an algorithm and still read what is stored, because every frame says what it
-is. A missing or null `format` is 1, and the output is then byte for byte what earlier versions
-wrote. Any value other than 1 or 2 rejects `E_INVALID_ARGS`.
+is. A missing or null `format` is 1, and the output then has the same layout and size as in earlier
+versions. Any value other than 1 or 2 rejects `E_INVALID_ARGS`.
 
 The header:
 
@@ -308,10 +308,10 @@ The suites:
 The table is exported as `FRAME_SUITES` (with `FrameSuite` and `parseFrameHeader`) for anyone who
 wants to look at a frame. In `encryptTo` the suite comes from `type`. In `encryptAtRest` the platform
 chooses it and you cannot ask for another: `atRestSuite` says which one this device writes. On iOS
-26+ the plugin checks that once per process: it makes a throwaway Secure Enclave ML-KEM-768 key and
-runs one encapsulation and one decapsulation with it, and nothing is stored. Only a success is kept.
-A check that fails (for example while the device is locked) is repeated on the next call, so
-`atRestSuite` and what `format: 2` writes always agree.
+26+ the plugin checks that: it makes a throwaway Secure Enclave ML-KEM-768 key and runs one
+encapsulation and one decapsulation with it, and nothing is stored. A success is kept for the rest of
+the process. A check that fails (for example while the device is locked) runs again on the next call,
+so `atRestSuite` and what `format: 2` writes always agree.
 
 Each platform opens only its own at-rest suites: Android and the web `0x10`, iOS `0x11` and, from iOS
 26, `0x12`. Any other suite rejects `E_DECRYPT`.
@@ -354,13 +354,13 @@ changes nothing.
 ```ts
 const { ciphertext } = await PqSecureStorage.encryptTo({
   recipientPublicKey: publicKey,
-  type: KemType.MLKEM_768,
+  type: KemType.MLKEM_1024,
   data: base64,
   format: 2,
 });
 const { plaintext, outdated } = await PqSecureStorage.decrypt({
   keyAlias: 'inbox',
-  type: KemType.MLKEM_768,
+  type: KemType.MLKEM_1024,
   data: ciphertext,
 }); // outdated: false
 ```
@@ -508,8 +508,8 @@ What it does not protect against:
 - **Software keys in memory.** ML-KEM decapsulation on Android and Ed25519 signing on both platforms
   run in software: the private key is in app memory for the length of the call. The same goes for the
   `0x12` at-rest key on iOS 26+: the Secure Enclave hands back the AES-256 key of the alias on each
-  call, and the plugin keeps it only until the call ends. Android and the web already work this way
-  with their at-rest key.
+  call, and the plugin keeps it only until the call ends. The web keeps its at-rest key in JS memory
+  too. On Android the at-rest key stays in the Keystore, and the AES-GCM runs there.
 - **A change of the biometric enrollment.** Biometric keys and items are bound to the current set of
   fingerprints or faces. When it changes (for example a new fingerprint), they can never be used
   again. Keys cannot be exported or backed up, so keep a recovery path, for example a seed phrase
@@ -903,15 +903,15 @@ no biometric, so silent.
 
 #### HardwareCapabilities
 
-| Prop                     | Type                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ------------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`supportsPqc`**        | <code>boolean</code>         | Whether ML-DSA signing is available. iOS: iOS 26+ with a Secure Enclave (ML-KEM comes with it). Android: the Keystore offers ML-DSA (probed at runtime); ML-KEM works even when this is false, see `supportedKem`. True on the web fallback, which is software only.                                                                                                                                                                                                                   |
-| **`hardwareBacked`**     | <code>boolean</code>         | Android: a probe AES key in the Keystore reports TEE or StrongBox, not software. iOS: a Secure Enclave is present (reported on iOS 26+ only, false below). False on the web fallback. Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android this is about the AES and wrap keys only. ML-KEM is always software there (the private is wrapped by a hardware key), and where an ML-DSA key lives needs a per-key check (see DEVICE-VERIFICATION.md).                     |
-| **`biometricGated`**     | <code>boolean</code>         | True when a biometric is enrolled and can gate keys and items (Android: `BIOMETRIC_STRONG`). iOS reports false below iOS 26. False on the web fallback.                                                                                                                                                                                                                                                                                                                                |
-| **`supportedVariants`**  | <code>SignatureType[]</code> | Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519).                                                                                                                                                                                                                                                                                                                                                                                                               |
-| **`supportedKem`**       | <code>KemType[]</code>       | ML-KEM variants available on this device.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| **`kemInSecureEnclave`** | <code>boolean</code>         | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key.                                                                                                                                                                                                                                                                                                                         |
-| **`atRestSuite`**        | <code>number</code>          | The suite id `encryptAtRest` writes on this device when called with `format: 2`, and the one `decryptAtRest` compares against for `outdated`. `0x10`: AES-256-GCM in the Keystore (Android) or the web fallback. `0x11`: ECIES under a Secure Enclave P-256 key (iOS below 26, or iOS 26+ when the Secure Enclave cannot create an ML-KEM-768 key). `0x12`: AES-256-GCM with a key from a Secure Enclave ML-KEM-768 decapsulation (iOS 26+). The iOS value is probed once per process. |
+| Prop                     | Type                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------ | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`supportsPqc`**        | <code>boolean</code>         | Whether ML-DSA signing is available. iOS: iOS 26+ with a Secure Enclave (ML-KEM comes with it). Android: the Keystore offers ML-DSA (probed at runtime); ML-KEM works even when this is false, see `supportedKem`. True on the web fallback, which is software only.                                                                                                                                                                                                                                                                                       |
+| **`hardwareBacked`**     | <code>boolean</code>         | Android: a probe AES key in the Keystore reports TEE or StrongBox, not software. iOS: a Secure Enclave is present (reported on iOS 26+ only, false below). False on the web fallback. Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android this is about the AES and wrap keys only. ML-KEM is always software there (the private is wrapped by a hardware key), and where an ML-DSA key lives needs a per-key check (see DEVICE-VERIFICATION.md).                                                                                         |
+| **`biometricGated`**     | <code>boolean</code>         | True when a biometric is enrolled and can gate keys and items (Android: `BIOMETRIC_STRONG`). iOS reports false below iOS 26. False on the web fallback.                                                                                                                                                                                                                                                                                                                                                                                                    |
+| **`supportedVariants`**  | <code>SignatureType[]</code> | Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| **`supportedKem`**       | <code>KemType[]</code>       | ML-KEM variants available on this device.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **`kemInSecureEnclave`** | <code>boolean</code>         | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key.                                                                                                                                                                                                                                                                                                                                                                                             |
+| **`atRestSuite`**        | <code>number</code>          | The suite id `encryptAtRest` writes on this device when called with `format: 2`, and the one `decryptAtRest` compares against for `outdated`. `0x10`: AES-256-GCM in the Keystore (Android) or the web fallback. `0x11`: ECIES under a Secure Enclave P-256 key (iOS below 26, or iOS 26+ when the Secure Enclave cannot create an ML-KEM-768 key). `0x12`: AES-256-GCM with a key from a Secure Enclave ML-KEM-768 decapsulation (iOS 26+). The iOS value is probed once per process when the probe succeeds; a failed probe runs again on the next call. |
 
 
 ### Type Aliases
@@ -999,8 +999,8 @@ From 7.1.0:
 
 From 7.2.0:
 
-- Everything is additive. Without `format` the four crypto calls give the same bytes as before, and
-  every frame that opened before still opens.
+- Everything is additive. Without `format` the four crypto calls give the same layout and size as
+  before, and every frame that opened before still opens.
 - `decrypt` and `decryptAtRest` return one more field, `outdated`. `getHardwareCapabilities` returns
   one more field, `atRestSuite`.
 - To move stored data to the new frames, read it, check `outdated`, and encrypt it again with
@@ -1008,10 +1008,11 @@ From 7.2.0:
 - Frames made with `format: 2` do not open on 7.2.0 or earlier (the header looks like ciphertext, so
   the read fails). Turn `format: 2` on for `encryptTo` only when every reader runs
   7.3.0 / 8.3.0 or later, and for at rest only in a build you will not roll back.
-- On iOS 26+ the plugin checks once per process that the Secure Enclave can make an ML-KEM-768 key,
-  the first time `getHardwareCapabilities`, `encryptAtRest` with `format: 2` or an `outdated` check
-  of a v2 frame needs the answer. It makes a throwaway key and does one encapsulation and one
-  decapsulation, so that first call is a little slower.
+- On iOS 26+ the plugin checks that the Secure Enclave can make an ML-KEM-768 key, the first time
+  `getHardwareCapabilities`, `encryptAtRest` with `format: 2` or an `outdated` check of a v2 frame
+  needs the answer. It makes a throwaway key and does one encapsulation and one decapsulation, so that
+  first call is a little slower. A success is kept for the rest of the process, a failed check runs
+  again on the next call.
 
 ## Error codes
 
