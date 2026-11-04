@@ -62,10 +62,11 @@ What works below the ML-DSA / ML-KEM floor:
   empty lists, with `atRestSuite` 17 (`0x11`).
 - **Android without Keystore ML-DSA**: everything but ML-DSA. `supportsPqc` is false,
   `supportedVariants` lists `ECDSA_256R1` and `ED25519`, and an ML-DSA `generateKeyPair` rejects
-  `E_KEYGEN`. On Android `supportsPqc` and the ML-DSA entries of `supportedVariants` come from
-  making and deleting a throwaway ML-DSA-65 key, the first time `getHardwareCapabilities` is called
-  in a process. The key has no biometric and no unlock requirement, and the answer (yes or no) is
-  kept until the process ends. A biometric ML-DSA key is not tried separately.
+  `E_KEYGEN`. `supportsPqc` and the ML-DSA entries of `supportedVariants` come from making and
+  deleting a throwaway ML-DSA-65 key, the first time `getHardwareCapabilities` is called after the
+  plugin loads. The key has no biometric and no unlock requirement, and the plugin keeps the answer
+  (yes or no) in memory until it is reloaded. A biometric ML-DSA key is not tried separately, so it
+  can still reject `E_KEYGEN`.
 - **Simulator and emulator**: on the iOS simulator the unsigned test build has no Keychain access,
   so signing, ML-KEM keys, the store and at-rest fail there. Android emulators run the store,
   at-rest and ML-KEM, but have no Keystore ML-DSA.
@@ -177,7 +178,7 @@ Exclude the plugin's prefs from backup (see the backup section below) and set
 const caps = await PqSecureStorage.getHardwareCapabilities();
 // { supportsPqc, hardwareBacked, biometricGated, supportedVariants, supportedKem, kemInSecureEnclave, atRestSuite }
 // check supportedVariants / supportedKem before you pick a type (real arrays on every platform).
-// on Android the first call in a process makes and deletes a throwaway ML-DSA key, so it is slower.
+// on Android the first call after the plugin loads makes and deletes a throwaway ML-DSA key, so it is slower.
 // gate seed-tier trust on hardwareBacked (false on web), not on supportsPqc (true on web too)
 ```
 
@@ -587,7 +588,8 @@ P-256 keys are made in the Secure Enclave (iOS) or the Keystore (Android). Ed255
 software key whose private is encrypted by a hardware key and opened only to sign. Rejects if
 the alias exists unless `overwrite` is true. Distinct aliases give independent keypairs (use
 that for KERI rotation, one alias per key). On Android an ML-DSA type on a device without
-Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first.
+Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first. That list is tested with a
+key without biometric, so a biometric key (the default) can still reject `E_KEYGEN`.
 
 `requireBiometric` (default `true`) is baked into the key: `true` makes every `sign` prompt
 for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
@@ -930,7 +932,7 @@ no biometric, so silent.
 
 | Prop                     | Type                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ------------------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **`supportsPqc`**        | <code>boolean</code>         | Whether ML-DSA signing is available. iOS: iOS 26+ with a Secure Enclave (ML-KEM comes with it). Android: the Keystore can make an ML-DSA-65 key. The first call in a process makes a throwaway key (no biometric) and deletes it, and the answer is kept until the process ends; ML-KEM works even when this is false, see `supportedKem`. True on the web fallback, which is software only.                                                                                                                                                                                                                                                                                                                                                           |
+| **`supportsPqc`**        | <code>boolean</code>         | Whether ML-DSA signing is available. iOS: iOS 26+ with a Secure Enclave (ML-KEM comes with it). Android: the Keystore can make an ML-DSA-65 key. The first call after the plugin loads makes a throwaway key (no biometric) and deletes it, and the plugin keeps the answer in memory until it is reloaded. ML-KEM works even when this is false, see `supportedKem`. True on the web fallback, which is software only.                                                                                                                                                                                                                                                                                                                                |
 | **`hardwareBacked`**     | <code>boolean</code>         | Android: a probe AES key in the Keystore reports TEE or StrongBox, not software. iOS: a Secure Enclave is present (reported on iOS 26+ only, false below). False on the web fallback. Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android this is about the AES and wrap keys only. ML-KEM is always software there (the private is wrapped by a hardware key), and where an ML-DSA key lives needs a per-key check (see DEVICE-VERIFICATION.md).                                                                                                                                                                                                                                                                                     |
 | **`biometricGated`**     | <code>boolean</code>         | True when a biometric is enrolled and can gate keys and items (Android: `BIOMETRIC_STRONG`). iOS reports false below iOS 26. False on the web fallback. On Android, and on iOS 26+ with a Secure Enclave, `false` means that creating a biometric key or item, or any call that has to show a biometric prompt, rejects `E_BIOMETRY_UNAVAILABLE`. A key or item killed by an enrollment change keeps its own code (see `E_KEY_INVALIDATED`). One exception on iOS until it is checked on a device (D13 in DEVICE-VERIFICATION.md): with Face ID off for the app, `getItem` of a biometric item and `sign` with a biometric Ed25519 key may still answer `E_DECRYPT` / `E_SIGN`, since the Keychain runs those prompts and its status decides the code. |
 | **`supportedVariants`**  | <code>SignatureType[]</code> | Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519). On Android the ML-DSA types come from the same throwaway key as `supportsPqc`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -1052,11 +1054,11 @@ From 8.2.0:
   saved by an earlier version is listed at once. A biometric item is listed after one `getItem` (it
   prompts, as before) or one `setItem` on it, because iOS does not show it without a prompt and the
   plugin has no name for it before that. A plain `clear()` removes every item either way, as before.
-- On Android `supportsPqc` and the ML-DSA entries of `supportedVariants` are now true only when the
+- On Android `supportsPqc` is now true, and `supportedVariants` lists the ML-DSA types, only when the
   Keystore can make an ML-DSA key. The plugin makes and deletes a throwaway ML-DSA-65 key the first
-  time `getHardwareCapabilities` is called in a process, so that first call is a little slower, and
-  keeps the answer until the process ends. `generateKeyPair` is the same and still rejects `E_KEYGEN`
-  when the Keystore cannot make the key.
+  time `getHardwareCapabilities` is called after it loads, so that first call is a little slower, and
+  keeps the answer in memory until it is reloaded. `generateKeyPair` is the same and still rejects
+  `E_KEYGEN` when the Keystore cannot make the key.
 - On Android `supportedVariants` and `supportedKem` are now arrays. They reached JavaScript as a
   string such as `"[ECDSA_256R1, ED25519]"` before, so code that parsed that string must read the
   array.
@@ -1073,10 +1075,10 @@ Every rejection carries a `code`:
 | `E_AUTH_FAILED` | The biometric prompt was cancelled (by the user, the system or the app, or with the Cancel button), ended on a failed match or a timeout, or failed for any other reason not listed under `E_BIOMETRY_UNAVAILABLE` |
 | `E_BIOMETRY_UNAVAILABLE` | The call needs a biometric and the device cannot give one now: no biometric hardware, none enrolled (Android needs a strong, Class 3 biometric, so a weak face unlock does not count), biometrics turned off or not allowed for the app (iOS: Face ID denied in Settings), no passcode set, the sensor is temporarily unavailable, or a lockout after too many failed tries (temporary). Android and iOS check it before they create a biometric key or item, and report it when a prompt cannot run for one of these reasons. A key or item killed by an enrollment change keeps its own code (see `E_KEY_INVALIDATED`). On iOS, `getItem` of a biometric item and `sign` with a biometric Ed25519 key may still answer `E_DECRYPT` / `E_SIGN` with Face ID off for the app, until device check D13 confirms the Keychain status |
 | `E_KEY_INVALIDATED` | The biometric enrollment changed since the key or item was made, so it can't be used any more. Android reports it when such a key or item is used. On iOS only `getItem` and `setItem` report it; a signing or KEM key killed this way fails with another code, such as `E_SIGN` or `E_DECRYPT` |
-| `E_ENCRYPT` | Encryption failed, or `setItem` could not write the item (on iOS also its index row) |
+| `E_ENCRYPT` | Encryption failed, or `setItem` could not write the item (on iOS, when it creates the item, also its index row) |
 | `E_DECRYPT` | Decryption failed (wrong key, tampered data, GCM-tag mismatch, or a frame suite this device cannot open). Also `keys()` when the store cannot be listed |
 | `E_CRYPTO` | Android: the cipher operation after a biometric prompt failed |
-| `E_KEYGEN` | Key generation failed. Android also answers it for an ML-DSA type when the Keystore has no ML-DSA: check `supportedVariants` first |
+| `E_KEYGEN` | Key generation failed. Android also answers it for an ML-DSA type when the Keystore has no ML-DSA: check `supportedVariants` first (a biometric key can still reject it) |
 | `E_SIGN` | Signing failed |
 | `E_PUBKEY` | Android: reading a public key failed |
 | `E_KEY_NOT_FOUND` | No key exists for that alias. Android `getItem` also answers it when the item's Keystore key is gone. On iOS `decryptAtRest` it can be temporary: a Keychain item that cannot be read right now (for example the device is locked) counts as absent, and a `0x12` frame whose ML-KEM item is absent answers it even when the P-256 key exists. Try again after unlocking before you treat the key as lost |

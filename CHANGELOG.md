@@ -81,9 +81,9 @@ All notable changes to this project are documented here. The format is based on
 - Android reported ML-DSA on a phone whose Keystore cannot make the keys (`supportsPqc` true, both
   ML-DSA types in `supportedVariants`, then `generateKeyPair` rejected `E_KEYGEN`). `supportsPqc` and
   the ML-DSA entries of `supportedVariants` now come from making and deleting a throwaway ML-DSA-65
-  key (no biometric, no unlock requirement) the first time `getHardwareCapabilities` is called in a
-  process, and the answer is kept for the process. That first call does one key generation in the
-  Keystore. `generateKeyPair` is the same.
+  key (no biometric, no unlock requirement) the first time `getHardwareCapabilities` is called after
+  the plugin loads, and the plugin keeps the answer in memory until it is reloaded. That first call
+  does one more key generation in the Keystore. `generateKeyPair` is the same.
 - Android `supportedVariants` and `supportedKem` reached JavaScript as a string such as
   `"[ECDSA_256R1, ED25519]"`. They are arrays now, as on iOS and the web.
 

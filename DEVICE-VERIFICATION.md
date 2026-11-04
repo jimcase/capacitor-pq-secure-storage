@@ -60,16 +60,18 @@ build and the plugin version. The current state is in [Results so far](#results-
   `PQC_MLDSA_65` and `PQC_MLDSA_87`, both `supportedKem`, and `kemInSecureEnclave: false`. The e2e
   checks that the call answers and that `supportedKem` is an array. If `supportsPqc` is false, the
   Keystore cannot make an ML-DSA key: note it and skip the ML-DSA checks. The plugin finds out by
-  making and deleting a throwaway ML-DSA-65 key the first time the call runs in a process. On the
-  Samsung A57 (the Keystore rejects every ML-DSA key, see A3) check:
+  making and deleting a throwaway ML-DSA-65 key the first time the call runs after the plugin
+  loads. On the Samsung A57 (the Keystore rejects every ML-DSA key, see A3) check:
   1. `supportsPqc` is `false` and `supportedVariants` has no `PQC_MLDSA_65` or `PQC_MLDSA_87`.
   2. `supportedVariants` and `supportedKem` are real arrays: `Array.isArray` is true for both,
      `.length` is 2 for each (`ECDSA_256R1` and `ED25519`, and the two KEM types), and the log
      shows `["ECDSA_256R1","ED25519"]`, not a quoted string.
-  3. Time the first `getHardwareCapabilities()` call in a fresh process (force-stop the app first)
-     and the second one right after, with `performance.now()` before and after the call. The first
-     does one key generation attempt in the Keystore, the second reads the kept answer. Note both
-     times.
+  3. Force-stop the app, open it again, and in the webview console (S4, `chrome://inspect`) time
+     the first `Capacitor.Plugins.PqSecureStorage.getHardwareCapabilities()` call and the second one
+     right after, with `performance.now()` before and after each. The first call runs two probes,
+     the existing AES key one for `hardwareBacked` and the new ML-DSA one, so it makes two throwaway
+     keys. The second reads the kept answers. Note both times, and read the first as the cost of
+     both probes, not of the ML-DSA one alone.
   4. [debug build] The Keystore has no `__pq_mldsa_probe__` alias after the call.
 - [ ] **A3.** [e2e] `generateKeyPair` and `sign` with a silent `PQC_MLDSA_65` key work. [manual]
   The public key decodes to 1952 bytes (2592 for `PQC_MLDSA_87`) and the signature to 3309 bytes
@@ -255,12 +257,14 @@ that E2 checks.
   round-trips and `keys()` returns `secret-name`. A raw Keychain dump (jailbroken or development
   device) shows `kSecAttrAccount` as an HMAC in base64, not the name.
 - [ ] **E6.** [manual] M-8: `keys()` lists biometric items too, from the index rows. iOS hides the
-  items themselves from that listing, so the index is what is under test. Use S4 for raw calls, and
-  note any prompt that shows where none is expected.
-  1. Empty store. `setItem` a `requireBiometric: true` item `a` and a silent item `b`, with no
-     prompt. `keys()` answers with no prompt and lists `a` and `b`, each once.
-  2. `withPrefix(...).clear()` on a view that holds both removes both, with one prompt (the
-     biometric item's). Then `keys()` is empty and `hasItem` is false for both.
+  items themselves from that listing, so the index is what is under test. Use S4 for the raw calls
+  (the console has no prefix layer, so a prefix is just part of the name), and note any prompt that
+  shows where none is expected.
+  1. Empty store. `setItem` a `requireBiometric: true` item `pfx_a` and a silent item `pfx_b`, with
+     no prompt. `keys()` answers with no prompt and lists `pfx_a` and `pfx_b`, each once.
+  2. Do what a view's `clear()` does (`src/enhance.ts`): a raw `keys()`, then `removeItem` for each
+     name that starts with `pfx_`, one at a time. It removes both, with one prompt (the biometric
+     item's). Then `keys()` lists neither and `hasItem` is false for both.
   3. Plain `clear()` with one biometric and one silent item: one prompt, then `keys()` is empty. A
      new `setItem` is listed by `keys()`. `clear()` on a store with only one biometric item still
      prompts.

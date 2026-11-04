@@ -49,10 +49,10 @@ export const Accessibility = {
 export interface HardwareCapabilities {
     /**
      * Whether ML-DSA signing is available. iOS: iOS 26+ with a Secure Enclave (ML-KEM comes with
-     * it). Android: the Keystore can make an ML-DSA-65 key. The first call in a process makes a
-     * throwaway key (no biometric) and deletes it, and the answer is kept until the process ends;
-     * ML-KEM works even when this is false, see `supportedKem`. True on the web fallback, which is
-     * software only.
+     * it). Android: the Keystore can make an ML-DSA-65 key. The first call after the plugin loads
+     * makes a throwaway key (no biometric) and deletes it, and the plugin keeps the answer in memory
+     * until it is reloaded. ML-KEM works even when this is false, see `supportedKem`. True on the web
+     * fallback, which is software only.
      */
     supportsPqc: boolean;
     /**
@@ -107,7 +107,8 @@ export interface PqSecureStoragePlugin {
      * software key whose private is encrypted by a hardware key and opened only to sign. Rejects if
      * the alias exists unless `overwrite` is true. Distinct aliases give independent keypairs (use
      * that for KERI rotation, one alias per key). On Android an ML-DSA type on a device without
-     * Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first.
+     * Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first. That list is tested with a
+     * key without biometric, so a biometric key (the default) can still reject `E_KEYGEN`.
      *
      * `requireBiometric` (default `true`) is baked into the key: `true` makes every `sign` prompt
      * for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
