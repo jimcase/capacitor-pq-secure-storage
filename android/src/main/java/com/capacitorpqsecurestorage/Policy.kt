@@ -40,8 +40,9 @@ internal object Policy {
         else -> null
     }
 
-    // Whether [make] works. [cleanup] runs either way and a failure in it never changes the answer,
-    // so a probe key is never left behind and never turns a working Keystore into a "no".
+    // Whether [make] works. [cleanup] runs either way, after [make], and a failure in it never
+    // changes the answer. So it tries to delete the probe key either way and a failed delete never
+    // turns a working Keystore into a "no".
     fun probe(make: () -> Unit, cleanup: () -> Unit): Boolean =
         try {
             make()

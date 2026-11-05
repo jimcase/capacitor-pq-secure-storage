@@ -18,6 +18,7 @@ describe('capacitor-pq-secure-storage: core (sim/emulator + device)', () => {
     const log = await tap('getHardwareCapabilities');
     expect(topLine(log)).toContain('OK');
     expect(topLine(log)).toContain('supportsPqc');
+    expect(topLine(log)).toContain('"supportedVariants":[');
     expect(topLine(log)).toContain('"supportedKem":[');
   });
 

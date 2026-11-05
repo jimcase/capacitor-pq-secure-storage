@@ -441,7 +441,13 @@ class PqSecureStoragePlugin : Plugin() {
                     throw e
                 }
             },
-            cleanup = { keystore().deleteEntry(probeAlias) }
+            cleanup = {
+                try {
+                    keystore().deleteEntry(probeAlias)
+                } catch (e: Exception) {
+                    logd("ML-DSA probe cleanup failed", e)
+                }
+            }
         )
         pqcCache = ok
         return ok
