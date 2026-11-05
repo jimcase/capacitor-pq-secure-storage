@@ -292,6 +292,18 @@ class PqSecureStoragePlugin : Plugin() {
         return v
     }
 
+    // same check as biometricGated: a strong biometric the Keystore and BiometricPrompt can use now
+    private fun biometryUsable(): Boolean = Policy.biometryUsable(
+        BiometricManager.from(context).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+    )
+
+    private fun rejectNoBiometry(call: PluginCall) = call.reject("No usable biometric on this device", "E_BIOMETRY_UNAVAILABLE")
+
+    private fun rejectPromptError(call: PluginCall, errorCode: Int) {
+        if (Policy.promptErrorCode(errorCode) == "E_BIOMETRY_UNAVAILABLE") rejectNoBiometry(call)
+        else call.reject("Authentication failed", "E_AUTH_FAILED")
+    }
+
     // The Capacitor bridge rethrows anything that escapes a plugin method as a RuntimeException, which
     // takes the whole app down. Methods that touch the Keystore outside their own try use this.
     private inline fun guarded(call: PluginCall, code: String, body: () -> Unit) {
@@ -339,6 +351,8 @@ class PqSecureStoragePlugin : Plugin() {
         val sa = sigAlgOf(type) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
         val overwrite = boolArg(call, "overwrite", false) ?: return
         val requireBiometric = boolArg(call, "requireBiometric", true) ?: return
+        // the Keystore refuses an auth-bound key with no strong biometric, say why before trying
+        if (requireBiometric && !biometryUsable()) return rejectNoBiometry(call)
         if (sa.wrapped) return generateWrappedSigningKey(alias, type!!, overwrite, requireBiometric, call)
         val ks = try {
             keystore()
@@ -666,6 +680,7 @@ class PqSecureStoragePlugin : Plugin() {
         val spec = mlkemSpecOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         val overwrite = boolArg(call, "overwrite", false) ?: return
         val requireBiometric = boolArg(call, "requireBiometric", true) ?: return
+        if (requireBiometric && !biometryUsable()) return rejectNoBiometry(call)
         if (!kemGenerating.add(alias)) return call.reject("Key generation in progress, retry", "E_BUSY")
         try {
             val exists = kemPrefs().contains(kemPubKeyKey(alias))
@@ -1094,6 +1109,10 @@ class PqSecureStoragePlugin : Plugin() {
         onError: () -> Unit = {},
         onSuccess: (Cipher) -> Unit
     ) {
+        if (!biometryUsable()) {
+            onError()
+            return rejectNoBiometry(call)
+        }
         // only one prompt at a time; a second concurrent op is rejected, not stacked
         if (!authInFlight.compareAndSet(false, true)) {
             onError()
@@ -1127,7 +1146,7 @@ class PqSecureStoragePlugin : Plugin() {
                     if (!settled.compareAndSet(false, true)) return
                     onError()
                     authInFlight.set(false)
-                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                    rejectPromptError(call, errorCode)
                 }
 
                 override fun onAuthenticationFailed() {
@@ -1165,6 +1184,7 @@ class PqSecureStoragePlugin : Plugin() {
         call: PluginCall,
         onSuccess: (Signature) -> Unit
     ) {
+        if (!biometryUsable()) return rejectNoBiometry(call)
         // only one prompt at a time; a second concurrent op is rejected, not stacked
         if (!authInFlight.compareAndSet(false, true)) {
             return call.reject("Another authentication is in progress", "E_BUSY")
@@ -1191,7 +1211,7 @@ class PqSecureStoragePlugin : Plugin() {
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     if (!settled.compareAndSet(false, true)) return
                     authInFlight.set(false)
-                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                    rejectPromptError(call, errorCode)
                 }
 
                 override fun onAuthenticationFailed() {
@@ -1290,6 +1310,7 @@ class PqSecureStoragePlugin : Plugin() {
             return call.reject("Key or value out of bounds", "E_INVALID_ARGS")
         }
         val newBio = boolArg(call, "requireBiometric", false) ?: return
+        if (newBio && !biometryUsable()) return rejectNoBiometry(call)
         if (!storeWriting.add(key)) return call.reject("Store write in progress, retry", "E_BUSY")
         val done = { storeWriting.remove(key); Unit }
         // these hit the Keystore; a throw here would skip done() and leave the key latched as busy

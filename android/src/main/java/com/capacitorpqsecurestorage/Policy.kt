@@ -1,5 +1,8 @@
 package com.capacitorpqsecurestorage
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+
 // Decisions the plugin takes about keys, kept free of Android classes so plain JVM tests cover them.
 internal object Policy {
     // The key to reuse for a setItem, or null to create a fresh one. Only a key with a real item
@@ -41,6 +44,20 @@ internal object Policy {
     fun replacementPrompt(newRequiresBiometric: Boolean): String =
         if (newRequiresBiometric) "Authorize key replacement"
         else "Replace this key with one that does not need biometrics"
+
+    // the BiometricPrompt ints are compile time constants, so this still runs in plain JVM tests
+    fun promptErrorCode(errorCode: Int): String = when (errorCode) {
+        BiometricPrompt.ERROR_HW_UNAVAILABLE,
+        BiometricPrompt.ERROR_HW_NOT_PRESENT,
+        BiometricPrompt.ERROR_NO_BIOMETRICS,
+        BiometricPrompt.ERROR_LOCKOUT,
+        BiometricPrompt.ERROR_LOCKOUT_PERMANENT,
+        BiometricPrompt.ERROR_SECURITY_UPDATE_REQUIRED,
+        BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL -> "E_BIOMETRY_UNAVAILABLE"
+        else -> "E_AUTH_FAILED"
+    }
+
+    fun biometryUsable(canAuthenticate: Int): Boolean = canAuthenticate == BiometricManager.BIOMETRIC_SUCCESS
 
     const val MAX_STORE_ITEMS = 512
     const val MAX_STORE_TOTAL_CHARS = 16 * 1024 * 1024

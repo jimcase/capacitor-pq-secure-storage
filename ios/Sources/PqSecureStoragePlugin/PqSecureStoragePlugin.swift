@@ -297,6 +297,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let overwrite = Self.boolArg(call, "overwrite", default: false),
               let requireBiometric = Self.boolArg(call, "requireBiometric", default: true) else { return }
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
+        // before the ED25519 branch, so it covers the wrapped key too
+        guard !requireBiometric || Self.biometryUsable() else { return Self.rejectAuth(call, .biometryUnavailable) }
 
         if type == "ED25519" {
             return wrappedGenerate(alias: alias, type: type, overwrite: overwrite, requireBiometric: requireBiometric, call: call)
@@ -330,8 +332,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if existingBio {
             Self.authenticate(reason: InputPolicy.replacementReason(newRequiresBiometric: requireBiometric)) { result in
                 switch result {
-                case .failure:
-                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err):
+                    Self.rejectAuth(call, err)
                 case .success(let ctx):
                     // prove the biometric bound to the existing key when possible; if it's gone or
                     // invalidated the sign throws -- still regenerate, since the user authenticated.
@@ -434,7 +436,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if meta.requireBiometric {
             Self.authenticate(reason: reason) { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success(let context): doSign(context)
                 }
             }
@@ -555,6 +557,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let overwrite = Self.boolArg(call, "overwrite", default: false),
               let requireBiometric = Self.boolArg(call, "requireBiometric", default: true) else { return }
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
+        guard !requireBiometric || Self.biometryUsable() else { return Self.rejectAuth(call, .biometryUnavailable) }
 
         let exists = Self.kemAliasExists(alias)
         if !overwrite && exists {
@@ -576,7 +579,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if existingBio {
             Self.authenticate(reason: InputPolicy.replacementReason(newRequiresBiometric: requireBiometric)) { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success: doGenerate()
                 }
             }
@@ -715,7 +718,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if requireBiometric {
             Self.authenticate(reason: "Authenticate to decrypt with your PQ key") { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success(let context): doDecrypt(context)
                 }
             }
@@ -748,9 +751,30 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 completion(.success(context))
             } else {
                 os_log("biometric auth failed: %{private}@", log: vcpLog, type: .error, String(describing: evalError))
-                completion(.failure(.authFailed))
+                // a lockout can start during the prompt
+                let unavailable = InputPolicy.authErrorCode((evalError as? LAError)?.code) == "E_BIOMETRY_UNAVAILABLE"
+                completion(.failure(unavailable ? .biometryUnavailable : .authFailed))
             }
         }
+    }
+
+    private static func rejectAuth(_ call: CAPPluginCall, _ error: PqSecureStorageError) {
+        if case .biometryUnavailable = error {
+            call.reject("No usable biometric on this device", "E_BIOMETRY_UNAVAILABLE")
+        } else {
+            call.reject("Authentication failed", "E_AUTH_FAILED")
+        }
+    }
+
+    // the Keychain answers a prompt that could not run like a cancel, so ask LocalAuthentication why
+    private static func keychainAuthError() -> PqSecureStorageError {
+        var err: NSError?
+        _ = LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err)
+        return InputPolicy.authErrorCode((err as? LAError)?.code) == "E_BIOMETRY_UNAVAILABLE" ? .biometryUnavailable : .authFailed
+    }
+
+    private static func biometryUsable() -> Bool {
+        LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
     }
 
     // an option that is present but not a boolean is rejected, not silently replaced by its default
@@ -1117,7 +1141,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if existingBio {
             Self.authenticate(reason: InputPolicy.replacementReason(newRequiresBiometric: requireBiometric)) { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success: doGenerate()
                 }
             }
@@ -1150,7 +1174,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 case errSecItemNotFound:
                     call.reject("Key not found", "E_KEY_NOT_FOUND")
                 case errSecUserCanceled, errSecAuthFailed:
-                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                    Self.rejectAuth(call, Self.keychainAuthError())
                 default:
                     call.reject("Signing failed", "E_SIGN")
                 }
@@ -1402,6 +1426,9 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Invalid value", "E_MISSING_PARAMS"); return
         }
         guard let requireBiometric = Self.boolArg(call, "requireBiometric", default: false) else { return }
+        guard !requireBiometric || Self.biometryUsable() else {
+            Self.rejectAuth(call, .biometryUnavailable); return
+        }
         // the account is a keyed HMAC of the name (a Keychain dump reveals no names); encName carries
         // the encrypted real name so keys() can still enumerate them
         let account: String
@@ -1487,7 +1514,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 // same tier: authenticate, then update the value atomically
                 Self.authenticate(reason: "Authenticate to replace your secret") { result in
                     switch result {
-                    case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                    case .failure(let err): Self.rejectAuth(call, err)
                     case .success(let ctx): update(ctx)
                     }
                 }
@@ -1536,7 +1563,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                     call.resolve(["value": NSNull()])
                 }
             case errSecUserCanceled, errSecAuthFailed:
-                call.reject("Authentication failed", "E_AUTH_FAILED")
+                Self.rejectAuth(call, Self.keychainAuthError())
             default:
                 call.reject("Read failed", "E_DECRYPT")
             }
@@ -1574,7 +1601,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         let confirmDel: () -> Void = {
             Self.authenticate(reason: "Authenticate to delete your secret") { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success: del()
                 }
             }
@@ -1709,7 +1736,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if hasBiometric && !Self.noBiometricEnrolled() {
             Self.authenticate(reason: "Authenticate to erase secure storage") { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success: wipe()
                 }
             }
