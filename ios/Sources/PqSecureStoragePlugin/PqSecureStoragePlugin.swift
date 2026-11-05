@@ -1597,8 +1597,9 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 if let data = attrs?[kSecValueData as String] as? Data, let value = String(data: data, encoding: .utf8) {
                     // bio items from before the index have no row, and this is the first time we have
                     // the name with the item already unlocked. Row gets the item's class, an existing
-                    // row is left alone. Best effort, never changes the read.
-                    if let enc = try? Self.encName(key) {
+                    // row is left alone. Best effort, never changes the read. If a clear() ran since
+                    // the read the name key is new, so skip: that row could never be removed.
+                    if (try? Self.nameTag(key)) == account, let enc = try? Self.encName(key) {
                         let cls = (attrs?[kSecAttrAccessible as String] as? String).map { $0 as CFString }
                         _ = Self.addIndex(account: account, encName: enc,
                                           protection: cls ?? kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
