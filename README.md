@@ -589,7 +589,9 @@ silent one overwrites silently). When the new key drops the biometric gate the
 prompt says so on Android and Touch ID, but Face ID does not show this text (no dialog on a
 first-try success), so confirm a downgrade in your own UI before calling. `overwrite` and
 `requireBiometric` must be booleans when given; anything else rejects `E_INVALID_ARGS`. On
-Android a new wrapped Ed25519 alias past 256 existing ones rejects `E_STORE_FULL`.
+Android a new wrapped Ed25519 alias past 256 existing ones rejects `E_STORE_FULL`. On Android
+and iOS, `requireBiometric: true` with no usable biometric rejects `E_BIOMETRY_UNAVAILABLE`
+before anything is created.
 
 | Param         | Type                                                                                                                                  |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
@@ -708,7 +710,8 @@ On Android creating a biometric key prompts; on iOS creation is silent.
 Overwriting a biometric key prompts. When the new key drops the biometric gate the prompt says
 so on Android and Touch ID, but Face ID does not show this text (no dialog on a first-try
 success), so confirm a downgrade in your own UI before calling. On Android a new alias past
-256 existing ones rejects `E_STORE_FULL`.
+256 existing ones rejects `E_STORE_FULL`. On Android and iOS, `requireBiometric: true` with
+no usable biometric rejects `E_BIOMETRY_UNAVAILABLE` before anything is created.
 
 | Param         | Type                                                                                                                      |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -813,7 +816,8 @@ The item NAME is not stored in the clear: the Android prefs key and the iOS Keyc
 are a keyed hash of the name, so a reader of the raw store sees neither values nor names.
 `key` is 1 to 512 UTF-16 units and `value` at most 256K units, else `E_INVALID_ARGS`. The
 Android store holds at most 512 items and 16 MiB of stored text; a write past that rejects
-`E_STORE_FULL`.
+`E_STORE_FULL`. On Android and iOS, `requireBiometric: true` with no usable biometric rejects
+`E_BIOMETRY_UNAVAILABLE` before the store is touched.
 
 | Param         | Type                                                                                                                                 |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -915,15 +919,15 @@ no biometric, so silent.
 
 #### HardwareCapabilities
 
-| Prop                     | Type                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ------------------------ | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`supportsPqc`**        | <code>boolean</code>         | Whether ML-DSA signing is available. iOS: iOS 26+ with a Secure Enclave (ML-KEM comes with it). Android: the Keystore offers ML-DSA (probed at runtime); ML-KEM works even when this is false, see `supportedKem`. True on the web fallback, which is software only.                                                                                                                                                                                                                                                                                       |
-| **`hardwareBacked`**     | <code>boolean</code>         | Android: a probe AES key in the Keystore reports TEE or StrongBox, not software. iOS: a Secure Enclave is present (reported on iOS 26+ only, false below). False on the web fallback. Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android this is about the AES and wrap keys only. ML-KEM is always software there (the private is wrapped by a hardware key), and where an ML-DSA key lives needs a per-key check (see DEVICE-VERIFICATION.md).                                                                                         |
-| **`biometricGated`**     | <code>boolean</code>         | True when a biometric is enrolled and can gate keys and items (Android: `BIOMETRIC_STRONG`). iOS reports false below iOS 26. False on the web fallback.                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **`supportedVariants`**  | <code>SignatureType[]</code> | Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| **`supportedKem`**       | <code>KemType[]</code>       | ML-KEM variants available on this device.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| **`kemInSecureEnclave`** | <code>boolean</code>         | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key.                                                                                                                                                                                                                                                                                                                                                                                             |
-| **`atRestSuite`**        | <code>number</code>          | The suite id `encryptAtRest` writes on this device when called with `format: 2`, and the one `decryptAtRest` compares against for `outdated`. `0x10`: AES-256-GCM in the Keystore (Android) or the web fallback. `0x11`: ECIES under a Secure Enclave P-256 key (iOS below 26, or iOS 26+ when the Secure Enclave cannot create an ML-KEM-768 key). `0x12`: AES-256-GCM with a key from a Secure Enclave ML-KEM-768 decapsulation (iOS 26+). The iOS value is probed once per process when the probe succeeds; a failed probe runs again on the next call. |
+| Prop                     | Type                         | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **`supportsPqc`**        | <code>boolean</code>         | Whether ML-DSA signing is available. iOS: iOS 26+ with a Secure Enclave (ML-KEM comes with it). Android: the Keystore offers ML-DSA (probed at runtime); ML-KEM works even when this is false, see `supportedKem`. True on the web fallback, which is software only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| **`hardwareBacked`**     | <code>boolean</code>         | Android: a probe AES key in the Keystore reports TEE or StrongBox, not software. iOS: a Secure Enclave is present (reported on iOS 26+ only, false below). False on the web fallback. Gate seed-tier trust on this, not on `supportsPqc`. NOTE: on Android this is about the AES and wrap keys only. ML-KEM is always software there (the private is wrapped by a hardware key), and where an ML-DSA key lives needs a per-key check (see DEVICE-VERIFICATION.md).                                                                                                                                                                                                                                                                                     |
+| **`biometricGated`**     | <code>boolean</code>         | True when a biometric is enrolled and can gate keys and items (Android: `BIOMETRIC_STRONG`). iOS reports false below iOS 26. False on the web fallback. On Android, and on iOS 26+ with a Secure Enclave, `false` means that creating a biometric key or item, or any call that has to show a biometric prompt, rejects `E_BIOMETRY_UNAVAILABLE`. A key or item killed by an enrollment change keeps its own code (see `E_KEY_INVALIDATED`). One exception on iOS until it is checked on a device (D13 in DEVICE-VERIFICATION.md): with Face ID off for the app, `getItem` of a biometric item and `sign` with a biometric Ed25519 key may still answer `E_DECRYPT` / `E_SIGN`, since the Keychain runs those prompts and its status decides the code. |
+| **`supportedVariants`**  | <code>SignatureType[]</code> | Signature types available on this device (ML-DSA, ECDSA P-256, Ed25519).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| **`supportedKem`**       | <code>KemType[]</code>       | ML-KEM variants available on this device.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| **`kemInSecureEnclave`** | <code>boolean</code>         | True when ML-KEM decapsulation runs in secure hardware (iOS Secure Enclave). On Android it is done in software with the private key wrapped by a Keystore key.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **`atRestSuite`**        | <code>number</code>          | The suite id `encryptAtRest` writes on this device when called with `format: 2`, and the one `decryptAtRest` compares against for `outdated`. `0x10`: AES-256-GCM in the Keystore (Android) or the web fallback. `0x11`: ECIES under a Secure Enclave P-256 key (iOS below 26, or iOS 26+ when the Secure Enclave cannot create an ML-KEM-768 key). `0x12`: AES-256-GCM with a key from a Secure Enclave ML-KEM-768 decapsulation (iOS 26+). The iOS value is probed once per process when the probe succeeds; a failed probe runs again on the next call.                                                                                                                                                                                             |
 
 
 ### Type Aliases
@@ -1011,8 +1015,16 @@ From 7.1.0:
 
 From 7.2.0:
 
-- At runtime everything is additive. Without `format` the four crypto calls give the same layout and
-  size as before, and every frame that opened before still opens.
+- At runtime everything is additive, except one error code (below). Without `format` the four crypto
+  calls give the same layout and size as before, and every frame that opened before still opens.
+- A call that needs a biometric the device cannot give now (none enrolled, Face ID denied for the
+  app, a lockout, and so on) rejects the new `E_BIOMETRY_UNAVAILABLE`. It used to answer
+  `E_AUTH_FAILED` at a prompt. Creating a biometric key or item used to fail with `E_KEYGEN` (keys,
+  wrapped Ed25519 included) or `E_ENCRYPT` (`setItem`) on Android; on iOS the same codes when the
+  Keychain refused the creation, which is not yet confirmed on a device (D11). On iOS, `getItem` and
+  Ed25519 `sign` may still answer `E_DECRYPT` / `E_SIGN` with Face ID off for the app (D13). If your
+  code reads `E_AUTH_FAILED` as "no biometric", handle the new code too. The CHANGELOG lists every
+  call.
 - `decrypt` and `decryptAtRest` return one more field, `outdated`. `getHardwareCapabilities` returns
   one more field, `atRestSuite`. Typed mocks or implementations of `PqSecureStoragePlugin` or
   `HardwareCapabilities` stop compiling until they add `outdated` to the two decrypt results and
@@ -1037,7 +1049,8 @@ Every rejection carries a `code`:
 | `E_MISSING_PARAMS` | A required parameter is missing |
 | `E_INVALID_ARGS` | Store key or value out of bounds, invalid base64, a recipient key that is too long, an option of the wrong type, or `format` outside 1 and 2 |
 | `E_BAD_ALIAS` | Key alias outside `A-Z a-z 0-9 _ -` (1 to 64 characters) or starting with `__pq` |
-| `E_AUTH_FAILED` | Biometric cancelled or failed, or no biometric can be used (none enrolled, or Face ID denied for the app) |
+| `E_AUTH_FAILED` | The biometric prompt was cancelled (by the user, the system or the app, or with the Cancel button), ended on a failed match or a timeout, or failed for any other reason not listed under `E_BIOMETRY_UNAVAILABLE` |
+| `E_BIOMETRY_UNAVAILABLE` | The call needs a biometric and the device cannot give one now: no biometric hardware, none enrolled (Android needs a strong, Class 3 biometric, so a weak face unlock does not count), biometrics turned off or not allowed for the app (iOS: Face ID denied in Settings), no passcode set, the sensor is temporarily unavailable, or a lockout after too many failed tries (temporary). Android and iOS check it before they create a biometric key or item, and report it when a prompt cannot run for one of these reasons. A key or item killed by an enrollment change keeps its own code (see `E_KEY_INVALIDATED`). On iOS, `getItem` of a biometric item and `sign` with a biometric Ed25519 key may still answer `E_DECRYPT` / `E_SIGN` with Face ID off for the app, until device check D13 confirms the Keychain status |
 | `E_KEY_INVALIDATED` | The biometric enrollment changed since the key or item was made, so it can't be used any more. Android reports it when such a key or item is used. On iOS only `getItem` and `setItem` report it; a signing or KEM key killed this way fails with another code, such as `E_SIGN` or `E_DECRYPT` |
 | `E_ENCRYPT` | Encryption failed, or `setItem` could not write the item |
 | `E_DECRYPT` | Decryption failed (wrong key, tampered data, GCM-tag mismatch, or a frame suite this device cannot open). Also `keys()` when the store cannot be listed |
@@ -1061,9 +1074,10 @@ Every rejection carries a `code`:
 
 The web fallback uses the same codes for the same failures, but only these: `E_ALIAS_EXISTS`,
 `E_BAD_ALIAS`, `E_BAD_CIPHERTEXT`, `E_DECRYPT`, `E_ENCRYPT`, `E_INPUT_TOO_LARGE`, `E_INVALID_ARGS`,
-`E_KEY_NOT_FOUND`, `E_TAMPERED`, `E_TYPE_MISMATCH` and `E_UNSUPPORTED`. It does not check for
-missing arguments, so one can throw a plain `TypeError`, and a few failures on corrupted browser
-storage are not coded either.
+`E_KEY_NOT_FOUND`, `E_TAMPERED`, `E_TYPE_MISMATCH` and `E_UNSUPPORTED`. It has no biometrics, so it
+never raises `E_AUTH_FAILED` or `E_BIOMETRY_UNAVAILABLE`. It does not check for missing arguments, so
+one can throw a plain `TypeError`, and a few failures on corrupted browser storage are not coded
+either.
 
 ## Testing
 
