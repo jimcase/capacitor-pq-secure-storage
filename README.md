@@ -98,8 +98,8 @@ uses.
 
 | Platform | Verified on |
 |---|---|
-| iOS | iPhone 16 / iOS 27.0.1, November 2026, this code. ML-DSA-65 and 87 in the Secure Enclave with Face ID on every sign, ECDSA, Ed25519, the store, at-rest with suite `0x12` (`atRestSuite` 18) and older frames, ML-KEM 768 and 1024, frames shared with the web both ways. Earlier: iPhone 15 Pro / iOS 26, July 2026, on the 7.0.0 / 8.0.0 code. |
-| Android | Samsung Galaxy A57 / Android 17, November 2026, this code. The store, at-rest (`0x10`), ML-KEM 768 and 1024, ECDSA and Ed25519, biometric prompts and their cancel paths, frames shared with the web both ways. All keys in the TEE (security level checked); no StrongBox on that phone. ML-DSA does NOT work there: the Keystore rejects every ML-DSA key. |
+| iOS | iPhone 16 / iOS 27.0.1, November 2026, the frames code. ML-DSA-65 and 87 in the Secure Enclave with Face ID on every sign, ECDSA, Ed25519, at-rest with suite `0x12` (`atRestSuite` 18) and older frames, ML-KEM 768 and 1024, frames shared with the web both ways. Earlier: iPhone 15 Pro / iOS 26, July 2026, on the 7.0.0 / 8.0.0 code. |
+| Android | Samsung Galaxy A57 / Android 17, November 2026, the frames code. The store, at-rest (`0x10`), ML-KEM 768 and 1024, ECDSA and Ed25519, biometric prompts and their cancel paths, frames shared with the web both ways. All keys in the TEE (security level checked); no StrongBox on that phone. ML-DSA does NOT work there: the Keystore rejects every ML-DSA key. |
 
 Three problems found on these phones are fixed in this version: iOS `keys()` did not list
 biometric items, Android reported ML-DSA on a phone whose Keystore cannot make the keys, and the
@@ -446,11 +446,16 @@ Notes:
 - On iOS each item has an index row in the Keychain (service `pq.securestorage.index`). It has no
   access control, so `keys()` can list it without a prompt, and iOS hides the biometric items
   themselves from that listing. It holds a one-byte value, the same keyed-hash account as the item and
-  the same encrypted name, so it shows how many items there are but not their names. `setItem`
-  writes it after the item (a create is undone and rejects `E_ENCRYPT` if the row cannot be
-  written), `getItem` adds a missing row, `removeItem` deletes it after the item, and `clear()`
-  deletes all of them, also when the store is empty (then it deletes only the rows, never a store
-  item without the biometric check).
+  the same encrypted name, so it shows how many items there are but not their names. A row has the
+  same protection class as its item, so a Keychain dump shows how many items there are and their
+  classes, never the names. `setItem` writes it after the item (a create is undone and rejects
+  `E_ENCRYPT` if the row cannot be written), `getItem` adds a missing row, `removeItem` deletes it
+  after the item, and `clear()` deletes all of them, also when the store is empty (then it deletes
+  only the rows, never a store item without the biometric check). If the app dies between writing
+  an item and its row, or between deleting an item and its row, `keys()` can list a name whose item
+  is gone: `hasItem` is false, `getItem` gives `null`, and `removeItem` or `clear()` cleans the row.
+  With the phone locked and items in different protection classes, `keys()` has not been checked on
+  a device and may reject `E_DECRYPT`.
 
 #### Android backup exclusion
 
