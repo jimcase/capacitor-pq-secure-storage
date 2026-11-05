@@ -150,6 +150,14 @@ class PolicyTest {
     }
 
     @Test
+    fun aProbeCleansUpAfterMakeWhetherItWorksOrNot() {
+        val calls = mutableListOf<String>()
+        Policy.probe(make = { calls.add("make") }, cleanup = { calls.add("cleanup") })
+        Policy.probe(make = { calls.add("make"); throw IllegalStateException("keymint") }, cleanup = { calls.add("cleanup") })
+        assertEquals(listOf("make", "cleanup", "make", "cleanup"), calls)
+    }
+
+    @Test
     fun aCleanupThatThrowsDoesNotChangeTheAnswer() {
         assertTrue(Policy.probe(make = {}, cleanup = { throw IllegalStateException("gone") }))
         assertFalse(Policy.probe(make = { throw IllegalStateException("x") }, cleanup = { throw IllegalStateException("gone") }))
