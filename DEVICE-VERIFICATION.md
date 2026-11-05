@@ -69,9 +69,9 @@ build and the plugin version. The current state is in [Results so far](#results-
   3. Force-stop the app, open it again, and in the webview console (S4, `chrome://inspect`) time
      the first `Capacitor.Plugins.PqSecureStorage.getHardwareCapabilities()` call and the second one
      right after, with `performance.now()` before and after each. The first call runs two probes,
-     the existing AES key one for `hardwareBacked` and the new ML-DSA one, so it makes two throwaway
-     keys. The second reads the kept answers. Note both times, and read the first as the cost of
-     both probes, not of the ML-DSA one alone.
+     the existing AES key one for `hardwareBacked` and the new ML-DSA one, so it makes or tries to
+     make two throwaway keys. The second reads the kept answers. Note both times, and read the first
+     as the cost of both probes, not of the ML-DSA one alone.
   4. [debug build] The Keystore has no `__pq_mldsa_probe__` alias after the call.
 - [ ] **A3.** [e2e] `generateKeyPair` and `sign` with a silent `PQC_MLDSA_65` key work. [manual]
   The public key decodes to 1952 bytes (2592 for `PQC_MLDSA_87`) and the signature to 3309 bytes
