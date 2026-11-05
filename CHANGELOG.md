@@ -52,9 +52,9 @@ All notable changes to this project are documented here. The format is based on
   Cancel button, a timeout and a prompt that fails to start stay `E_AUTH_FAILED`.
 - Error codes, iOS: `generateKeyPair` (Ed25519 included) and `generateKemKeyPair` with
   `requireBiometric: true`, and `setItem({ requireBiometric: true })`, reject `E_BIOMETRY_UNAVAILABLE`
-  before any Keychain or Secure Enclave call when no biometric can be used (was `E_KEYGEN` for the
-  keys, wrapped Ed25519 included, `E_ENCRYPT` for `setItem`, or `E_AUTH_FAILED` at an overwrite
-  prompt). For `setItem` the check comes before the probe of the existing item, so a biometric item
+  before any Keychain or Secure Enclave call when no biometric can be used (was `E_AUTH_FAILED` at an
+  overwrite prompt, and `E_KEYGEN` for the keys, wrapped Ed25519 included, or `E_ENCRYPT` for
+  `setItem` when the Keychain refused the creation, which is not yet confirmed on a device, see D11). For `setItem` the check comes before the probe of the existing item, so a biometric item
   killed by an enrollment change answers it too when no biometric is left (was `E_KEY_INVALIDATED`
   or `E_AUTH_FAILED`). The prompt before `sign`, `decrypt`, a key overwrite, replacing a biometric
   item, `removeItem` and `clear()` rejects `E_BIOMETRY_UNAVAILABLE` when no biometric can be used or
