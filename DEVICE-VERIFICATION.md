@@ -264,6 +264,11 @@ that E2 checks.
      prompt, and `clear()` wipes the dead items with no prompt.
   8. With Face ID denied for the app (Settings, `biometryNotAvailable`): note what `removeItem`
      does. Expected: `E_BIOMETRY_UNAVAILABLE`, and the item stays.
+- [ ] **E21.** [manual] Passcode turned off (Settings > Face ID & Passcode > Turn Passcode Off, which
+  also turns Face ID off), with a biometric item made before: `removeItem` and `clear()` reject
+  `E_BIOMETRY_UNAVAILABLE` (the plugin deletes with no prompt only when no biometric is enrolled, and
+  a missing passcode is not that case). Set the passcode and Face ID up again: note whether the item
+  is still there (`hasItem`), and whether `removeItem` then deletes it after one prompt.
 - [ ] **E8.** [manual] N-7: `keys()` with the device locked and the app alive in the background
   (S4): does it list, return `[]`, or reject `E_DECRYPT`? A view's `clear()` uses `keys()`, so it
   must not resolve having deleted nothing: `[]` here with items in the store is a fail.
@@ -321,11 +326,6 @@ that E2 checks.
   Enclave, or any iPhone below iOS 26. `atRestSuite` is 17 (`0x11`), `encryptAtRest` with `format: 2`
   writes `50 51 02 11` followed by the plain ECIES output, and it reads with `outdated: false`. Note
   the model and the iOS build. Not run, if there is no such device.
-- [ ] **E21.** [manual] Passcode turned off (Settings > Face ID & Passcode > Turn Passcode Off, which
-  also turns Face ID off), with a biometric item made before: `removeItem` and `clear()` reject
-  `E_BIOMETRY_UNAVAILABLE` (the plugin deletes with no prompt only when no biometric is enrolled, and
-  a missing passcode is not that case). Set the passcode and Face ID up again: note whether the item
-  is still there (`hasItem`), and whether `removeItem` then deletes it after one prompt.
 
 ### F. Concurrency
 
