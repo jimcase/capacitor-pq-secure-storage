@@ -31,6 +31,12 @@ enum InputPolicy {
         b64.utf8.count <= maxRecipientKeyBase64
     }
 
+    // same for the data of the crypto calls. String.count counts Characters, and one Character can
+    // hold many code points, so a string past the cap in bytes passed it
+    static func cryptoInputWithinLimit(_ b64: String, maxBase64: Int) -> Bool {
+        b64.utf8.count <= maxBase64
+    }
+
     // an empty reason makes evaluatePolicy throw an ObjC exception swift can't catch (app dies),
     // so a blank one gets the default
     static func promptReason(_ raw: String?, default def: String) -> String {

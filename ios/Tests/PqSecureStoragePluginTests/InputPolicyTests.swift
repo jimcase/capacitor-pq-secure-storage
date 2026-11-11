@@ -108,4 +108,12 @@ final class InputPolicyTests: XCTestCase {
     func testNoLAErrorIsAuthFailed() {
         XCTAssertEqual(InputPolicy.authErrorCode(nil), "E_AUTH_FAILED")
     }
+
+    // one Character can hold many code points, so the cap counts bytes like the recipient key one
+    func testTheCryptoInputCapCountsBytesNotCharacters() {
+        let marks = "A" + String(repeating: "\u{301}", count: 1000)
+        XCTAssertEqual(marks.count, 1)
+        XCTAssertFalse(InputPolicy.cryptoInputWithinLimit(marks, maxBase64: 100))
+        XCTAssertTrue(InputPolicy.cryptoInputWithinLimit(String(repeating: "A", count: 100), maxBase64: 100))
+    }
 }
