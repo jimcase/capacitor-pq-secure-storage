@@ -105,6 +105,12 @@ internal object Policy {
     // key to protect", the others say nothing about the key.
     private const val DEAD_KEY_MESSAGE = "User changed or deleted their auth credentials"
 
+    // Item keys clear() may bind its prompt to: only keys with a stored item. An orphan key left by
+    // a cancelled write protects no data. A null [withItem] (a stored name could not be read) keeps
+    // every key, so an unreadable item never loses its prompt.
+    fun <T, A> promptCandidates(keys: List<T>, withItem: Set<A>?, aliasOf: (T) -> A): List<T> =
+        if (withItem == null) keys else keys.filter { aliasOf(it) in withItem }
+
     fun deadKeyError(e: Exception): Boolean =
         e is java.security.UnrecoverableKeyException && e.cause == null && e.message == DEAD_KEY_MESSAGE
 
