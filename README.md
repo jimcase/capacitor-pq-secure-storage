@@ -1068,6 +1068,13 @@ From 7.2.0:
   time `getHardwareCapabilities` is called after it loads, so that first call is a little slower, and
   keeps the answer in memory until it is reloaded. `generateKeyPair` is the same and still rejects
   `E_KEYGEN` when the Keystore cannot make the key.
+- On iOS an `overwrite` of a Secure Enclave key (ML-DSA, ECDSA or ML-KEM) now writes the new private
+  key under a new Keychain account before it moves the public key, and deletes the old private last.
+  A failure in between keeps the old key working; before, it could leave the new public key next to
+  the old private key, so `getPublicKey` showed one key and `sign` used the other. A key replaced
+  this way cannot be used by 7.2.0 or earlier, which look for the old account and answer
+  `E_KEY_NOT_FOUND`. A key already left in that broken state by an older version now rejects `sign`
+  and `decrypt` with `E_TAMPERED`; replace it with `overwrite`.
 - On Android `supportedVariants` and `supportedKem` are now arrays. They reached JavaScript as a
   string such as `"[ECDSA_256R1, ED25519]"` before, so code that parsed that string must read the
   array.
@@ -1094,7 +1101,7 @@ Every rejection carries a `code`:
 | `E_UNSUPPORTED` | Unknown key or KEM type, or not on this device (iOS below 26, or no Secure Enclave), or a frame written by a newer version of the plugin (unknown header version or suite) |
 | `E_ALIAS_EXISTS` | Alias already exists (pass `overwrite: true` to replace). An Ed25519 alias and a hardware-key alias never replace each other, even with `overwrite` |
 | `E_NO_ACTIVITY` | Android: no foreground `FragmentActivity` to host the prompt |
-| `E_TAMPERED` | Integrity check failed on a stored public key or item |
+| `E_TAMPERED` | Integrity check failed on a stored public key or item. On iOS also `sign` / `decrypt` when the stored public key does not match the private key (an `overwrite` cut in half by 7.2.0 or earlier): replace the key with `overwrite` |
 | `E_TYPE_MISMATCH` | The key under the alias has another type than the one asked for |
 | `E_BAD_CIPHERTEXT` | `decrypt` input too short for an ML-KEM frame of that type |
 | `E_REMOVE` | `removeItem` failed |

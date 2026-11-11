@@ -228,6 +228,7 @@ private enum PqSecureStorageError: Error {
     case authFailed
     case biometryUnavailable
     case badCiphertext
+    case keyMismatch
     case keychain(OSStatus)
 }
 
@@ -413,6 +414,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 call.resolve(["signature": signature.base64EncodedString()])
             } catch PqSecureStorageError.keyNotFound {
                 call.reject("Key not found", "E_KEY_NOT_FOUND")
+            } catch PqSecureStorageError.keyMismatch {
+                call.reject("Public key does not match the private key; regenerate with overwrite", "E_TAMPERED")
             } catch {
                 os_log("sign failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
                 call.reject("Signing failed", "E_SIGN")
@@ -709,6 +712,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 }
             } catch PqSecureStorageError.keyNotFound {
                 call.reject("Key not found", "E_KEY_NOT_FOUND")
+            } catch PqSecureStorageError.keyMismatch {
+                call.reject("Public key does not match the private key; regenerate with overwrite", "E_TAMPERED")
             } catch {
                 os_log("decrypt failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
                 call.reject("Decrypt failed", "E_DECRYPT")
@@ -995,26 +1000,50 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     @available(iOS 26.0, *)
     private static func persist(key: PQKey, type: String, alias: String, requireBiometric: Bool) throws {
-        // write public first: aliasExists() checks the public account, so a failed private write
-        // leaves a consistent state (alias reports exists) that heals on retry, instead of an
-        // orphaned private that blocks the alias. dataRepresentation is SEP-wrapped ciphertext, so
-        // device-only/unlocked-only protection is enough.
-        let pubStatus = upsertKeychain(
-            account: publicAccount(for: alias),
-            data: key.publicKeyBytes,
-            attrs: [
-                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: try pubTag(type: type, requireBiometric: requireBiometric, pub: key.publicKeyBytes)),
-                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            ]
-        )
-        guard pubStatus == errSecSuccess else { throw PqSecureStorageError.keychain(pubStatus) }
+        let pub = key.publicKeyBytes
+        let tag = try pubTag(type: type, requireBiometric: requireBiometric, pub: pub)
+        try persistSep(pubAccount: publicAccount(for: alias), privBase: privateAccount(for: alias), pub: pub,
+                       priv: key.dataRepresentation) { ver in
+            encodeGeneric(type: type, requireBiometric: requireBiometric, tag: tag, wrapVersion: ver)
+        }
+    }
 
-        let privStatus = upsertKeychain(
-            account: privateAccount(for: alias),
-            data: key.dataRepresentation,
-            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
-        )
+    // The private goes first, under the next account version when a key is already there, then the
+    // public moves to that version, then the old private goes. A failed write or a crash in between
+    // leaves the old pair. Writing the public first could leave a new public over the old private:
+    // sign uses one key and getPublicKey serves the other. dataRepresentation is SEP-wrapped
+    // ciphertext, so device-only/unlocked-only protection is enough for it.
+    private static func persistSep(pubAccount: String, privBase: String, pub: Data, priv: Data, generic: (Int) -> Data) throws {
+        let oldVer = try sepPrivVersion(pubAccount: pubAccount)
+        let newVer = KeyGeneric.nextPrivVersion(existing: oldVer)
+        let newAcct = KeyGeneric.privAccount(base: privBase, version: newVer)
+        let accessible: [String: Any] = [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        let privStatus = upsertKeychain(account: newAcct, data: priv, attrs: accessible)
         guard privStatus == errSecSuccess else { throw PqSecureStorageError.keychain(privStatus) }
+        var pubAttrs = accessible
+        pubAttrs[kSecAttrGeneric as String] = generic(newVer)
+        let pubStatus = upsertKeychain(account: pubAccount, data: pub, attrs: pubAttrs)
+        guard pubStatus == errSecSuccess else {
+            if oldVer != nil { SecItemDelete(baseQuery(account: newAcct) as CFDictionary) }
+            throw PqSecureStorageError.keychain(pubStatus)
+        }
+        if let old = oldVer {
+            SecItemDelete(baseQuery(account: KeyGeneric.privAccount(base: privBase, version: old)) as CFDictionary)
+        }
+    }
+
+    // version of the private the public entry points at, nil when there is no public entry. Any other
+    // Keychain error throws: reading it as "no key" would write the new private over the live one.
+    private static func sepPrivVersion(pubAccount: String) throws -> Int? {
+        var query = baseQuery(account: pubAccount)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let item = out as? [String: Any] else { throw PqSecureStorageError.keychain(status) }
+        let generic = (item[kSecAttrGeneric as String] as? Data).flatMap { decodeGeneric($0) }
+        return generic?.wrapVersion ?? -1
     }
 
     private static func loadMetadata(alias: String) throws -> KeyMetadata {
@@ -1032,14 +1061,14 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let decoded = decodeGeneric(typeData) else {
             throw PqSecureStorageError.keyNotFound
         }
-        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: -1)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: decoded.wrapVersion)
     }
 
     @available(iOS 26.0, *)
     private static func loadKey(alias: String, context: LAContext) throws -> PQKey {
         let meta = try loadMetadata(alias: alias)
 
-        var query = baseQuery(account: privateAccount(for: alias))
+        var query = baseQuery(account: KeyGeneric.privAccount(base: privateAccount(for: alias), version: meta.wrapVersion))
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -1051,7 +1080,10 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
         // hands the evaluated `context` to the SEP so it can check the access-control policy
         // baked in at generation time (`.biometryCurrentSet`) without prompting again
-        return try PQKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
+        let key = try PQKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
+        // an overwrite cut in half by 7.2.0 or older can leave the new public over the old private
+        guard key.publicKeyBytes == meta.publicKey else { throw PqSecureStorageError.keyMismatch }
+        return key
     }
 
     // MARK: - Wrapped (software) signing keys (Ed25519)
@@ -1332,23 +1364,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     @available(iOS 26.0, *)
     private static func persistKem(key: PQKemKey, type: String, alias: String, requireBiometric: Bool) throws {
-        // public first (see persist): keeps a failed private write healable instead of orphaning
-        let pubStatus = upsertKeychain(
-            account: kemPublicAccount(for: alias),
-            data: key.publicKeyBytes,
-            attrs: [
-                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: try pubTag(type: type, requireBiometric: requireBiometric, pub: key.publicKeyBytes)),
-                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            ]
-        )
-        guard pubStatus == errSecSuccess else { throw PqSecureStorageError.keychain(pubStatus) }
-
-        let privStatus = upsertKeychain(
-            account: kemPrivateAccount(for: alias),
-            data: key.dataRepresentation,
-            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
-        )
-        guard privStatus == errSecSuccess else { throw PqSecureStorageError.keychain(privStatus) }
+        let pub = key.publicKeyBytes
+        let tag = try pubTag(type: type, requireBiometric: requireBiometric, pub: pub)
+        try persistSep(pubAccount: kemPublicAccount(for: alias), privBase: kemPrivateAccount(for: alias), pub: pub,
+                       priv: key.dataRepresentation) { ver in
+            encodeGeneric(type: type, requireBiometric: requireBiometric, tag: tag, wrapVersion: ver)
+        }
     }
 
     private static func loadKemMetadata(alias: String) throws -> KeyMetadata {
@@ -1365,13 +1386,13 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let decoded = decodeGeneric(typeData) else {
             throw PqSecureStorageError.keyNotFound
         }
-        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: -1)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: decoded.wrapVersion)
     }
 
     @available(iOS 26.0, *)
     private static func loadKemKey(alias: String, context: LAContext) throws -> PQKemKey {
         let meta = try loadKemMetadata(alias: alias)
-        var query = baseQuery(account: kemPrivateAccount(for: alias))
+        var query = baseQuery(account: KeyGeneric.privAccount(base: kemPrivateAccount(for: alias), version: meta.wrapVersion))
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
@@ -1379,7 +1400,9 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard status == errSecSuccess, let blob = result as? Data else {
             throw PqSecureStorageError.keyNotFound
         }
-        return try PQKemKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
+        let key = try PQKemKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
+        guard key.publicKeyBytes == meta.publicKey else { throw PqSecureStorageError.keyMismatch }
+        return key
     }
 
     // MARK: secure storage (Keychain, silent write / gated read, ThisDeviceOnly)
