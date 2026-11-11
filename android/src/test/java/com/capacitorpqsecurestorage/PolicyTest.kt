@@ -252,4 +252,15 @@ class PolicyTest {
         assertFalse(Policy.deadKeyError(java.security.UnrecoverableKeyException("Key algorithm unknown")))
         assertFalse(Policy.deadKeyError(IllegalStateException("binder")))
     }
+
+    // an orphan key from a cancelled write protects no data, so clear() must not prompt for it
+    @Test
+    fun clearOnlyPromptsForKeysWithAnItem() {
+        assertEquals(listOf("a"), Policy.promptCandidates(listOf("a", "orphan"), setOf("a", "silent")) { it })
+    }
+
+    @Test
+    fun clearKeepsEveryKeyWhenANameCannotBeRead() {
+        assertEquals(listOf("a", "orphan"), Policy.promptCandidates(listOf("a", "orphan"), null) { it })
+    }
 }

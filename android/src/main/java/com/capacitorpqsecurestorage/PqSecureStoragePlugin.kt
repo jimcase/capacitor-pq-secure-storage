@@ -1404,6 +1404,15 @@ class PqSecureStoragePlugin : Plugin() {
             return call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
         }
         val reusable = Policy.reusableItemKey(existing, hasItem) { invalidated(it) }
+        // a key made here for a new name is dropped again if the write doesn't land (cancel, E_BUSY,
+        // error): left behind it would make clear() and removeItem prompt for an item that isn't there
+        val dropOrphan = {
+            if (reusable == null) try {
+                if (!storeItems().contains(nameTag(key))) keystore().deleteEntry(alias)
+            } catch (e: Exception) {
+                logd("setItem: orphan key delete failed", e)
+            }
+        }
         val itemKey: SecretKey = if (reusable != null) {
             reusable // reuse (an accessibility change on overwrite is ignored -- set at creation)
         } else {
@@ -1415,7 +1424,7 @@ class PqSecureStoragePlugin : Plugin() {
                 return call.reject("Store failed", "E_ENCRYPT")
             }
         }
-        encryptAndStore(call, key, value, itemKey, newBio, done)
+        encryptAndStore(call, key, value, itemKey, newBio) { ok -> if (!ok) dropOrphan(); done() }
     }
 
     // a reused bio key is dead after a biometric enrollment change; detect it so setItem recreates
@@ -1428,7 +1437,8 @@ class PqSecureStoragePlugin : Plugin() {
         false // other errors (e.g. needs auth) mean the key is still usable
     }
 
-    private fun encryptAndStore(call: PluginCall, key: String, value: String, itemKey: SecretKey, bio: Boolean, done: () -> Unit) {
+    // [done] runs once on every path, with whether the item landed
+    private fun encryptAndStore(call: PluginCall, key: String, value: String, itemKey: SecretKey, bio: Boolean, done: (Boolean) -> Unit) {
         try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, itemKey)
@@ -1437,25 +1447,25 @@ class PqSecureStoragePlugin : Plugin() {
                 cipher.updateAAD(key.toByteArray(Charsets.UTF_8))
                 val ct = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
                 val committed = storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
-                done()
+                done(committed)
                 if (committed) call.resolve() else call.reject("Store failed", "E_ENCRYPT")
             } else {
                 // a biometric item's own key gates the WRITE too (encrypt needs the key), so the
                 // prompt here is the same gate that blocks a silent bridge caller from overwriting it
                 val hostActivity = activity as? FragmentActivity
-                    ?: run { done(); return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY") }
+                    ?: run { done(false); return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY") }
                 authenticateCipher(hostActivity, cipher, "Authenticate to save your secret", call,
-                    onError = { done() }) { boundCipher ->
+                    onError = { done(false) }) { boundCipher ->
                     boundCipher.updateAAD(key.toByteArray(Charsets.UTF_8))
                     val ct = boundCipher.doFinal(value.toByteArray(Charsets.UTF_8))
                     val committed = storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
-                    done()
+                    done(committed)
                     if (committed) call.resolve() else call.reject("Store failed", "E_ENCRYPT")
                 }
             }
         } catch (e: Exception) {
             logd("setItem encrypt failed for key=$key", e)
-            done()
+            done(false)
             call.reject("Store failed", "E_ENCRYPT")
         }
     }
@@ -1537,7 +1547,8 @@ class PqSecureStoragePlugin : Plugin() {
                 call.reject("Remove failed", "E_REMOVE")
             }
         }
-        if (itemKey == null || !isAuthRequired(itemKey)) { del(); return }
+        // a key with no stored item (left by a cancelled write) guards no data: no prompt for it
+        if (itemKey == null || !isAuthRequired(itemKey) || !storeItems().contains(nameTag(key))) { del(); return }
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         try {
@@ -1587,14 +1598,17 @@ class PqSecureStoragePlugin : Plugin() {
     fun clear(call: PluginCall): Unit = guarded(call, "E_CLEAR") {
         val ks = keystore()
         val itemAliases = ks.aliases().toList().filter { it.startsWith(itemAliasPrefix) }
-        val bioKeys = itemAliases.mapNotNull { a ->
+        val bio = itemAliases.mapNotNull { a ->
             val k = try { ks.getKey(a, null) as? SecretKey } catch (e: Exception) {
                 // a dead key guards nothing; any other error rejects E_CLEAR
                 if (!Policy.deadKeyError(e)) throw e
                 null
             }
-            k?.takeIf { isAuthRequired(it) }
+            k?.takeIf { isAuthRequired(it) }?.let { a to it }
         }
+        // reading every name costs a Keystore op per item, so only when there is a biometric key
+        val withItem = if (bio.isEmpty()) emptySet() else itemAliasesWithItem()
+        val bioKeys = Policy.promptCandidates(bio, withItem) { it.first }.map { it.second }
         // prompt once, bound to a biometric key that can still unlock. A key dead after an enrollment
         // change guards nothing, and must not stand in for live biometric items.
         val bioKey = Policy.pickLiveBioKey(bioKeys) { invalidated(it) }
@@ -1617,6 +1631,18 @@ class PqSecureStoragePlugin : Plugin() {
             logd("clear failed", e)
             call.reject("Clear failed", "E_CLEAR")
         }
+    }
+
+    // Keystore aliases of the stored items, null when a stored name can't be read
+    private fun itemAliasesWithItem(): Set<String>? {
+        val out = HashSet<String>()
+        for ((_, v) in storeItems().all) {
+            val parts = (v as? String)?.split(".") ?: return null
+            if (parts.size != 3) return null
+            val name = try { decName(parts[0]) } catch (e: Exception) { return null }
+            out.add(itemKeyAlias(name))
+        }
+        return out
     }
 
     private fun doClearWipe() {
