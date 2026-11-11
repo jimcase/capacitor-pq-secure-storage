@@ -383,7 +383,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let type = call.getString("type") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
-        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard InputPolicy.cryptoInputWithinLimit(dataStr, maxBase64: Self.maxCryptoInputB64) else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let raw = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
@@ -456,7 +456,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
         guard let format = Self.formatArg(call) else { return }
-        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard InputPolicy.cryptoInputWithinLimit(dataStr, maxBase64: Self.maxCryptoInputB64) else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let raw = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
@@ -488,7 +488,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let dataStr = call.getString("data") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
-        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard InputPolicy.cryptoInputWithinLimit(dataStr, maxBase64: Self.maxCryptoInputB64) else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let raw = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
@@ -618,7 +618,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let pub = InputPolicy.base64Data(pubStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
-        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard InputPolicy.cryptoInputWithinLimit(dataStr, maxBase64: Self.maxCryptoInputB64) else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let raw = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
@@ -654,7 +654,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let dataStr = call.getString("data") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
-        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard InputPolicy.cryptoInputWithinLimit(dataStr, maxBase64: Self.maxCryptoInputB64) else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let frame = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
