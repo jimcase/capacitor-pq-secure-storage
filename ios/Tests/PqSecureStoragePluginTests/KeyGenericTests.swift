@@ -30,4 +30,16 @@ final class KeyGenericTests: XCTestCase {
         XCTAssertEqual(KeyGeneric.wrapPrivAccount(alias: "a", version: -1), "a.sigwrap.priv")
         XCTAssertEqual(KeyGeneric.wrapPrivAccount(alias: "a", version: 0), "a.sigwrap.priv.0")
     }
+
+    // secure enclave keys: same scheme, so an overwrite never leaves a new public over the old private
+    func testSepPrivateAccountKeepsThePlainNameBeforeVersioning() {
+        XCTAssertEqual(KeyGeneric.privAccount(base: "a.private", version: -1), "a.private")
+        XCTAssertEqual(KeyGeneric.privAccount(base: "a.kem.private", version: 2), "a.kem.private.2")
+    }
+
+    func testAFirstKeyStaysUnversionedAndAReplaceMovesToTheNextVersion() {
+        XCTAssertEqual(KeyGeneric.nextPrivVersion(existing: nil), -1)
+        XCTAssertEqual(KeyGeneric.nextPrivVersion(existing: -1), 0)
+        XCTAssertEqual(KeyGeneric.nextPrivVersion(existing: 4), 5)
+    }
 }
