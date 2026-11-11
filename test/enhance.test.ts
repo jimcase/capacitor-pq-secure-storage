@@ -177,3 +177,15 @@ describe('withPrefix', () => {
         expect([...items]).toEqual(['lib_a', 'lib_b', 'lib_c', 'host_x']);
     });
 });
+
+describe('shared instance prefix', () => {
+    it('clear() keeps the prefix it started with when setKeyPrefix runs meanwhile', async () => {
+        const { native, items } = stubNative();
+        const s = enhance(native);
+        await s.setKeyPrefix('lib_');
+        const done = s.clear();
+        await s.setKeyPrefix('');
+        await done;
+        expect([...items]).toEqual(['host_x']);
+    });
+});
