@@ -5,13 +5,14 @@ export const FRAME_VERSION = 2;
 export const FRAME_HEADER_LEN = 4;
 
 /** Suite ids of the v2 frame header. `0x01..0x0F` belong to `encryptTo`, `0x10..0x1F` to `encryptAtRest`. */
-export const FrameSuite = {
+// frozen: the web fallback reads it on every call, so a caller changing a value would change the frames
+export const FrameSuite = Object.freeze({
     KEM_MLKEM_768: 0x01,
     KEM_MLKEM_1024: 0x02,
     AT_REST_AES_GCM: 0x10,
     AT_REST_SEP_ECIES: 0x11,
     AT_REST_SEP_MLKEM: 0x12,
-} as const;
+} as const);
 export type FrameSuite = (typeof FrameSuite)[keyof typeof FrameSuite];
 
 export interface FrameSuiteInfo {
@@ -22,40 +23,40 @@ export interface FrameSuiteInfo {
 }
 
 // the plugin's frame suite table, for anyone who wants to inspect a frame.
-export const FRAME_SUITES: Record<FrameSuite, FrameSuiteInfo> = {
-    [FrameSuite.KEM_MLKEM_768]: {
+export const FRAME_SUITES: Readonly<Record<FrameSuite, Readonly<FrameSuiteInfo>>> = Object.freeze({
+    [FrameSuite.KEM_MLKEM_768]: Object.freeze({
         id: FrameSuite.KEM_MLKEM_768,
         method: 'encryptTo',
         description: 'ML-KEM-768 ct (1088) || nonce (12) || ChaCha20-Poly1305 ct || tag (16). Header is the AAD.',
-    },
-    [FrameSuite.KEM_MLKEM_1024]: {
+    }),
+    [FrameSuite.KEM_MLKEM_1024]: Object.freeze({
         id: FrameSuite.KEM_MLKEM_1024,
         method: 'encryptTo',
         description: 'ML-KEM-1024 ct (1568) || nonce (12) || ChaCha20-Poly1305 ct || tag (16). Header is the AAD.',
-    },
-    [FrameSuite.AT_REST_AES_GCM]: {
+    }),
+    [FrameSuite.AT_REST_AES_GCM]: Object.freeze({
         id: FrameSuite.AT_REST_AES_GCM,
         method: 'encryptAtRest',
         description: 'nonce (12) || AES-256-GCM ct || tag (16). Header is the AAD. Android and web.',
-    },
-    [FrameSuite.AT_REST_SEP_ECIES]: {
+    }),
+    [FrameSuite.AT_REST_SEP_ECIES]: Object.freeze({
         id: FrameSuite.AT_REST_SEP_ECIES,
         method: 'encryptAtRest',
         description:
             'ECIES under a Secure Enclave P-256 key, same output as v1. The header is not authenticated. iOS below 26, and iOS 26+ when the Secure Enclave cannot make an ML-KEM-768 key.',
-    },
-    [FrameSuite.AT_REST_SEP_MLKEM]: {
+    }),
+    [FrameSuite.AT_REST_SEP_MLKEM]: Object.freeze({
         id: FrameSuite.AT_REST_SEP_MLKEM,
         method: 'encryptAtRest',
         description:
             'nonce (12) || AES-256-GCM ct || tag (16). Header is the AAD. The key comes from a Secure Enclave ML-KEM-768 decapsulation. iOS 26+.',
-    },
-};
+    }),
+});
 
-export const KEM_SUITE: Record<KemType, FrameSuite> = {
+export const KEM_SUITE: Readonly<Record<KemType, FrameSuite>> = Object.freeze({
     PQC_MLKEM_768: FrameSuite.KEM_MLKEM_768,
     PQC_MLKEM_1024: FrameSuite.KEM_MLKEM_1024,
-};
+});
 
 export const frameHeader = (suite: number): Uint8Array =>
     new Uint8Array([FRAME_MAGIC[0], FRAME_MAGIC[1], FRAME_VERSION, suite]);
@@ -66,7 +67,7 @@ export function parseFrameHeader(frame: Uint8Array): { version: number; suite: n
     return { version: frame[2], suite: frame[3] };
 }
 
-// own copy, FRAME_SUITES is exported and a caller can change it
+// own copy, so the read rule never depends on the exported tables
 const KNOWN_SUITES = new Set<number>([0x01, 0x02, 0x10, 0x11, 0x12]);
 export const isKnownSuite = (suite: number) => KNOWN_SUITES.has(suite);
 export const isKemSuite = (suite: number) => suite >= 0x01 && suite <= 0x0f;

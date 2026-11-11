@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     FRAME_SUITES,
+    FrameSuite,
     KEM_SUITE,
     formatOption,
     frameHeader,
@@ -30,19 +31,14 @@ describe('frame header', () => {
         expect(isAtRestSuite(0x10) && isAtRestSuite(0x1f) && !isAtRestSuite(0x20)).toBe(true);
         expect(KEM_SUITE.PQC_MLKEM_1024).toBe(0x02);
     });
-    it('keeps its own list of known suites when FRAME_SUITES is changed', () => {
+    it('knows exactly the five suites, and nobody can add one to FRAME_SUITES', () => {
         const known = () => Array.from({ length: 256 }, (_, i) => i).filter(isKnownSuite);
         expect(known()).toEqual([0x01, 0x02, 0x10, 0x11, 0x12]);
         const table = FRAME_SUITES as Record<number, unknown>;
-        const saved = table[0x11];
-        try {
+        expect(() => {
             table[0x20] = { id: 0x20, method: 'encryptAtRest', description: 'x' };
-            delete table[0x11];
-            expect(known()).toEqual([0x01, 0x02, 0x10, 0x11, 0x12]);
-        } finally {
-            delete table[0x20];
-            table[0x11] = saved;
-        }
+        }).toThrow(TypeError);
+        expect(known()).toEqual([0x01, 0x02, 0x10, 0x11, 0x12]);
     });
     it('reads the format option like the boolean options', () => {
         expect(formatOption(undefined)).toBe(1);
@@ -114,5 +110,18 @@ describe('openFrame', () => {
             ok: false,
             unsupported: false,
         });
+    });
+});
+
+describe('frame suite tables', () => {
+    // web.ts reads FrameSuite on every call, so a caller changing it would change the frames
+    it('are frozen', () => {
+        expect(Object.isFrozen(FrameSuite)).toBe(true);
+        expect(Object.isFrozen(KEM_SUITE)).toBe(true);
+        expect(Object.isFrozen(FRAME_SUITES)).toBe(true);
+        for (const s of Object.values(FRAME_SUITES)) expect(Object.isFrozen(s)).toBe(true);
+        expect(() => {
+            (FrameSuite as { AT_REST_AES_GCM: number }).AT_REST_AES_GCM = 0x11;
+        }).toThrow(TypeError);
     });
 });
