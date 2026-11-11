@@ -123,7 +123,16 @@ class PqSecureStoragePlugin : Plugin() {
                     val wrapKey = createFreshAesKey(Policy.sigWrapAlias(alias, newVer), requireBiometric)
                     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                     cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
-                    val persist = { c: Cipher ->
+                    val persist = persist@{ c: Cipher ->
+                        // a hardware key made while the prompt was open would leave the alias with two
+                        // keys that no overwrite can ever replace
+                        if (keystore().containsAlias(alias)) {
+                            seed.fill(0)
+                            try { keystore().deleteEntry(Policy.sigWrapAlias(alias, newVer)) } catch (e: Exception) { logd("sig wrap cleanup failed", e) }
+                            sigGenerating.remove(alias)
+                            call.reject("Alias already exists", "E_ALIAS_EXISTS")
+                            return@persist
+                        }
                         val wrapped = c.iv + c.doFinal(seed)
                         seed.fill(0)
                         val committed = sigPrefs().edit()
@@ -371,6 +380,8 @@ class PqSecureStoragePlugin : Plugin() {
         // one alias, one key: a wrapped Ed25519 key under this alias would shadow the hardware key in
         // getPublicKey, and an overwrite does not change the kind of custody
         if (sigPrefs().contains(sigPubKey(alias))) return call.reject("Alias already exists", "E_ALIAS_EXISTS")
+        // a wrapped key being made under this alias isn't in prefs until its prompt is approved
+        if (sigGenerating.contains(alias)) return call.reject("Key generation in progress, retry", "E_BUSY")
         val exists = ks.containsAlias(alias)
         if (exists && !overwrite) {
             // alias may back a live identity already -- refuse to silently clobber it
