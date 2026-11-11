@@ -204,4 +204,34 @@ class PolicyTest {
     @Test fun aPromptCanStartInTheForeground() { assertTrue(Policy.promptCanStart(stateSaved = false, finishing = false)) }
     @Test fun aPromptCannotStartOnceTheActivityIsStopped() { assertFalse(Policy.promptCanStart(stateSaved = true, finishing = false)) }
     @Test fun aPromptCannotStartOnAFinishingActivity() { assertFalse(Policy.promptCanStart(stateSaved = false, finishing = true)) }
+
+    // android deletes the alias of a failed keygen, and on a replace that alias still holds the old key
+    @Test
+    fun aReplaceThatFailsTheTrialNeverTouchesTheRealAlias() {
+        val calls = mutableListOf<String>()
+        try {
+            Policy.replaceKey(true, trial = { calls.add("trial"); throw IllegalStateException("keymint") },
+                cleanup = { calls.add("cleanup") }, real = { calls.add("real") })
+            fail("should throw")
+        } catch (e: IllegalStateException) {
+        }
+        assertEquals(listOf("trial", "cleanup"), calls)
+    }
+
+    @Test
+    fun aReplaceRunsTheTrialThenCleansUpThenTheRealKeygen() {
+        val calls = mutableListOf<String>()
+        assertEquals("k", Policy.replaceKey(true, trial = { calls.add("trial") }, cleanup = { calls.add("cleanup") },
+            real = { calls.add("real"); "k" }))
+        assertEquals(listOf("trial", "cleanup", "real"), calls)
+    }
+
+    @Test
+    fun aNewAliasSkipsTheTrial() {
+        val calls = mutableListOf<String>()
+        Policy.replaceKey(false, trial = { calls.add("trial") }, cleanup = { calls.add("cleanup") }, real = { calls.add("real") })
+        assertEquals(listOf("real"), calls)
+    }
+
+    @Test fun theTrialAliasIsReservedAndPerAlias() { assertEquals("__pq_trial_id", Policy.trialAlias("id")) }
 }

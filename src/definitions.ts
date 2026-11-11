@@ -107,8 +107,12 @@ export interface PqSecureStoragePlugin {
      * software key whose private is encrypted by a hardware key and opened only to sign. Rejects if
      * the alias exists unless `overwrite` is true. Distinct aliases give independent keypairs (use
      * that for KERI rotation, one alias per key). On Android an ML-DSA type on a device without
-     * Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first. That list is tested with a
-     * key without biometric, so a biometric key (the default) can still reject `E_KEYGEN`.
+     * Keystore ML-DSA rejects `E_KEYGEN` before any prompt: check `supportedVariants` first. That list
+     * is tested with a key without biometric, so a biometric key (the default) can still reject
+     * `E_KEYGEN`. On Android a failed keygen deletes its alias, so an ML-DSA or ECDSA `overwrite`
+     * first makes the new key under a throwaway alias and keeps the old key when that fails. A failure
+     * in the second keygen only (rare, a passing Keystore fault) can still lose the old key: after
+     * `E_KEYGEN` on an overwrite, read `getPublicKey` before you assume the old key is there.
      *
      * `requireBiometric` (default `true`) is baked into the key: `true` makes every `sign` prompt
      * for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
