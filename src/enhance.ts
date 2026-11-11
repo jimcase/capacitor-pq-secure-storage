@@ -61,7 +61,9 @@ function scoped(
             return { keys: p ? keys.filter((k) => k.startsWith(p)).map((k) => k.slice(p.length)) : keys };
         },
         async clear(): Promise<void> {
-            if (!state.prefix) {
+            // read once: a setKeyPrefix('') during the awaits below must not widen the wipe
+            const p = state.prefix;
+            if (!p) {
                 await native.clear();
                 return;
             }
@@ -70,7 +72,7 @@ function scoped(
             // keep going after a failure so one cancel does not leave the rest.
             let failed: { reason: unknown } | undefined;
             for (const k of keys) {
-                if (!k.startsWith(state.prefix)) continue;
+                if (!k.startsWith(p)) continue;
                 try {
                     await native.removeItem({ key: k });
                 } catch (reason) {
