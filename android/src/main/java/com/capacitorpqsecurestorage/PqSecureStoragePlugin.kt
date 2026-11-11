@@ -169,7 +169,12 @@ class PqSecureStoragePlugin : Plugin() {
                     call.reject("Key generation failed", "E_KEYGEN")
                 }
             }
-            val existingWrap = if (exists) (try { keystore().getKey(sigWrapAliasFor(alias), null) as? SecretKey } catch (e: Exception) { null }) else null
+            // a dead wrap key skips the gate like an invalidated one; any other Keystore error must stop
+            // here, read as "no key" it would replace a biometric key with no prompt
+            val existingWrap = if (exists) (try { keystore().getKey(sigWrapAliasFor(alias), null) as? SecretKey } catch (e: Exception) {
+                if (!Policy.deadKeyError(e)) throw e
+                null
+            }) else null
             if (existingWrap != null && secretKeyRequiresAuth(existingWrap)) {
                 val host = activity as? FragmentActivity
                 if (host == null) {
@@ -1360,12 +1365,19 @@ class PqSecureStoragePlugin : Plugin() {
         // these hit the Keystore; a throw here would skip done() and leave the key latched as busy
         val alias: String
         val existing: SecretKey?
+        var dead = false
         val hasItem: Boolean
         val itemsNow: Int
         val charsNow: Long
         try {
             alias = itemKeyAlias(key)
-            existing = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
+            // only a key killed by an enrollment change may read as gone. Any other error stops the
+            // write, or a silent setItem could replace a biometric item it failed to look up.
+            existing = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) {
+                if (!Policy.deadKeyError(e)) throw e
+                dead = true
+                null
+            }
             val tag = nameTag(key)
             hasItem = storeItems().contains(tag)
             val all = storeItems().all
@@ -1385,7 +1397,9 @@ class PqSecureStoragePlugin : Plugin() {
         // when the key was invalidated by an enrollment change (isAuthRequired reads metadata, still
         // valid on an invalidated key), so a bio item can't be silently recreated as silent. Only
         // when a real item exists -- an orphan key from a cancelled write shouldn't block a fresh one.
-        if (existing != null && hasItem && isAuthRequired(existing) != newBio) {
+        // a dead key had auth (that's what enrollment kills), so only a biometric write may replace it
+        val tierChange = if (existing != null) isAuthRequired(existing) != newBio else dead && !newBio
+        if (hasItem && tierChange) {
             done()
             return call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
         }
@@ -1472,8 +1486,11 @@ class PqSecureStoragePlugin : Plugin() {
         }
         val parts = stored.split(".")
         if (parts.size != 3) return call.reject("Store item corrupt", "E_TAMPERED")
-        val itemKey = (try { keystore().getKey(itemKeyAlias(key), null) as? SecretKey } catch (e: Exception) { null })
-            ?: return call.reject("Store key missing", "E_KEY_NOT_FOUND")
+        val itemKey = try { keystore().getKey(itemKeyAlias(key), null) as? SecretKey } catch (e: Exception) {
+            // any other error goes to guarded (E_DECRYPT): "key missing" would tell the host the item is lost
+            if (!Policy.deadKeyError(e)) throw e
+            return call.reject("Biometric enrollment changed; store key invalidated", "E_KEY_INVALIDATED")
+        } ?: return call.reject("Store key missing", "E_KEY_NOT_FOUND")
         try {
             val iv = Base64.decode(parts[1], Base64.DEFAULT)
             val ct = Base64.decode(parts[2], Base64.DEFAULT)
@@ -1505,7 +1522,12 @@ class PqSecureStoragePlugin : Plugin() {
     fun removeItem(call: PluginCall): Unit = guarded(call, "E_REMOVE") {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
         val alias = itemKeyAlias(key)
-        val itemKey = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
+        // a dead key is deleted like an invalidated one. Any other error goes to guarded (E_REMOVE):
+        // read as "no key" it would delete a biometric item with no prompt
+        val itemKey = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) {
+            if (!Policy.deadKeyError(e)) throw e
+            null
+        }
         val del = {
             val removed = storeItems().edit().remove(nameTag(key)).commit()
             if (removed) {
@@ -1565,7 +1587,14 @@ class PqSecureStoragePlugin : Plugin() {
     fun clear(call: PluginCall): Unit = guarded(call, "E_CLEAR") {
         val ks = keystore()
         val itemAliases = ks.aliases().toList().filter { it.startsWith(itemAliasPrefix) }
-        val bioKeys = itemAliases.mapNotNull { a -> (ks.getKey(a, null) as? SecretKey)?.takeIf { isAuthRequired(it) } }
+        val bioKeys = itemAliases.mapNotNull { a ->
+            val k = try { ks.getKey(a, null) as? SecretKey } catch (e: Exception) {
+                // a dead key guards nothing; any other error rejects E_CLEAR
+                if (!Policy.deadKeyError(e)) throw e
+                null
+            }
+            k?.takeIf { isAuthRequired(it) }
+        }
         // prompt once, bound to a biometric key that can still unlock. A key dead after an enrollment
         // change guards nothing, and must not stand in for live biometric items.
         val bioKey = Policy.pickLiveBioKey(bioKeys) { invalidated(it) }
