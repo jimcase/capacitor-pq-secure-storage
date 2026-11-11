@@ -189,3 +189,22 @@ describe('shared instance prefix', () => {
         expect([...items]).toEqual(['host_x']);
     });
 });
+
+describe('store key', () => {
+    // the natives answer E_MISSING_PARAMS; the prefix join used to turn it into the name "undefined"
+    it('rejects a key that is not a string instead of storing it under its text', async () => {
+        const s = make();
+        for (const bad of [undefined, null, 42]) {
+            const key = bad as unknown as string;
+            await expect(s.setItem({ key, value: 'x' })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+            await expect(s.getItem({ key })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+            await expect(s.hasItem({ key })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+            await expect(s.removeItem({ key })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+            await expect(s.withPrefix('lib_').setItem({ key, value: 'x' })).rejects.toMatchObject({
+                code: 'E_MISSING_PARAMS',
+            });
+            await expect(s.setJSON({ key, value: 1 })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        }
+        expect((await s.keys()).keys).toEqual([]);
+    });
+});
