@@ -120,8 +120,16 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         }
     }
 
+    // the natives read string options with getString, so a missing one and one of another type are the
+    // same E_MISSING_PARAMS. Here a number would be used as is (sign would sign its digits)
+    private str(name: string, value: unknown): string {
+        if (typeof value !== 'string') this.fail('E_MISSING_PARAMS', `Missing ${name}`);
+        return value;
+    }
+
     // same charset as native; blocks the plugin's own namespace and reserved prefix
-    private safeAlias(alias: string): string {
+    private safeAlias(value: unknown): string {
+        const alias = this.str('keyAlias', value);
         if (!/^[A-Za-z0-9_-]{1,64}$/.test(alias) || alias.startsWith('__pq')) {
             this.fail('E_BAD_ALIAS', 'Invalid key alias');
         }
@@ -142,7 +150,8 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
     }
 
     // reject an oversized input before decoding it (the base64 string bounds the decoded size)
-    private decodeCapped(b64: string): Uint8Array {
+    private decodeCapped(value: unknown): Uint8Array {
+        const b64 = this.str('data', value);
         if (b64.length > MAX_CRYPTO_INPUT * 2) this.fail('E_INPUT_TOO_LARGE', 'Input too large');
         const u = fromB64(b64);
         if (u.length > MAX_CRYPTO_INPUT) this.fail('E_INPUT_TOO_LARGE', 'Input too large');
@@ -154,7 +163,19 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         return v === null ? null : fromB64(v);
     }
     private put(k: string, v: Uint8Array): void {
-        this.store.setItem(k, toB64(v));
+        this.write(k, toB64(v));
+    }
+    // a full localStorage throws a DOMException with only a number code, map it to the native one
+    private write(k: string, v: string): void {
+        try {
+            this.store.setItem(k, v);
+        } catch (e) {
+            const name = (e as { name?: unknown } | null)?.name;
+            if (name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED') {
+                this.fail('E_STORE_FULL', 'Browser storage is full');
+            }
+            throw e;
+        }
     }
 
     // frame = nonce(12) || gcm(includes tag), with optional associated data
@@ -183,7 +204,7 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
 
     // one blob per keypair so the write is atomic (no half-written sk-without-pk on quota errors)
     private putKeypair(prefix: string, alias: string, sk: Uint8Array, pk: Uint8Array, type: string): void {
-        this.store.setItem(`${prefix}.${alias}`, JSON.stringify({ sk: toB64(sk), pk: toB64(pk), type }));
+        this.write(`${prefix}.${alias}`, JSON.stringify({ sk: toB64(sk), pk: toB64(pk), type }));
     }
     private getKeypair(prefix: string, alias: string): { sk: Uint8Array; pk: Uint8Array; type: string } | null {
         const raw = this.store.getItem(`${prefix}.${alias}`);
@@ -322,7 +343,7 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
     }): Promise<{ ciphertext: string }> {
         const fmt = this.formatArg(options.format);
         const input = this.decodeCapped(options.data);
-        if (options.recipientPublicKey.length > MAX_RECIPIENT_KEY_B64) {
+        if (this.str('recipientPublicKey', options.recipientPublicKey).length > MAX_RECIPIENT_KEY_B64) {
             this.fail('E_INVALID_ARGS', 'Invalid public key');
         }
         const kem = kemOf(options.type);
@@ -377,6 +398,8 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         requireBiometric?: boolean;
         accessibility?: string;
     }): Promise<void> {
+        this.str('key', options.key);
+        this.str('value', options.value);
         this.checkBool('requireBiometric', options.requireBiometric);
         // same bounds as native so the fallback can't be flooded either
         if (options.key.length === 0 || options.key.length > 512 || options.value.length > 256 * 1024) {
@@ -390,6 +413,7 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
     }
 
     async getItem(options: { key: string }): Promise<{ value: string | null }> {
+        this.str('key', options.key);
         const frame = this.get(`pqss.store.${options.key}`);
         const key = this.get(STORE_KEY);
         if (!frame || !key) return { value: null };
@@ -398,10 +422,12 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
     }
 
     async removeItem(options: { key: string }): Promise<void> {
+        this.str('key', options.key);
         this.store.removeItem(`pqss.store.${options.key}`);
     }
 
     async hasItem(options: { key: string }): Promise<{ exists: boolean }> {
+        this.str('key', options.key);
         return { exists: this.store.getItem(`pqss.store.${options.key}`) !== null };
     }
 
