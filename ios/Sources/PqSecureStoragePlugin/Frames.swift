@@ -90,6 +90,15 @@ enum Frames {
         }
     }
 
+    // decryptAtRest's outdated flag. v1 always is. A 0x12 frame that opened is on the best suite there
+    // is, so it never runs the probe: a probe that fails once would read 0x11 and send the app to
+    // write that data again in the classical suite.
+    static func atRestOutdated(readAs: Int, suite: UInt8?, deviceSuite: () -> UInt8) -> Bool {
+        if readAs == 1 { return true }
+        if suite == atRestSepMlkem { return false }
+        return suite != deviceSuite()
+    }
+
     // AEAD with the header as AAD. The body is nonce || ct || tag, the caller adds the header (and the
     // kem ct for encryptTo).
     static func sealGcm(_ plain: Data, key: SymmetricKey, header: Data) throws -> Data {

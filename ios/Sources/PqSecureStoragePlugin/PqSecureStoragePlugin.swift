@@ -463,7 +463,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
-            if format == 2, #available(iOS 26.0, *), Self.atRestSuite() == Frames.atRestSepMlkem {
+            if format == 2, #available(iOS 26.0, *), Self.writesMlkem(alias: alias) {
                 let header = Frames.header(suite: Frames.atRestSepMlkem)
                 let body = try Frames.sealGcm(raw, key: try Self.atRestKemKey(alias: alias, create: true), header: header)
                 return call.resolve(["ciphertext": (header + body).base64EncodedString()])
@@ -535,7 +535,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         )
         switch opened {
         case .ok(let plain, let readAs):
-            call.resolve(["plaintext": plain.base64EncodedString(), "outdated": readAs == 1 || h?.suite != Self.atRestSuite()])
+            call.resolve(["plaintext": plain.base64EncodedString(),
+                          "outdated": Frames.atRestOutdated(readAs: readAs, suite: h?.suite) { Self.atRestSuite() }])
         case .failed(let unsupported):
             if unsupported {
                 call.reject("Unsupported frame", "E_UNSUPPORTED")
@@ -1298,6 +1299,14 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
         return atRestMlkemOk ? Frames.atRestSepMlkem : Frames.atRestSepEcies
+    }
+
+    // an alias that has its ML-KEM item keeps 0x12 even when the probe fails this time, so a passing
+    // SEP failure never moves its data to the classical suite
+    @available(iOS 26.0, *)
+    private static func writesMlkem(alias: String) -> Bool {
+        if (try? atRestKemItem(alias: alias, create: false)) != nil { return true }
+        return atRestSuite() == Frames.atRestSepMlkem
     }
 
     // One generic item per alias, kemCt (1088) || dataRepresentation, so creating it is one write. The

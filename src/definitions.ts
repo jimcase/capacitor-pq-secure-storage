@@ -92,7 +92,8 @@ export interface HardwareCapabilities {
      * or the web fallback. `0x11`: ECIES under a Secure Enclave P-256 key (iOS below 26, or iOS 26+
      * when the Secure Enclave cannot create an ML-KEM-768 key). `0x12`: AES-256-GCM with a key from
      * a Secure Enclave ML-KEM-768 decapsulation (iOS 26+). The iOS value is probed once per process
-     * when the probe succeeds; a failed probe runs again on the next call.
+     * when the probe succeeds; a failed probe runs again on the next call. An alias that already has
+     * its ML-KEM key keeps getting `0x12` from `format: 2` even while that probe fails.
      */
     atRestSuite: number;
 }
@@ -180,8 +181,9 @@ export interface PqSecureStoragePlugin {
      * frame from a newer version of the plugin.
      *
      * `outdated` is `true` when the blob was read as a plain (format 1) frame or its suite is not
-     * the current `atRestSuite`. Re-encrypt it with `format: 2` and store it again to migrate. An
-     * app that never passes `format: 2` will see `outdated: true` on every read.
+     * the current `atRestSuite`. A `0x12` frame that opens is never outdated (it is the best suite).
+     * Re-encrypt it with `format: 2` and store it again to migrate. An app that never passes
+     * `format: 2` will see `outdated: true` on every read.
      */
     decryptAtRest(options: { keyAlias: string; data: string }): Promise<{ plaintext: string; outdated: boolean }>;
 
