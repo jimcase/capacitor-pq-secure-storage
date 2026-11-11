@@ -608,3 +608,43 @@ describe('web error codes', () => {
         await expect(web().getPublicKey({ keyAlias: 'nope' })).rejects.toThrow('Key not found');
     });
 });
+
+describe('web storage and argument types', () => {
+    // a full localStorage throws a DOMException with a number code, not one of ours
+    class FullStorage extends MemoryStorage {
+        setItem() {
+            throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+        }
+    }
+
+    it('answers E_STORE_FULL when the browser storage is full', async () => {
+        const pq = new PqSecureStorageWeb(new FullStorage());
+        await expect(pq.setItem({ key: 'k', value: 'v' })).rejects.toMatchObject({ code: 'E_STORE_FULL' });
+        await expect(pq.generateKeyPair({ keyAlias: 'a', type: 'ED25519' })).rejects.toMatchObject({
+            code: 'E_STORE_FULL',
+        });
+        await expect(pq.generateKemKeyPair({ keyAlias: 'a', type: 'PQC_MLKEM_768' })).rejects.toMatchObject({
+            code: 'E_STORE_FULL',
+        });
+        await expect(pq.encryptAtRest({ keyAlias: 'a', data: b64('x') })).rejects.toMatchObject({
+            code: 'E_STORE_FULL',
+        });
+    });
+
+    it('rejects an argument of the wrong type with E_MISSING_PARAMS like the natives', async () => {
+        const pq = web();
+        await pq.generateKeyPair({ keyAlias: 's', type: 'ED25519' });
+        const n = 1234 as unknown as string;
+        await expect(pq.sign({ keyAlias: 's', data: n, type: 'ED25519' })).rejects.toMatchObject({
+            code: 'E_MISSING_PARAMS',
+        });
+        await expect(pq.getPublicKey({ keyAlias: n })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        await expect(pq.setItem({ key: n, value: 'v' })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        await expect(pq.setItem({ key: 'k', value: n })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        await expect(pq.getItem({ key: n })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        await expect(
+            pq.encryptTo({ recipientPublicKey: n, type: 'PQC_MLKEM_768', data: b64('x') }),
+        ).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        expect((await pq.keys()).keys).toEqual([]);
+    });
+});

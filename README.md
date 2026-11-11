@@ -498,8 +498,9 @@ prefs cannot be pulled/edited via `adb backup`/`restore`.
 | iOS `0x12` key material | about 2.5 KB in the Keychain per alias (2577 bytes on an iPhone 16 / iOS 27), made once | none |
 | Frames per AES at-rest key (Android, web, iOS `0x12`) | 2^32 (12-byte random nonce) | not enforced |
 
-Hardware signing keys (ML-DSA, ECDSA) have no cap in the plugin, and iOS and the web have no store
-cap beyond the per-item bounds. There is no call to delete a signing, KEM or at-rest key. Signing
+Hardware signing keys (ML-DSA, ECDSA) have no cap in the plugin, and iOS has no store cap beyond the
+per-item bounds. The web fallback is bounded by the browser storage quota (about 5 MB in most
+browsers): a write past it rejects `E_STORE_FULL`. There is no call to delete a signing, KEM or at-rest key. Signing
 and KEM keys can be replaced with `overwrite: true`.
 
 ## Security model
@@ -1109,15 +1110,15 @@ Every rejection carries a `code`:
 | `E_CLEAR` | `clear` failed |
 | `E_TIER_MISMATCH` | `setItem` on an item stored with a different `requireBiometric` (call `removeItem` first) |
 | `E_BUSY` | Android: a keygen for the same alias, a write of the same item, or a biometric prompt is already in flight |
-| `E_STORE_FULL` | Android: 512 items / 16 MiB per store, and 256 KEM aliases and 256 wrapped Ed25519 aliases |
+| `E_STORE_FULL` | Android: 512 items / 16 MiB per store, and 256 KEM aliases and 256 wrapped Ed25519 aliases. Web: the browser storage quota is full |
 | `E_INPUT_TOO_LARGE` | Base64 input above the 10 MiB decoded cap |
 
 The web fallback uses the same codes for the same failures, but only these: `E_ALIAS_EXISTS`,
 `E_BAD_ALIAS`, `E_BAD_CIPHERTEXT`, `E_DECRYPT`, `E_ENCRYPT`, `E_INPUT_TOO_LARGE`, `E_INVALID_ARGS`,
-`E_KEY_NOT_FOUND`, `E_TAMPERED`, `E_TYPE_MISMATCH` and `E_UNSUPPORTED`. It has no biometrics, so it
-never raises `E_AUTH_FAILED` or `E_BIOMETRY_UNAVAILABLE`. It does not check for missing arguments, so
-one can throw a plain `TypeError`, and a few failures on corrupted browser storage are not coded
-either.
+`E_KEY_NOT_FOUND`, `E_MISSING_PARAMS`, `E_STORE_FULL`, `E_TAMPERED`, `E_TYPE_MISMATCH` and
+`E_UNSUPPORTED`. It has no biometrics, so it never raises `E_AUTH_FAILED` or `E_BIOMETRY_UNAVAILABLE`.
+A call with no options object at all can still throw a plain `TypeError`, and a few failures on
+corrupted browser storage are not coded either.
 
 ## Testing
 
