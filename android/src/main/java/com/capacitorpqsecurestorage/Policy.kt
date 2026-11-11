@@ -99,6 +99,15 @@ internal object Policy {
     // user aliases can't start with __pq, so this never hits a real key
     fun trialAlias(alias: String): String = "__pq_trial_$alias"
 
+    // KeyStore.getKey gives null only for a missing key. AndroidKeyStoreSpi turns a key killed by an
+    // enrollment change into a bare UnrecoverableKeyException with this message, and every other
+    // keystore2 error into one with the KeyStoreException as cause. Only the first may pass as "no
+    // key to protect", the others say nothing about the key.
+    private const val DEAD_KEY_MESSAGE = "User changed or deleted their auth credentials"
+
+    fun deadKeyError(e: Exception): Boolean =
+        e is java.security.UnrecoverableKeyException && e.cause == null && e.message == DEAD_KEY_MESSAGE
+
     const val MAX_STORE_ITEMS = 512
     const val MAX_STORE_TOTAL_CHARS = 16 * 1024 * 1024
     const val MAX_ALIASES_PER_KIND = 256

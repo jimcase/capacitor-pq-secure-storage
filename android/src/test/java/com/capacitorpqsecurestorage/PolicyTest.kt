@@ -234,4 +234,22 @@ class PolicyTest {
     }
 
     @Test fun theTrialAliasIsReservedAndPerAlias() { assertEquals("__pq_trial_id", Policy.trialAlias("id")) }
+
+    // AndroidKeyStoreSpi.engineGetKey: a dead key comes back as a bare exception with this message
+    @Test
+    fun aKeyKilledByAnEnrollmentChangeIsDead() {
+        assertTrue(Policy.deadKeyError(java.security.UnrecoverableKeyException("User changed or deleted their auth credentials")))
+    }
+
+    @Test
+    fun anyOtherKeystoreErrorIsNotADeadKey() {
+        val withCause = java.security.UnrecoverableKeyException("Failed to obtain information about key")
+        withCause.initCause(IllegalStateException("keystore2"))
+        assertFalse(Policy.deadKeyError(withCause))
+        val sameTextWithCause = java.security.UnrecoverableKeyException("User changed or deleted their auth credentials")
+        sameTextWithCause.initCause(IllegalStateException("x"))
+        assertFalse(Policy.deadKeyError(sameTextWithCause))
+        assertFalse(Policy.deadKeyError(java.security.UnrecoverableKeyException("Key algorithm unknown")))
+        assertFalse(Policy.deadKeyError(IllegalStateException("binder")))
+    }
 }
