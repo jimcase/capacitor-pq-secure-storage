@@ -414,6 +414,49 @@ iOS has no `E_BUSY` latch, so these record what happens.
   the device harness (an extra spec for USB phones, kept outside the repo), with a `format: 2` variant
   of its web and device cases.
 
+## Third audit (2026-11-11)
+
+Checks for the fixes of the third audit. The code is in, but none of these paths runs in a unit test:
+they need the Keystore, the Keychain or a real prompt.
+
+- [ ] **H1.** [manual] Android, P-2: on a phone without Keystore ML-DSA (the Samsung A57), make an
+  ECDSA key, then `generateKeyPair` with `PQC_MLDSA_65` and `overwrite: true`. It rejects `E_KEYGEN`
+  with no prompt, and `getPublicKey` still returns the ECDSA key. On a phone with ML-DSA, an ML-DSA
+  overwrite works and leaves no `__pq_trial_` alias in the Keystore.
+- [ ] **H2.** [manual] Android, P-1: with a biometric key, call `sign` from the app state listener
+  (app going to the background) or about 2 s after pressing Home. Come back. The first call has
+  rejected `E_AUTH_FAILED`, and a new `sign` shows its prompt (no `E_BUSY`).
+- [ ] **H3.** [manual] Android, P-5: cancel a biometric `setItem` on a new name, then `clear()` on a
+  store that holds one silent item: no prompt. `removeItem` of the cancelled name: no prompt.
+- [ ] **H4.** [manual] Android, P-6: start a biometric Ed25519 `generateKeyPair`, and while its prompt
+  is open run an ECDSA `generateKeyPair` on the same alias: it rejects `E_BUSY`. Approve the prompt:
+  the Ed25519 key is made and an overwrite of it still works.
+- [ ] **H5.** [manual] Android, P-4: with the phone locked, and after enrolling a new fingerprint,
+  call `getItem` and `removeItem` on a live biometric item from a background task. Note whether the
+  Keystore lookup fails (logcat). A failure must reject, never delete or rewrite the item.
+- [ ] **H6.** [manual] Android, P-7: fill the storage, then `setItem` on an existing item: it rejects
+  `E_ENCRYPT` and `getItem` returns the old value, before and after an app restart.
+- [ ] **H7.** [manual] Android, P-9: back up with the prefs included (no exclusion rules), clear the
+  app data, restore. `keys()` is empty, a plain `clear()` frees the store, and `getKemPublicKey` of an
+  old alias answers `E_TAMPERED` until it is regenerated with `overwrite`.
+- [ ] **H8.** [manual] iOS, P-17: overwrite an ML-DSA, an ECDSA and an ML-KEM key, then `sign` /
+  `decrypt` and `getPublicKey` / `getKemPublicKey`: the new key works and the public key matches it.
+  Overwrite again (the private moves to the next account version). A key made on 7.2.0 still signs,
+  and so does that key after one overwrite on this version.
+- [ ] **H9.** [manual] iOS, P-10: in a loop, `getItem('n')` and `clear()` at the same time with a
+  silent item `n` written again each round. Afterwards `keys()` lists no name that `hasItem` says is
+  absent and that `removeItem` cannot clean.
+- [ ] **H10.** [manual] iOS, P-12: after an enrollment change, the status of an attributes-only read
+  with `UIFail` of the dead item, and of `SecItemAdd` on the same account. If the first is
+  `errSecItemNotFound` and the second `errSecDuplicateItem`, `removeItem` and `clear()` leave the dead
+  item and drop its row: then a fix is needed (see the third audit report).
+- [ ] **H11.** [manual] iOS, P-15: a biometric key, remove every biometric, enroll the same one again:
+  `sign` with the old key must fail. Only then can an overwrite of a dead key skip its prompt. With
+  the passcode turned off, note the `LAError` code of `canEvaluatePolicy` (E21).
+- [ ] **H12.** [manual] iOS 26, P-14: the first `decryptAtRest` of a process on a `0x12` frame gives
+  `outdated: false`. `encryptAtRest` with `format: 2` on an alias that has its ML-KEM item writes
+  `0x12` even if `atRestSuite` reads 17 in that process.
+
 ## Troubleshooting
 
 | Issue | Probable cause | Fix |
@@ -471,6 +514,7 @@ fails. Earlier: D2, D4 and D5 passed on an iPhone 15 Pro / iOS 26 on 2026-07-14 
 | X1, X2, X3 | Partial: web and each phone pass both ways; direct iOS to Android not run; Android prompts are strong biometric only, iOS not looked at |
 | X4 | Pass on both phones, web to phone and phone to web, ML-KEM 768 and 1024 |
 | C5, C6, D13, D14, E21 (`E_BIOMETRY_UNAVAILABLE`) | Not run yet |
+| H1 to H12 (third audit fixes) | Not run yet |
 
 So the Secure Enclave paths, suite `0x12` and the Android TEE paths are confirmed on a phone.
 ML-DSA on Android is not: the one Android 17 phone tested lists it but cannot make the keys. Suite
