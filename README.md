@@ -593,8 +593,12 @@ P-256 keys are made in the Secure Enclave (iOS) or the Keystore (Android). Ed255
 software key whose private is encrypted by a hardware key and opened only to sign. Rejects if
 the alias exists unless `overwrite` is true. Distinct aliases give independent keypairs (use
 that for KERI rotation, one alias per key). On Android an ML-DSA type on a device without
-Keystore ML-DSA rejects `E_KEYGEN`: check `supportedVariants` first. That list is tested with a
-key without biometric, so a biometric key (the default) can still reject `E_KEYGEN`.
+Keystore ML-DSA rejects `E_KEYGEN` before any prompt: check `supportedVariants` first. That list
+is tested with a key without biometric, so a biometric key (the default) can still reject
+`E_KEYGEN`. On Android a failed keygen deletes its alias, so an ML-DSA or ECDSA `overwrite`
+first makes the new key under a throwaway alias and keeps the old key when that fails. A failure
+in the second keygen only (rare, a passing Keystore fault) can still lose the old key: after
+`E_KEYGEN` on an overwrite, read `getPublicKey` before you assume the old key is there.
 
 `requireBiometric` (default `true`) is baked into the key: `true` makes every `sign` prompt
 for a biometric (per-operation, hardware-enforced); `false` lets the key sign silently while
@@ -1083,7 +1087,7 @@ Every rejection carries a `code`:
 | `E_ENCRYPT` | Encryption failed, or `setItem` could not write the item (on iOS, when it creates the item, also its index row) |
 | `E_DECRYPT` | Decryption failed (wrong key, tampered data, GCM-tag mismatch, or a frame suite this device cannot open). Also `keys()` when the store cannot be listed |
 | `E_CRYPTO` | Android: the cipher operation after a biometric prompt failed |
-| `E_KEYGEN` | Key generation failed. Android also answers it for an ML-DSA type when the Keystore has no ML-DSA: check `supportedVariants` first (a biometric key can still reject it) |
+| `E_KEYGEN` | Key generation failed. Android also answers it for an ML-DSA type when the Keystore has no ML-DSA: check `supportedVariants` first (a biometric key can still reject it). On an Android `overwrite` of an ML-DSA or ECDSA key the old key is kept when the new one cannot be made, except for a rare Keystore fault in the last step: read `getPublicKey` before you rely on the old key |
 | `E_SIGN` | Signing failed |
 | `E_PUBKEY` | Android: reading a public key failed |
 | `E_KEY_NOT_FOUND` | No key exists for that alias. Android `getItem` also answers it when the item's Keystore key is gone. On iOS `decryptAtRest` it can be temporary: a Keychain item that cannot be read right now (for example the device is locked) counts as absent, and a `0x12` frame whose ML-KEM item is absent answers it even when the P-256 key exists. Try again after unlocking before you treat the key as lost |

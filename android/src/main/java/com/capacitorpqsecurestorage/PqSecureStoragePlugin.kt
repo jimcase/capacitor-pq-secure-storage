@@ -354,6 +354,9 @@ class PqSecureStoragePlugin : Plugin() {
         // the Keystore refuses an auth-bound key with no strong biometric, say why before trying
         if (requireBiometric && !biometryUsable()) return rejectNoBiometry(call)
         if (sa.wrapped) return generateWrappedSigningKey(alias, type!!, overwrite, requireBiometric, call)
+        // a phone can resolve the ML-DSA name and still fail every keygen in KeyMint. Say it before any
+        // prompt, and before a replace can reach the old key (see doGenerateSigningKey)
+        if (!sa.isEc && !pqcSigningSupported()) return call.reject("ML-DSA is not available on this device", "E_KEYGEN")
         val ks = try {
             keystore()
         } catch (e: Exception) {
@@ -374,10 +377,10 @@ class PqSecureStoragePlugin : Plugin() {
         if (existingBio) {
             val hostActivity = activity as? FragmentActivity
                 ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-            authForExistingSign(hostActivity, alias, requireBiometric, call) { doGenerateSigningKey(alias, sa, requireBiometric, call) }
+            authForExistingSign(hostActivity, alias, requireBiometric, call) { doGenerateSigningKey(alias, sa, requireBiometric, true, call) }
             return
         }
-        doGenerateSigningKey(alias, sa, requireBiometric, call)
+        doGenerateSigningKey(alias, sa, requireBiometric, exists, call)
     }
 
     @Volatile private var hwCache: Boolean? = null
@@ -469,30 +472,39 @@ class PqSecureStoragePlugin : Plugin() {
         logd("secretKeyRequiresAuth probe failed", e); true
     }
 
-    private fun doGenerateSigningKey(alias: String, sa: SigAlg, requireBiometric: Boolean, call: PluginCall) {
+    private fun signingKeyPair(alias: String, sa: SigAlg, requireBiometric: Boolean): java.security.KeyPair {
+        // AndroidKeyStore does NOT guarantee TEE/StrongBox placement -- if KeyMint doesn't
+        // implement ML-DSA in hardware on this device it silently falls back to the software
+        // keystore. getHardwareCapabilities probes the real security level instead of assuming.
+        val kpg = KeyPairGenerator.getInstance(sa.keyPairAlgo, KEYSTORE_PROVIDER)
+        val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
+            // usable only while the device is unlocked, as the docs say and iOS does
+            .setUnlockedDeviceRequired(true)
+        if (sa.isEc) {
+            spec.setAlgorithmParameterSpec(java.security.spec.ECGenParameterSpec("secp256r1"))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+        }
+        if (requireBiometric) {
+            // Per-operation auth: timeout 0 means the key never sits unlocked. Every use needs a
+            // fresh biometric bound to the specific Signature (see sign()) -- closes GHSA-vx5f.
+            spec.setUserAuthenticationRequired(true)
+                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+        }
+        kpg.initialize(spec.build())
+        return kpg.generateKeyPair()
+    }
+
+    private fun doGenerateSigningKey(alias: String, sa: SigAlg, requireBiometric: Boolean, replacing: Boolean, call: PluginCall) {
         try {
-            // no pre-delete. Generating to an existing alias replaces it; a failed keygen
-            // leaves the old key intact instead of destroying it first.
-            //
-            // AndroidKeyStore does NOT guarantee TEE/StrongBox placement -- if KeyMint doesn't
-            // implement ML-DSA in hardware on this device it silently falls back to the software
-            // keystore. getHardwareCapabilities probes the real security level instead of assuming.
-            val kpg = KeyPairGenerator.getInstance(sa.keyPairAlgo, KEYSTORE_PROVIDER)
-            val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
-                // usable only while the device is unlocked, as the docs say and iOS does
-                .setUnlockedDeviceRequired(true)
-            if (sa.isEc) {
-                spec.setAlgorithmParameterSpec(java.security.spec.ECGenParameterSpec("secp256r1"))
-                    .setDigests(KeyProperties.DIGEST_SHA256)
-            }
-            if (requireBiometric) {
-                // Per-operation auth: timeout 0 means the key never sits unlocked. Every use needs a
-                // fresh biometric bound to the specific Signature (see sign()) -- closes GHSA-vx5f.
-                spec.setUserAuthenticationRequired(true)
-                    .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
-            }
-            kpg.initialize(spec.build())
-            val kp = kpg.generateKeyPair()
+            // generating onto an existing alias replaces it, and a failed keygen makes Android delete
+            // that alias, old key included. So a replace tries the same key on a throwaway alias first.
+            val trial = Policy.trialAlias(alias)
+            val kp = Policy.replaceKey(
+                replacing,
+                trial = { signingKeyPair(trial, sa, requireBiometric) },
+                cleanup = { if (keystore().containsAlias(trial)) keystore().deleteEntry(trial) },
+                real = { signingKeyPair(alias, sa, requireBiometric) },
+            )
             val pubRaw = if (sa.isEc) compressEcPoint(kp.public) else rawFromSpki(kp.public.encoded)
             val ret = JSObject()
             ret.put("publicKey", Base64.encodeToString(pubRaw, Base64.NO_WRAP))

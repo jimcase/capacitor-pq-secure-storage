@@ -79,6 +79,26 @@ internal object Policy {
     // log line, no throw and no callback. The caller has to refuse it before, or its latch never frees.
     fun promptCanStart(stateSaved: Boolean, finishing: Boolean): Boolean = !stateSaved && !finishing
 
+    // A failed keygen makes Android delete its alias, and on a replace that alias still holds the old
+    // key. So a replace makes the same key under a throwaway alias first and only touches the real one
+    // when that worked. A failure that hits only the second keygen still loses the old key.
+    fun <T> replaceKey(replacing: Boolean, trial: () -> Unit, cleanup: () -> Unit, real: () -> T): T {
+        if (replacing) {
+            try {
+                trial()
+            } finally {
+                try {
+                    cleanup()
+                } catch (e: Exception) {
+                }
+            }
+        }
+        return real()
+    }
+
+    // user aliases can't start with __pq, so this never hits a real key
+    fun trialAlias(alias: String): String = "__pq_trial_$alias"
+
     const val MAX_STORE_ITEMS = 512
     const val MAX_STORE_TOTAL_CHARS = 16 * 1024 * 1024
     const val MAX_ALIASES_PER_KIND = 256
