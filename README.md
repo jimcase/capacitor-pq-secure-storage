@@ -328,9 +328,10 @@ Each platform opens only its own at-rest suites: Android and the web `0x10`, iOS
 
 Every suite except `0x11` uses the four header bytes as the associated data of its AEAD, so a changed
 version or suite makes the tag fail. `0x11` cannot: the Secure Enclave ECIES call takes no associated
-data, so its header is not authenticated. That does not open anything. Someone who edits the header
-of a `0x11` frame only sends it down another way of reading, and that way fails. The ECIES body keeps
-its own authentication, so the plaintext cannot change.
+data, so its header is not authenticated. That does not open anything. Changing the version or the
+suite byte of a `0x11` frame sends it down another way of reading, and that way fails. Removing the
+whole header, or adding one to a v1 frame, does open it, with the same plaintext: only `outdated`
+changes. The ECIES body keeps its own authentication, so the plaintext cannot change.
 
 How a frame is read, by `decrypt` and `decryptAtRest`. You do not say which format it is:
 
@@ -451,9 +452,14 @@ Notes:
   classes, never the names. `setItem` writes it after the item (a create is undone and rejects
   `E_ENCRYPT` if the row cannot be written), `getItem` adds a missing row, `removeItem` deletes it
   after the item, and `clear()` deletes all of them, also when the store is empty (then it deletes
-  only the rows, never a store item without the biometric check). If the app dies between writing
-  an item and its row, or between deleting an item and its row, `keys()` can list a name whose item
-  is gone: `hasItem` is false, `getItem` gives `null`, and `removeItem` or `clear()` cleans the row.
+  only the rows, never a store item without the biometric check). If the app dies between deleting
+  an item and its row, `keys()` can list a name whose item is gone: `hasItem` is false, `getItem`
+  gives `null`, and `removeItem` or `clear()` cleans the row. If it dies between writing a biometric
+  item and its row, the item has no row yet: `keys()` (and so a view's `clear()`) does not list it
+  until one `getItem` or `setItem` on it, like an item from an earlier version. A plain `clear()`
+  removes it either way. The same happens after a rollback to 7.2.0, which does not know the rows: an
+  item removed there keeps its row, and after the upgrade `keys()` lists its name until `removeItem`
+  or `clear()`.
   With the phone locked and items in different protection classes, `keys()` has not been checked on
   a device and may reject `E_DECRYPT`.
 
@@ -477,9 +483,14 @@ Backup rules live in the host app, not the library. Exclude the plugin's prefs f
 </data-extraction-rules>
 ```
 
-The per-item keys never leave the Keystore, so a leaked backup is still useless off-device; the
-exclusion is defense in depth. Also set `android:allowBackup="false"` in the host app so the
-prefs cannot be pulled/edited via `adb backup`/`restore`.
+The per-item keys never leave the Keystore, so a leaked backup is still useless off-device. The
+exclusion is also what keeps the store working after a restore: without it the prefs files come back
+(on a new phone or after a reinstall) without the Keystore keys. The old items can't be read or
+listed but still count toward the 512 items / 16 MiB cap until a plain `clear()`, and the old KEM and
+Ed25519 aliases answer `E_TAMPERED` from their public key calls and still count toward the 256 alias
+cap. No call lists those aliases: regenerate each one by name with `overwrite: true`. Also set
+`android:allowBackup="false"` in the host app so the prefs cannot be pulled/edited via
+`adb backup`/`restore`.
 
 ## Limits
 
@@ -500,8 +511,12 @@ prefs cannot be pulled/edited via `adb backup`/`restore`.
 
 Hardware signing keys (ML-DSA, ECDSA) have no cap in the plugin, and iOS has no store cap beyond the
 per-item bounds. The web fallback is bounded by the browser storage quota (about 5 MB in most
-browsers): a write past it rejects `E_STORE_FULL`. There is no call to delete a signing, KEM or at-rest key. Signing
-and KEM keys can be replaced with `overwrite: true`.
+browsers): a write past it rejects `E_STORE_FULL`. There is no call to delete a signing, KEM or
+at-rest key. Signing and KEM keys can be replaced with `overwrite: true`. On iOS that replace asks
+for the biometric when the old key was biometric, also when the old key is dead after an enrollment
+change. With no biometric enrolled at all it rejects `E_BIOMETRY_UNAVAILABLE`, so the alias stays
+stuck until the user enrolls one again (Android replaces a dead key without a prompt). Use a new
+alias if that is not an option.
 
 ## Security model
 
@@ -1068,8 +1083,9 @@ From 7.2.0:
 - On Android `supportsPqc` is now true, and `supportedVariants` lists the ML-DSA types, only when the
   Keystore can make an ML-DSA key. The plugin makes and deletes a throwaway ML-DSA-65 key the first
   time `getHardwareCapabilities` is called after it loads, so that first call is a little slower, and
-  keeps the answer in memory until it is reloaded. `generateKeyPair` is the same and still rejects
-  `E_KEYGEN` when the Keystore cannot make the key.
+  keeps the answer in memory until it is reloaded. `generateKeyPair` for an ML-DSA type rejects
+  `E_KEYGEN` before any prompt when that check says no, and an `overwrite` of an ML-DSA or ECDSA key
+  first makes the new key under a throwaway alias, so a keygen that fails keeps the old key.
 - On iOS an `overwrite` of a Secure Enclave key (ML-DSA, ECDSA or ML-KEM) now writes the new private
   key under a new Keychain account before it moves the public key, and deletes the old private last.
   A failure in between keeps the old key working; before, it could leave the new public key next to
@@ -1077,6 +1093,12 @@ From 7.2.0:
   this way cannot be used by 7.2.0 or earlier, which look for the old account and answer
   `E_KEY_NOT_FOUND`. A key already left in that broken state by an older version now rejects `sign`
   and `decrypt` with `E_TAMPERED`; replace it with `overwrite`.
+- On Android a biometric call made while the app is in the background now rejects `E_AUTH_FAILED` at
+  once. Before, it never settled and every later biometric call answered `E_BUSY` until the app
+  restarted. Call biometric methods when the app is in the foreground.
+- Android `getItem` answers `E_DECRYPT` when the Keystore fails to look up the item key (was
+  `E_KEY_NOT_FOUND`, which read as a lost item). The web fallback answers `E_STORE_FULL` when the
+  browser storage is full and `E_MISSING_PARAMS` for a string argument of another type.
 - On Android `supportedVariants` and `supportedKem` are now arrays. They reached JavaScript as a
   string such as `"[ECDSA_256R1, ED25519]"` before, so code that parsed that string must read the
   array.
