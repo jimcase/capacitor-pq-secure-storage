@@ -75,6 +75,10 @@ internal object Policy {
 
     fun biometryUsable(canAuthenticate: Int): Boolean = canAuthenticate == BiometricManager.BIOMETRIC_SUCCESS
 
+    // biometric 1.1.0 drops a prompt asked once the activity state is saved (from onStop) with only a
+    // log line, no throw and no callback. The caller has to refuse it before, or its latch never frees.
+    fun promptCanStart(stateSaved: Boolean, finishing: Boolean): Boolean = !stateSaved && !finishing
+
     const val MAX_STORE_ITEMS = 512
     const val MAX_STORE_TOTAL_CHARS = 16 * 1024 * 1024
     const val MAX_ALIASES_PER_KIND = 256

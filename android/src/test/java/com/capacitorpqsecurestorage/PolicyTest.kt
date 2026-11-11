@@ -199,4 +199,9 @@ class PolicyTest {
             assertFalse("answer $r", Policy.biometryUsable(r))
         }
     }
+
+    // biometric 1.1.0 drops a prompt asked after onStop with no callback at all
+    @Test fun aPromptCanStartInTheForeground() { assertTrue(Policy.promptCanStart(stateSaved = false, finishing = false)) }
+    @Test fun aPromptCannotStartOnceTheActivityIsStopped() { assertFalse(Policy.promptCanStart(stateSaved = true, finishing = false)) }
+    @Test fun aPromptCannotStartOnAFinishingActivity() { assertFalse(Policy.promptCanStart(stateSaved = false, finishing = true)) }
 }

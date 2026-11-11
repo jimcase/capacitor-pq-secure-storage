@@ -1171,6 +1171,14 @@ class PqSecureStoragePlugin : Plugin() {
                     // biometric mismatch, prompt stays open for retry -- don't settle
                 }
             }
+            // checked here on the UI thread, so onStop can't land between the check and authenticate()
+            if (!Policy.promptCanStart(hostActivity.supportFragmentManager.isStateSaved, hostActivity.isFinishing)) {
+                settled.set(true)
+                onError()
+                authInFlight.set(false)
+                call.reject("App is not in the foreground", "E_AUTH_FAILED")
+                return@runOnUiThread
+            }
             try {
                 val promptInfo = BiometricPrompt.PromptInfo.Builder()
                     .setTitle(reason)
@@ -1180,8 +1188,8 @@ class PqSecureStoragePlugin : Plugin() {
                     .build()
                 BiometricPrompt(hostActivity, cryptoExecutor, callback).authenticate(promptInfo, cryptoObject)
             } catch (e: Exception) {
-                // authenticate() can throw if the activity is backgrounding; settle the call so the
-                // caller's in-flight latch (ssInitializing / kemGenerating) is always released
+                // settle the call so the caller's in-flight latch (kemGenerating, storeWriting...) is
+                // always released
                 if (settled.compareAndSet(false, true)) {
                     logd("biometric prompt failed to start", e)
                     onError()
@@ -1235,6 +1243,12 @@ class PqSecureStoragePlugin : Plugin() {
                 override fun onAuthenticationFailed() {
                     // biometric mismatch, prompt stays open for retry -- don't settle
                 }
+            }
+            if (!Policy.promptCanStart(hostActivity.supportFragmentManager.isStateSaved, hostActivity.isFinishing)) {
+                settled.set(true)
+                authInFlight.set(false)
+                call.reject("App is not in the foreground", "E_AUTH_FAILED")
+                return@runOnUiThread
             }
             try {
                 val promptInfo = BiometricPrompt.PromptInfo.Builder()
