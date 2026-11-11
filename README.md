@@ -457,7 +457,7 @@ Notes:
   gives `null`, and `removeItem` or `clear()` cleans the row. If it dies between writing a biometric
   item and its row, the item has no row yet: `keys()` (and so a view's `clear()`) does not list it
   until one `getItem` or `setItem` on it, like an item from an earlier version. A plain `clear()`
-  removes it either way. The same happens after a rollback to 7.2.0, which does not know the rows: an
+  removes it either way. The same happens after a rollback to 8.2.0, which does not know the rows: an
   item removed there keeps its row, and after the upgrade `keys()` lists its name until `removeItem`
   or `clear()`.
   With the phone locked and items in different protection classes, `keys()` has not been checked on
@@ -1090,7 +1090,7 @@ From 8.2.0:
   key under a new Keychain account before it moves the public key, and deletes the old private last.
   A failure in between keeps the old key working; before, it could leave the new public key next to
   the old private key, so `getPublicKey` showed one key and `sign` used the other. A key replaced
-  this way cannot be used by 7.2.0 or earlier, which look for the old account and answer
+  this way cannot be used by 8.2.0 or earlier, which look for the old account and answer
   `E_KEY_NOT_FOUND`. A key already left in that broken state by an older version now rejects `sign`
   and `decrypt` with `E_TAMPERED`; replace it with `overwrite`.
 - On Android a biometric call made while the app is in the background now rejects `E_AUTH_FAILED` at
@@ -1125,7 +1125,7 @@ Every rejection carries a `code`:
 | `E_UNSUPPORTED` | Unknown key or KEM type, or not on this device (iOS below 26, or no Secure Enclave), or a frame written by a newer version of the plugin (unknown header version or suite) |
 | `E_ALIAS_EXISTS` | Alias already exists (pass `overwrite: true` to replace). An Ed25519 alias and a hardware-key alias never replace each other, even with `overwrite` |
 | `E_NO_ACTIVITY` | Android: no foreground `FragmentActivity` to host the prompt |
-| `E_TAMPERED` | Integrity check failed on a stored public key or item. On iOS also `sign` / `decrypt` when the stored public key does not match the private key (an `overwrite` cut in half by 7.2.0 or earlier): replace the key with `overwrite` |
+| `E_TAMPERED` | Integrity check failed on a stored public key or item. On iOS also `sign` / `decrypt` when the stored public key does not match the private key (an `overwrite` cut in half by 8.2.0 or earlier): replace the key with `overwrite` |
 | `E_TYPE_MISMATCH` | The key under the alias has another type than the one asked for |
 | `E_BAD_CIPHERTEXT` | `decrypt` input too short for an ML-KEM frame of that type |
 | `E_REMOVE` | `removeItem` failed |

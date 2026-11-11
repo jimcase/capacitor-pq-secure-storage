@@ -441,7 +441,7 @@ they need the Keystore, the Keychain or a real prompt.
   old alias answers `E_TAMPERED` until it is regenerated with `overwrite`.
 - [ ] **H8.** [manual] iOS, P-17: overwrite an ML-DSA, an ECDSA and an ML-KEM key, then `sign` /
   `decrypt` and `getPublicKey` / `getKemPublicKey`: the new key works and the public key matches it.
-  Overwrite again (the private moves to the next account version). A key made on 7.2.0 still signs,
+  Overwrite again (the private moves to the next account version). A key made on 8.2.0 still signs,
   and so does that key after one overwrite on this version.
 - [ ] **H9.** [manual] iOS, P-10: in a loop, `getItem('n')` and `clear()` at the same time with a
   silent item `n` written again each round. Afterwards `keys()` lists no name that `hasItem` says is

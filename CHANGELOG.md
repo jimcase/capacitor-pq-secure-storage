@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Security
 
-Fixes from the third security audit, of the 7.3.0 candidate (16 findings, none critical or high).
+Fixes from the third security audit, of the 8.3.0 candidate (16 findings, none critical or high).
 
 - Android: a biometric call made while the app was in the background (for example from the app
   state listener) never settled. androidx.biometric drops a prompt asked after `onStop` with only a
@@ -22,7 +22,7 @@ Fixes from the third security audit, of the 7.3.0 candidate (16 findings, none c
 - iOS: an `overwrite` of a Secure Enclave key (ML-DSA, ECDSA, ML-KEM) wrote the new public key
   before the new private key, so a failure in between left `getPublicKey` showing the new key while
   `sign` and `decrypt` used the old one. The private key now goes first under a versioned account,
-  as for wrapped Ed25519 since 7.2.0. A key left in that state by an older version rejects `sign`
+  as for wrapped Ed25519 since 8.2.0. A key left in that state by an older version rejects `sign`
   and `decrypt` with `E_TAMPERED`.
 - Android: a Keystore error while looking up a key was read as "no key". `removeItem` then deleted a
   biometric item with no prompt, a silent `setItem` replaced a biometric item, and an Ed25519
@@ -122,7 +122,7 @@ Fixes from the third security audit, of the 7.3.0 candidate (16 findings, none c
   look up the item key (was `E_KEY_NOT_FOUND`) and `E_KEY_INVALIDATED` when it reports the key dead.
   iOS `sign` and `decrypt` answer `E_TAMPERED` for a key whose public and private no longer match.
   The web fallback answers `E_STORE_FULL` and `E_MISSING_PARAMS` (see Fixed).
-- No rollback for a replaced iOS Secure Enclave key: 7.2.0 and earlier look for the old private
+- No rollback for a replaced iOS Secure Enclave key: 8.2.0 and earlier look for the old private
   account and answer `E_KEY_NOT_FOUND` for a key replaced with `overwrite` on this version. Keys
   created and never replaced keep working both ways.
 - `FRAME_SUITES` and `KEM_SUITE` are typed `Readonly` now that they are frozen.
