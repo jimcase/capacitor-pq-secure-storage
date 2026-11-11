@@ -133,4 +133,17 @@ final class FramesTests: XCTestCase {
         XCTAssertEqual(try Frames.openGcm(body: body, key: key, header: header), Data("x".utf8))
         XCTAssertThrowsError(try Frames.openGcm(body: body, key: key, header: Frames.header(suite: Frames.atRestAesGcm)))
     }
+
+    // a 0x12 frame that opened is on the best suite there is: a failed probe must not call it outdated
+    func testAnOpened0x12FrameIsNeverOutdatedAndSkipsTheProbe() {
+        var probed = false
+        XCTAssertFalse(Frames.atRestOutdated(readAs: 2, suite: Frames.atRestSepMlkem) { probed = true; return Frames.atRestSepEcies })
+        XCTAssertFalse(probed)
+    }
+
+    func testOtherAtRestFramesCompareWithTheDeviceSuite() {
+        XCTAssertTrue(Frames.atRestOutdated(readAs: 1, suite: nil) { Frames.atRestSepEcies })
+        XCTAssertTrue(Frames.atRestOutdated(readAs: 2, suite: Frames.atRestSepEcies) { Frames.atRestSepMlkem })
+        XCTAssertFalse(Frames.atRestOutdated(readAs: 2, suite: Frames.atRestSepEcies) { Frames.atRestSepEcies })
+    }
 }
