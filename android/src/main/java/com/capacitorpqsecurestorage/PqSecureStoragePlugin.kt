@@ -135,13 +135,18 @@ class PqSecureStoragePlugin : Plugin() {
                         }
                         val wrapped = c.iv + c.doFinal(seed)
                         seed.fill(0)
-                        val committed = sigPrefs().edit()
-                            .putString(sigPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
-                            .putString(sigPubKey(alias), Base64.encodeToString(pub, Base64.NO_WRAP))
-                            .putString(sigTypeKey(alias), type)
-                            .putString(sigTagKey(alias), pubTag("sig:$alias", pub))
-                            .putInt(sigWrapVerKey(alias), newVer)
-                            .commit()
+                        val tag = pubTag("sig:$alias", pub)
+                        val keys = listOf(sigPrivKey(alias), sigPubKey(alias), sigTypeKey(alias), sigTagKey(alias), sigWrapVerKey(alias))
+                        val committed = commitOrRevert(sigPrefs(), keys) {
+                            it.putString(sigPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
+                                .putString(sigPubKey(alias), Base64.encodeToString(pub, Base64.NO_WRAP))
+                                .putString(sigTypeKey(alias), type)
+                                .putString(sigTagKey(alias), tag)
+                                .putInt(sigWrapVerKey(alias), newVer)
+                        }
+                        if (!committed) {
+                            try { keystore().deleteEntry(Policy.sigWrapAlias(alias, newVer)) } catch (e: Exception) { logd("sig wrap cleanup failed", e) }
+                        }
                         if (committed) {
                             try {
                                 val ks = keystore()
@@ -759,13 +764,18 @@ class PqSecureStoragePlugin : Plugin() {
                     val persist = { c: Cipher ->
                         val wrapped = c.iv + c.doFinal(privBytes)
                         privBytes.fill(0)
-                        val committed = kemPrefs().edit()
-                            .putString(kemPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
-                            .putString(kemPubKeyKey(alias), Base64.encodeToString(rawPub, Base64.NO_WRAP))
-                            .putString(kemTagKey(alias), pubTag("kem:$alias", rawPub))
-                            .putString(kemTypeKey(alias), type)
-                            .putInt(kemWrapVerKey(alias), newVer)
-                            .commit()
+                        val tag = pubTag("kem:$alias", rawPub)
+                        val keys = listOf(kemPrivKey(alias), kemPubKeyKey(alias), kemTagKey(alias), kemTypeKey(alias), kemWrapVerKey(alias))
+                        val committed = commitOrRevert(kemPrefs(), keys) {
+                            it.putString(kemPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
+                                .putString(kemPubKeyKey(alias), Base64.encodeToString(rawPub, Base64.NO_WRAP))
+                                .putString(kemTagKey(alias), tag)
+                                .putString(kemTypeKey(alias), type)
+                                .putInt(kemWrapVerKey(alias), newVer)
+                        }
+                        if (!committed) {
+                            try { keystore().deleteEntry(kemWrapAlias(alias, newVer)) } catch (e: Exception) { logd("kem wrap cleanup failed", e) }
+                        }
                         if (committed && oldVer >= 0) {
                             try {
                                 val ks = keystore()
@@ -1457,7 +1467,9 @@ class PqSecureStoragePlugin : Plugin() {
             if (!bio) {
                 cipher.updateAAD(key.toByteArray(Charsets.UTF_8))
                 val ct = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-                val committed = storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
+                val tag = nameTag(key)
+                val stored = storedValue(key, iv, ct)
+                val committed = commitOrRevert(storeItems(), listOf(tag)) { it.putString(tag, stored) }
                 done(committed)
                 if (committed) call.resolve() else call.reject("Store failed", "E_ENCRYPT")
             } else {
@@ -1469,7 +1481,9 @@ class PqSecureStoragePlugin : Plugin() {
                     onError = { done(false) }) { boundCipher ->
                     boundCipher.updateAAD(key.toByteArray(Charsets.UTF_8))
                     val ct = boundCipher.doFinal(value.toByteArray(Charsets.UTF_8))
-                    val committed = storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
+                    val tag = nameTag(key)
+                    val stored = storedValue(key, iv, ct)
+                    val committed = commitOrRevert(storeItems(), listOf(tag)) { it.putString(tag, stored) }
                     done(committed)
                     if (committed) call.resolve() else call.reject("Store failed", "E_ENCRYPT")
                 }
@@ -1550,7 +1564,8 @@ class PqSecureStoragePlugin : Plugin() {
             null
         }
         val del = {
-            val removed = storeItems().edit().remove(nameTag(key)).commit()
+            val tag = nameTag(key)
+            val removed = commitOrRevert(storeItems(), listOf(tag)) { it.remove(tag) }
             if (removed) {
                 try { keystore().deleteEntry(alias) } catch (e: Exception) { logd("removeItem: key delete failed", e) }
                 call.resolve()
@@ -1623,7 +1638,7 @@ class PqSecureStoragePlugin : Plugin() {
         // prompt once, bound to a biometric key that can still unlock. A key dead after an enrollment
         // change guards nothing, and must not stand in for live biometric items.
         val bioKey = Policy.pickLiveBioKey(bioKeys) { invalidated(it) }
-        if (bioKey == null) { doClearWipe(); call.resolve(); return }
+        if (bioKey == null) { finishClear(call); return }
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         try {
@@ -1631,13 +1646,11 @@ class PqSecureStoragePlugin : Plugin() {
             cipher.init(Cipher.ENCRYPT_MODE, bioKey)
             authenticateCipher(hostActivity, cipher, "Authenticate to erase secure storage", call) { boundCipher ->
                 boundCipher.doFinal(ByteArray(0))
-                doClearWipe()
-                call.resolve()
+                finishClear(call)
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
             logd("clear: key invalidated, wiping", e)
-            doClearWipe()
-            call.resolve()
+            finishClear(call)
         } catch (e: Exception) {
             logd("clear failed", e)
             call.reject("Clear failed", "E_CLEAR")
@@ -1656,9 +1669,15 @@ class PqSecureStoragePlugin : Plugin() {
         return out
     }
 
-    private fun doClearWipe() {
-        // wipe prefs, then delete every per-item key plus the name-hashing/encryption keys
-        storeItems().edit().clear().commit()
+    private fun finishClear(call: PluginCall) {
+        if (doClearWipe()) call.resolve() else call.reject("Clear failed", "E_CLEAR")
+    }
+
+    // wipe prefs, then delete every per-item key plus the name-hashing/encryption keys. A failed prefs
+    // write stops before the keys go: the entries would come back from the file with no key to open them
+    private fun doClearWipe(): Boolean {
+        val prefs = storeItems()
+        if (!commitOrRevert(prefs, prefs.all.keys) { it.clear() }) return false
         try {
             val ks = keystore()
             for (a in ks.aliases().toList().filter { it.startsWith(itemAliasPrefix) }) {
@@ -1670,5 +1689,6 @@ class PqSecureStoragePlugin : Plugin() {
         } catch (e: Exception) {
             logd("clear: keystore delete failed", e)
         }
+        return true
     }
 }
