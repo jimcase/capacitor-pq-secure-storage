@@ -1456,6 +1456,16 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         SecItemDelete(q as CFDictionary)
     }
 
+    // clear() deletes the store and its name keys while getItem (global queue) and setItem / removeItem
+    // (bridge queue, or the LA reply queue after a prompt) write items and index rows. Without this, a
+    // row or an item could land under a name key the wipe just removed: a name keys() lists and nothing
+    // can remove, or an item no name reaches. Taken before keyCreateLock (symmetricKey), never after.
+    private static let storeLock = NSLock()
+    private static func withStoreLock<T>(_ body: () -> T) -> T {
+        storeLock.lock(); defer { storeLock.unlock() }
+        return body()
+    }
+
     private static func clearIndex() {
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -1526,15 +1536,24 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         for (k, v) in accessAttr { addQuery[k] = v }
 
         let create: () -> Void = {
-            let status = SecItemAdd(addQuery as CFDictionary, nil)
-            if status == errSecSuccess {
+            // names again under the lock: a clear() since the probe drops the name keys, and an item
+            // stored under the old account would be out of reach of every name
+            let (status, indexed): (OSStatus, Bool) = Self.withStoreLock {
+                guard let acct = try? Self.nameTag(key), let enc = try? Self.encName(key) else { return (errSecParam, false) }
+                var match = matchQuery
+                match[kSecAttrAccount as String] = acct
+                var add = addQuery
+                add[kSecAttrAccount as String] = acct
+                add[kSecAttrGeneric as String] = enc
+                let status = SecItemAdd(add as CFDictionary, nil)
+                guard status == errSecSuccess else { return (status, false) }
                 // no index row means keys() can't see a bio item, so take the item back out
-                if Self.addIndex(account: account, encName: encodedName, protection: protection) == errSecSuccess {
-                    call.resolve()
-                } else {
-                    SecItemDelete(matchQuery as CFDictionary)
-                    call.reject("Store failed", "E_ENCRYPT")
-                }
+                if Self.addIndex(account: acct, encName: enc, protection: protection) == errSecSuccess { return (status, true) }
+                SecItemDelete(match as CFDictionary)
+                return (status, false)
+            }
+            if status == errSecSuccess {
+                if indexed { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
             } else if status == errSecDuplicateItem {
                 // probe said not found but the row is there: a dead biometric item
                 call.reject("Item invalidated by a biometric change; removeItem first", "E_KEY_INVALIDATED")
@@ -1548,10 +1567,14 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         let update: (LAContext?) -> Void = { ctx in
             var q = matchQuery
             if let ctx = ctx { q[kSecUseAuthenticationContext as String] = ctx }
-            let status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            // a clear() during the prompt leaves nothing to update, so no row for a wiped item either
+            let status: OSStatus = Self.withStoreLock {
+                let status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+                // value is already stored, the index row is only a backfill here
+                if status == errSecSuccess { _ = Self.addIndex(account: account, encName: encodedName, protection: protection) }
+                return status
+            }
             guard status == errSecSuccess else { call.reject("Store failed", "E_ENCRYPT"); return }
-            // value is already stored, the index row is only a backfill here
-            _ = Self.addIndex(account: account, encName: encodedName, protection: protection)
             call.resolve()
         }
 
@@ -1621,12 +1644,15 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                     // bio items from before the index have no row, and this is the first time we have
                     // the name with the item already unlocked. Row gets the item's class, an existing
                     // row is left alone. Best effort, never changes the read. If a clear() ran since
-                    // the read the name key is new, so skip: that row could never be removed.
-                    if (try? Self.nameTag(key)) == account, let enc = try? Self.encName(key) {
-                        let cls = (attrs?[kSecAttrAccessible as String] as? String).map { $0 as CFString }
-                        _ = Self.addIndex(account: account, encName: enc,
-                                          protection: cls ?? kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-                                          updateOnDuplicate: false)
+                    // the read the name key is new, so skip: that row could never be removed. The
+                    // check and the write share the lock with clear()'s wipe.
+                    Self.withStoreLock {
+                        if (try? Self.nameTag(key)) == account, let enc = try? Self.encName(key) {
+                            let cls = (attrs?[kSecAttrAccessible as String] as? String).map { $0 as CFString }
+                            _ = Self.addIndex(account: account, encName: enc,
+                                              protection: cls ?? kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                                              updateOnDuplicate: false)
+                        }
                     }
                     call.resolve(["value": value])
                 } else {
@@ -1674,12 +1700,16 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrService as String: Self.ssService,
                 kSecAttrAccount as String: account,
             ]
-            let status = SecItemDelete(query as CFDictionary)
+            // item first, then its row: an orphan row only lists a name that reads null. Locked so a
+            // setItem of the same name can't add its item and row in between and lose the row
+            let status: OSStatus = Self.withStoreLock {
+                let status = SecItemDelete(query as CFDictionary)
+                if status == errSecSuccess || status == errSecItemNotFound { Self.deleteIndex(account: account) }
+                return status
+            }
             guard status == errSecSuccess || status == errSecItemNotFound else {
                 call.reject("Remove failed", "E_REMOVE"); return
             }
-            // item first, then its row: an orphan row only lists a name that reads null
-            Self.deleteIndex(account: account)
             call.resolve()
         }
         let confirmDel: () -> Void = {
@@ -1766,11 +1796,14 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: Self.ssService,
             ]
-            let status = SecItemDelete(query as CFDictionary)
-            Self.clearIndex()
-            // also drop the store's name keys (a later setItem regenerates them)
-            for acct in [Self.nameEncAccount, Self.nameTagAccount] {
-                SecItemDelete(Self.baseQuery(account: acct) as CFDictionary)
+            let status: OSStatus = Self.withStoreLock {
+                let status = SecItemDelete(query as CFDictionary)
+                Self.clearIndex()
+                // also drop the store's name keys (a later setItem regenerates them)
+                for acct in [Self.nameEncAccount, Self.nameTagAccount] {
+                    SecItemDelete(Self.baseQuery(account: acct) as CFDictionary)
+                }
+                return status
             }
             if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Clear failed", "E_CLEAR") }
         }
