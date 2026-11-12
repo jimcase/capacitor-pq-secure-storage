@@ -123,16 +123,30 @@ class PqSecureStoragePlugin : Plugin() {
                     val wrapKey = createFreshAesKey(Policy.sigWrapAlias(alias, newVer), requireBiometric)
                     val cipher = Cipher.getInstance("AES/GCM/NoPadding")
                     cipher.init(Cipher.ENCRYPT_MODE, wrapKey)
-                    val persist = { c: Cipher ->
+                    val persist = persist@{ c: Cipher ->
+                        // a hardware key made while the prompt was open would leave the alias with two
+                        // keys that no overwrite can ever replace
+                        if (keystore().containsAlias(alias)) {
+                            seed.fill(0)
+                            try { keystore().deleteEntry(Policy.sigWrapAlias(alias, newVer)) } catch (e: Exception) { logd("sig wrap cleanup failed", e) }
+                            sigGenerating.remove(alias)
+                            call.reject("Alias already exists", "E_ALIAS_EXISTS")
+                            return@persist
+                        }
                         val wrapped = c.iv + c.doFinal(seed)
                         seed.fill(0)
-                        val committed = sigPrefs().edit()
-                            .putString(sigPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
-                            .putString(sigPubKey(alias), Base64.encodeToString(pub, Base64.NO_WRAP))
-                            .putString(sigTypeKey(alias), type)
-                            .putString(sigTagKey(alias), pubTag("sig:$alias", pub))
-                            .putInt(sigWrapVerKey(alias), newVer)
-                            .commit()
+                        val tag = pubTag("sig:$alias", pub)
+                        val keys = listOf(sigPrivKey(alias), sigPubKey(alias), sigTypeKey(alias), sigTagKey(alias), sigWrapVerKey(alias))
+                        val committed = commitOrRevert(sigPrefs(), keys) {
+                            it.putString(sigPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
+                                .putString(sigPubKey(alias), Base64.encodeToString(pub, Base64.NO_WRAP))
+                                .putString(sigTypeKey(alias), type)
+                                .putString(sigTagKey(alias), tag)
+                                .putInt(sigWrapVerKey(alias), newVer)
+                        }
+                        if (!committed) {
+                            try { keystore().deleteEntry(Policy.sigWrapAlias(alias, newVer)) } catch (e: Exception) { logd("sig wrap cleanup failed", e) }
+                        }
                         if (committed) {
                             try {
                                 val ks = keystore()
@@ -169,7 +183,12 @@ class PqSecureStoragePlugin : Plugin() {
                     call.reject("Key generation failed", "E_KEYGEN")
                 }
             }
-            val existingWrap = if (exists) (try { keystore().getKey(sigWrapAliasFor(alias), null) as? SecretKey } catch (e: Exception) { null }) else null
+            // a dead wrap key skips the gate like an invalidated one; any other Keystore error must stop
+            // here, read as "no key" it would replace a biometric key with no prompt
+            val existingWrap = if (exists) (try { keystore().getKey(sigWrapAliasFor(alias), null) as? SecretKey } catch (e: Exception) {
+                if (!Policy.deadKeyError(e)) throw e
+                null
+            }) else null
             if (existingWrap != null && secretKeyRequiresAuth(existingWrap)) {
                 val host = activity as? FragmentActivity
                 if (host == null) {
@@ -285,6 +304,25 @@ class PqSecureStoragePlugin : Plugin() {
         return v
     }
 
+    private fun formatArg(call: PluginCall): Int? {
+        val raw = if (call.data.isNull("format")) null else call.data.opt("format")
+        val v = Frames.formatOption(raw)
+        if (v == null) call.reject("format must be 1 or 2", "E_INVALID_ARGS")
+        return v
+    }
+
+    // same check as biometricGated: a strong biometric the Keystore and BiometricPrompt can use now
+    private fun biometryUsable(): Boolean = Policy.biometryUsable(
+        BiometricManager.from(context).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+    )
+
+    private fun rejectNoBiometry(call: PluginCall) = call.reject("No usable biometric on this device", "E_BIOMETRY_UNAVAILABLE")
+
+    private fun rejectPromptError(call: PluginCall, errorCode: Int) {
+        if (Policy.promptErrorCode(errorCode) == "E_BIOMETRY_UNAVAILABLE") rejectNoBiometry(call)
+        else call.reject("Authentication failed", "E_AUTH_FAILED")
+    }
+
     // The Capacitor bridge rethrows anything that escapes a plugin method as a RuntimeException, which
     // takes the whole app down. Methods that touch the Keystore outside their own try use this.
     private inline fun guarded(call: PluginCall, code: String, body: () -> Unit) {
@@ -315,11 +353,12 @@ class PqSecureStoragePlugin : Plugin() {
         // if KeyMint implements it
         val variants = mutableListOf("ECDSA_256R1", "ED25519")
         if (ok) { variants.add("PQC_MLDSA_65"); variants.add("PQC_MLDSA_87") }
-        ret.put("supportedVariants", variants)
+        ret.put("supportedVariants", JSArray(variants))
         // ML-KEM works via software (BouncyCastle) on any API; the private key is wrapped by a
         // Keystore AES key. AndroidKeyStore does not expose ML-KEM to apps, so it is NOT in the SEP.
-        ret.put("supportedKem", listOf("PQC_MLKEM_768", "PQC_MLKEM_1024"))
+        ret.put("supportedKem", JSArray(listOf("PQC_MLKEM_768", "PQC_MLKEM_1024")))
         ret.put("kemInSecureEnclave", false)
+        ret.put("atRestSuite", Frames.AT_REST_AES_GCM)
         call.resolve(ret)
     }
 
@@ -331,7 +370,12 @@ class PqSecureStoragePlugin : Plugin() {
         val sa = sigAlgOf(type) ?: return call.reject("Unsupported key type", "E_UNSUPPORTED")
         val overwrite = boolArg(call, "overwrite", false) ?: return
         val requireBiometric = boolArg(call, "requireBiometric", true) ?: return
+        // the Keystore refuses an auth-bound key with no strong biometric, say why before trying
+        if (requireBiometric && !biometryUsable()) return rejectNoBiometry(call)
         if (sa.wrapped) return generateWrappedSigningKey(alias, type!!, overwrite, requireBiometric, call)
+        // a phone can resolve the ML-DSA name and still fail every keygen in KeyMint. Say it before any
+        // prompt, and before a replace can reach the old key (see doGenerateSigningKey)
+        if (!sa.isEc && !pqcSigningSupported()) return call.reject("ML-DSA is not available on this device", "E_KEYGEN")
         val ks = try {
             keystore()
         } catch (e: Exception) {
@@ -341,6 +385,8 @@ class PqSecureStoragePlugin : Plugin() {
         // one alias, one key: a wrapped Ed25519 key under this alias would shadow the hardware key in
         // getPublicKey, and an overwrite does not change the kind of custody
         if (sigPrefs().contains(sigPubKey(alias))) return call.reject("Alias already exists", "E_ALIAS_EXISTS")
+        // a wrapped key being made under this alias isn't in prefs until its prompt is approved
+        if (sigGenerating.contains(alias)) return call.reject("Key generation in progress, retry", "E_BUSY")
         val exists = ks.containsAlias(alias)
         if (exists && !overwrite) {
             // alias may back a live identity already -- refuse to silently clobber it
@@ -352,10 +398,10 @@ class PqSecureStoragePlugin : Plugin() {
         if (existingBio) {
             val hostActivity = activity as? FragmentActivity
                 ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
-            authForExistingSign(hostActivity, alias, requireBiometric, call) { doGenerateSigningKey(alias, sa, requireBiometric, call) }
+            authForExistingSign(hostActivity, alias, requireBiometric, call) { doGenerateSigningKey(alias, sa, requireBiometric, true, call) }
             return
         }
-        doGenerateSigningKey(alias, sa, requireBiometric, call)
+        doGenerateSigningKey(alias, sa, requireBiometric, exists, call)
     }
 
     @Volatile private var hwCache: Boolean? = null
@@ -398,17 +444,35 @@ class PqSecureStoragePlugin : Plugin() {
 
     @Volatile private var pqcCache: Boolean? = null
 
-    // whether AndroidKeyStore actually exposes ML-DSA keygen on this device. Probe it, don't guess an
-    // API level: Keystore ML-DSA depends on KeyMint, not just the OS version. getInstance resolves the
-    // algorithm without generating a key, so it is cheap and side-effect free.
+    // whether this device's Keystore can really make an ML-DSA key. getInstance alone is not enough:
+    // on some devices the algorithm resolves and KeyMint then rejects every keygen. So make a throwaway
+    // key and delete it. No unlock or auth requirement on it, so it works with the phone locked and a
+    // failure caused by the lock never gets cached. Serialized so two callers can't race the probe alias.
+    @Synchronized
     private fun pqcSigningSupported(): Boolean {
         pqcCache?.let { return it }
-        val ok = try {
-            KeyPairGenerator.getInstance("ML-DSA-65", KEYSTORE_PROVIDER)
-            true
-        } catch (e: Exception) {
-            logd("ML-DSA keystore probe failed", e); false
-        }
+        val probeAlias = "__pq_mldsa_probe__"
+        val ok = Policy.probe(
+            make = {
+                try {
+                    val kpg = KeyPairGenerator.getInstance("ML-DSA-65", KEYSTORE_PROVIDER)
+                    kpg.initialize(
+                        KeyGenParameterSpec.Builder(probeAlias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY).build()
+                    )
+                    kpg.generateKeyPair()
+                } catch (e: Exception) {
+                    logd("ML-DSA keystore probe failed", e)
+                    throw e
+                }
+            },
+            cleanup = {
+                try {
+                    keystore().deleteEntry(probeAlias)
+                } catch (e: Exception) {
+                    logd("ML-DSA probe cleanup failed", e)
+                }
+            }
+        )
         pqcCache = ok
         return ok
     }
@@ -429,30 +493,39 @@ class PqSecureStoragePlugin : Plugin() {
         logd("secretKeyRequiresAuth probe failed", e); true
     }
 
-    private fun doGenerateSigningKey(alias: String, sa: SigAlg, requireBiometric: Boolean, call: PluginCall) {
+    private fun signingKeyPair(alias: String, sa: SigAlg, requireBiometric: Boolean): java.security.KeyPair {
+        // AndroidKeyStore does NOT guarantee TEE/StrongBox placement -- if KeyMint doesn't
+        // implement ML-DSA in hardware on this device it silently falls back to the software
+        // keystore. getHardwareCapabilities probes the real security level instead of assuming.
+        val kpg = KeyPairGenerator.getInstance(sa.keyPairAlgo, KEYSTORE_PROVIDER)
+        val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
+            // usable only while the device is unlocked, as the docs say and iOS does
+            .setUnlockedDeviceRequired(true)
+        if (sa.isEc) {
+            spec.setAlgorithmParameterSpec(java.security.spec.ECGenParameterSpec("secp256r1"))
+                .setDigests(KeyProperties.DIGEST_SHA256)
+        }
+        if (requireBiometric) {
+            // Per-operation auth: timeout 0 means the key never sits unlocked. Every use needs a
+            // fresh biometric bound to the specific Signature (see sign()) -- closes GHSA-vx5f.
+            spec.setUserAuthenticationRequired(true)
+                .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+        }
+        kpg.initialize(spec.build())
+        return kpg.generateKeyPair()
+    }
+
+    private fun doGenerateSigningKey(alias: String, sa: SigAlg, requireBiometric: Boolean, replacing: Boolean, call: PluginCall) {
         try {
-            // no pre-delete. Generating to an existing alias replaces it; a failed keygen
-            // leaves the old key intact instead of destroying it first.
-            //
-            // AndroidKeyStore does NOT guarantee TEE/StrongBox placement -- if KeyMint doesn't
-            // implement ML-DSA in hardware on this device it silently falls back to the software
-            // keystore. getHardwareCapabilities probes the real security level instead of assuming.
-            val kpg = KeyPairGenerator.getInstance(sa.keyPairAlgo, KEYSTORE_PROVIDER)
-            val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
-                // usable only while the device is unlocked, as the docs say and iOS does
-                .setUnlockedDeviceRequired(true)
-            if (sa.isEc) {
-                spec.setAlgorithmParameterSpec(java.security.spec.ECGenParameterSpec("secp256r1"))
-                    .setDigests(KeyProperties.DIGEST_SHA256)
-            }
-            if (requireBiometric) {
-                // Per-operation auth: timeout 0 means the key never sits unlocked. Every use needs a
-                // fresh biometric bound to the specific Signature (see sign()) -- closes GHSA-vx5f.
-                spec.setUserAuthenticationRequired(true)
-                    .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
-            }
-            kpg.initialize(spec.build())
-            val kp = kpg.generateKeyPair()
+            // generating onto an existing alias replaces it, and a failed keygen makes Android delete
+            // that alias, old key included. So a replace tries the same key on a throwaway alias first.
+            val trial = Policy.trialAlias(alias)
+            val kp = Policy.replaceKey(
+                replacing,
+                trial = { signingKeyPair(trial, sa, requireBiometric) },
+                cleanup = { if (keystore().containsAlias(trial)) keystore().deleteEntry(trial) },
+                real = { signingKeyPair(alias, sa, requireBiometric) },
+            )
             val pubRaw = if (sa.isEc) compressEcPoint(kp.public) else rawFromSpki(kp.public.encoded)
             val ret = JSObject()
             ret.put("publicKey", Base64.encodeToString(pubRaw, Base64.NO_WRAP))
@@ -581,14 +654,17 @@ class PqSecureStoragePlugin : Plugin() {
         val alias = call.getString("keyAlias") ?: return call.reject("Missing keyAlias parameter", "E_MISSING_PARAMS")
         if (!safeAlias(call, alias)) return
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
+        val fmt = formatArg(call) ?: return
         val input = decodeCapped(call, data) ?: return
         try {
             val key = getOrCreateAtRestKey(alias)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, key)
+            val header = if (fmt == 2) Frames.header(Frames.AT_REST_AES_GCM) else null
+            if (header != null) cipher.updateAAD(header)
             val iv = cipher.iv // 12 bytes
             val ct = cipher.doFinal(input) // includes tag
-            val frame = iv + ct // nonce(12) || aeadCt(+tag16)
+            val frame = if (header != null) header + iv + ct else iv + ct // [header ||] nonce(12) || aeadCt(+tag16)
             val ret = JSObject()
             ret.put("ciphertext", Base64.encodeToString(frame, Base64.NO_WRAP))
             call.resolve(ret)
@@ -608,14 +684,14 @@ class PqSecureStoragePlugin : Plugin() {
             val key = ks.getKey(atRestAlias(alias), null) as? SecretKey
                 ?: return call.reject("Key not found", "E_KEY_NOT_FOUND")
             val frame = decodeCapped(call, data) ?: return
-            val iv = frame.copyOfRange(0, 12)
-            val ct = frame.copyOfRange(12, frame.size)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
-            val plain = cipher.doFinal(ct)
-            val ret = JSObject()
-            ret.put("plaintext", Base64.encodeToString(plain, Base64.NO_WRAP))
-            call.resolve(ret)
+            val r = Frames.open(
+                frame,
+                forKem = false,
+                suiteOk = { it == Frames.AT_REST_AES_GCM },
+                openV2 = { h, _, body -> gcmOpen(key, body, h) },
+                openV1 = { gcmOpen(key, it, null) },
+            )
+            resolveOpen(call, r)
         } catch (e: Exception) {
             logd("decryptAtRest failed for alias=$alias", e)
             call.reject("Decrypt failed", "E_DECRYPT")
@@ -655,6 +731,7 @@ class PqSecureStoragePlugin : Plugin() {
         val spec = mlkemSpecOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         val overwrite = boolArg(call, "overwrite", false) ?: return
         val requireBiometric = boolArg(call, "requireBiometric", true) ?: return
+        if (requireBiometric && !biometryUsable()) return rejectNoBiometry(call)
         if (!kemGenerating.add(alias)) return call.reject("Key generation in progress, retry", "E_BUSY")
         try {
             val exists = kemPrefs().contains(kemPubKeyKey(alias))
@@ -687,13 +764,18 @@ class PqSecureStoragePlugin : Plugin() {
                     val persist = { c: Cipher ->
                         val wrapped = c.iv + c.doFinal(privBytes)
                         privBytes.fill(0)
-                        val committed = kemPrefs().edit()
-                            .putString(kemPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
-                            .putString(kemPubKeyKey(alias), Base64.encodeToString(rawPub, Base64.NO_WRAP))
-                            .putString(kemTagKey(alias), pubTag("kem:$alias", rawPub))
-                            .putString(kemTypeKey(alias), type)
-                            .putInt(kemWrapVerKey(alias), newVer)
-                            .commit()
+                        val tag = pubTag("kem:$alias", rawPub)
+                        val keys = listOf(kemPrivKey(alias), kemPubKeyKey(alias), kemTagKey(alias), kemTypeKey(alias), kemWrapVerKey(alias))
+                        val committed = commitOrRevert(kemPrefs(), keys) {
+                            it.putString(kemPrivKey(alias), Base64.encodeToString(wrapped, Base64.NO_WRAP))
+                                .putString(kemPubKeyKey(alias), Base64.encodeToString(rawPub, Base64.NO_WRAP))
+                                .putString(kemTagKey(alias), tag)
+                                .putString(kemTypeKey(alias), type)
+                                .putInt(kemWrapVerKey(alias), newVer)
+                        }
+                        if (!committed) {
+                            try { keystore().deleteEntry(kemWrapAlias(alias, newVer)) } catch (e: Exception) { logd("kem wrap cleanup failed", e) }
+                        }
                         if (committed && oldVer >= 0) {
                             try {
                                 val ks = keystore()
@@ -792,6 +874,7 @@ class PqSecureStoragePlugin : Plugin() {
         if (pubStr.length > MAX_RECIPIENT_KEY_B64) return call.reject("Invalid public key", "E_INVALID_ARGS")
         val type = call.getString("type") ?: return call.reject("Missing type parameter", "E_MISSING_PARAMS")
         val data = call.getString("data") ?: return call.reject("Missing data parameter", "E_MISSING_PARAMS")
+        val fmt = formatArg(call) ?: return
         val oid = mlkemOidOf(type) ?: return call.reject("Unsupported KEM type", "E_UNSUPPORTED")
         val input = decodeCapped(call, data) ?: return
         val pubRaw = try {
@@ -804,8 +887,13 @@ class PqSecureStoragePlugin : Plugin() {
         try {
             // the peer sends a raw public key; rebuild the SPKI wrapper JCA needs to parse it
             val pubKey = mlkemPublicFromRaw(pubRaw, oid)
-            // encapsulate (software, no alias/biometric) -> frame = kemCt || nonce(12) || aead(+tag)
-            val frame = MlKemCrypto.encapAndSeal(bc, pubKey, input)
+            // encapsulate (software, no alias/biometric) -> frame = [header ||] kemCt || nonce(12) || aead(+tag)
+            val frame = if (fmt == 2) {
+                val header = Frames.header(Frames.kemSuiteOf(type)!!)
+                header + MlKemCrypto.encapAndSeal(bc, pubKey, input, header)
+            } else {
+                MlKemCrypto.encapAndSeal(bc, pubKey, input)
+            }
             val ret = JSObject()
             ret.put("ciphertext", Base64.encodeToString(frame, Base64.NO_WRAP))
             call.resolve(ret)
@@ -849,17 +937,11 @@ class PqSecureStoragePlugin : Plugin() {
                 val hostActivity = activity as? FragmentActivity
                     ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
                 authenticateCipher(hostActivity, unwrapCipher, "Authenticate to decrypt with your PQ key", call) { boundCipher ->
-                    val plain = decapsulate(boundCipher.doFinal(wrapped), frame, ctLen)
-                    val ret = JSObject()
-                    ret.put("plaintext", Base64.encodeToString(plain, Base64.NO_WRAP))
-                    call.resolve(ret)
+                    resolveOpen(call, openKemFrame(boundCipher.doFinal(wrapped), frame, type, ctLen), "Operation failed", "E_CRYPTO")
                 }
             } else {
                 // no-auth wrap key: unwrap + decapsulate inline, no prompt
-                val plain = decapsulate(unwrapCipher.doFinal(wrapped), frame, ctLen)
-                val ret = JSObject()
-                ret.put("plaintext", Base64.encodeToString(plain, Base64.NO_WRAP))
-                call.resolve(ret)
+                resolveOpen(call, openKemFrame(unwrapCipher.doFinal(wrapped), frame, type, ctLen))
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
             logd("decrypt: key invalidated by biometric enrollment", e)
@@ -1023,6 +1105,29 @@ class PqSecureStoragePlugin : Plugin() {
     private fun getOrCreateAtRestKey(alias: String): SecretKey =
         getOrCreateAesKey(atRestAlias(alias), false, unlockRequired = true)
 
+    private fun gcmOpen(key: SecretKey, body: ByteArray, aad: ByteArray?): ByteArray {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, body.copyOfRange(0, 12)))
+        if (aad != null) cipher.updateAAD(aad)
+        return cipher.doFinal(body.copyOfRange(12, body.size))
+    }
+
+    private fun resolveOpen(call: PluginCall, r: Frames.Open<ByteArray>, failMsg: String = "Decrypt failed", failCode: String = "E_DECRYPT") {
+        when (r) {
+            is Frames.Open.Ok -> {
+                val ret = JSObject()
+                ret.put("plaintext", Base64.encodeToString(r.value, Base64.NO_WRAP))
+                ret.put("outdated", r.readAs == 1)
+                call.resolve(ret)
+            }
+            is Frames.Open.Failed -> {
+                logd("frame open failed, unsupported=${r.unsupported}")
+                if (r.unsupported) call.reject("Unsupported frame", "E_UNSUPPORTED")
+                else call.reject(failMsg, failCode)
+            }
+        }
+    }
+
     // a fresh wrap key per generation (versioned alias). On overwrite the old version is deleted
     // after the new state is persisted, so a restored pre-rotation wrapped private can no longer be
     // unwrapped. Clears any orphan at this version first (cancelled attempt).
@@ -1060,6 +1165,10 @@ class PqSecureStoragePlugin : Plugin() {
         onError: () -> Unit = {},
         onSuccess: (Cipher) -> Unit
     ) {
+        if (!biometryUsable()) {
+            onError()
+            return rejectNoBiometry(call)
+        }
         // only one prompt at a time; a second concurrent op is rejected, not stacked
         if (!authInFlight.compareAndSet(false, true)) {
             onError()
@@ -1093,12 +1202,20 @@ class PqSecureStoragePlugin : Plugin() {
                     if (!settled.compareAndSet(false, true)) return
                     onError()
                     authInFlight.set(false)
-                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                    rejectPromptError(call, errorCode)
                 }
 
                 override fun onAuthenticationFailed() {
                     // biometric mismatch, prompt stays open for retry -- don't settle
                 }
+            }
+            // checked here on the UI thread, so onStop can't land between the check and authenticate()
+            if (!Policy.promptCanStart(hostActivity.supportFragmentManager.isStateSaved, hostActivity.isFinishing)) {
+                settled.set(true)
+                onError()
+                authInFlight.set(false)
+                call.reject("App is not in the foreground", "E_AUTH_FAILED")
+                return@runOnUiThread
             }
             try {
                 val promptInfo = BiometricPrompt.PromptInfo.Builder()
@@ -1109,8 +1226,8 @@ class PqSecureStoragePlugin : Plugin() {
                     .build()
                 BiometricPrompt(hostActivity, cryptoExecutor, callback).authenticate(promptInfo, cryptoObject)
             } catch (e: Exception) {
-                // authenticate() can throw if the activity is backgrounding; settle the call so the
-                // caller's in-flight latch (ssInitializing / kemGenerating) is always released
+                // settle the call so the caller's in-flight latch (kemGenerating, storeWriting...) is
+                // always released
                 if (settled.compareAndSet(false, true)) {
                     logd("biometric prompt failed to start", e)
                     onError()
@@ -1131,6 +1248,7 @@ class PqSecureStoragePlugin : Plugin() {
         call: PluginCall,
         onSuccess: (Signature) -> Unit
     ) {
+        if (!biometryUsable()) return rejectNoBiometry(call)
         // only one prompt at a time; a second concurrent op is rejected, not stacked
         if (!authInFlight.compareAndSet(false, true)) {
             return call.reject("Another authentication is in progress", "E_BUSY")
@@ -1157,12 +1275,18 @@ class PqSecureStoragePlugin : Plugin() {
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     if (!settled.compareAndSet(false, true)) return
                     authInFlight.set(false)
-                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                    rejectPromptError(call, errorCode)
                 }
 
                 override fun onAuthenticationFailed() {
                     // biometric mismatch, prompt stays open for retry -- don't settle
                 }
+            }
+            if (!Policy.promptCanStart(hostActivity.supportFragmentManager.isStateSaved, hostActivity.isFinishing)) {
+                settled.set(true)
+                authInFlight.set(false)
+                call.reject("App is not in the foreground", "E_AUTH_FAILED")
+                return@runOnUiThread
             }
             try {
                 val promptInfo = BiometricPrompt.PromptInfo.Builder()
@@ -1256,17 +1380,25 @@ class PqSecureStoragePlugin : Plugin() {
             return call.reject("Key or value out of bounds", "E_INVALID_ARGS")
         }
         val newBio = boolArg(call, "requireBiometric", false) ?: return
+        if (newBio && !biometryUsable()) return rejectNoBiometry(call)
         if (!storeWriting.add(key)) return call.reject("Store write in progress, retry", "E_BUSY")
         val done = { storeWriting.remove(key); Unit }
         // these hit the Keystore; a throw here would skip done() and leave the key latched as busy
         val alias: String
         val existing: SecretKey?
+        var dead = false
         val hasItem: Boolean
         val itemsNow: Int
         val charsNow: Long
         try {
             alias = itemKeyAlias(key)
-            existing = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
+            // only a key killed by an enrollment change may read as gone. Any other error stops the
+            // write, or a silent setItem could replace a biometric item it failed to look up.
+            existing = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) {
+                if (!Policy.deadKeyError(e)) throw e
+                dead = true
+                null
+            }
             val tag = nameTag(key)
             hasItem = storeItems().contains(tag)
             val all = storeItems().all
@@ -1286,11 +1418,22 @@ class PqSecureStoragePlugin : Plugin() {
         // when the key was invalidated by an enrollment change (isAuthRequired reads metadata, still
         // valid on an invalidated key), so a bio item can't be silently recreated as silent. Only
         // when a real item exists -- an orphan key from a cancelled write shouldn't block a fresh one.
-        if (existing != null && hasItem && isAuthRequired(existing) != newBio) {
+        // a dead key had auth (that's what enrollment kills), so only a biometric write may replace it
+        val tierChange = if (existing != null) isAuthRequired(existing) != newBio else dead && !newBio
+        if (hasItem && tierChange) {
             done()
             return call.reject("Item exists with a different requireBiometric; removeItem first", "E_TIER_MISMATCH")
         }
         val reusable = Policy.reusableItemKey(existing, hasItem) { invalidated(it) }
+        // a key made here for a new name is dropped again if the write doesn't land (cancel, E_BUSY,
+        // error): left behind it would make clear() and removeItem prompt for an item that isn't there
+        val dropOrphan = {
+            if (reusable == null) try {
+                if (!storeItems().contains(nameTag(key))) keystore().deleteEntry(alias)
+            } catch (e: Exception) {
+                logd("setItem: orphan key delete failed", e)
+            }
+        }
         val itemKey: SecretKey = if (reusable != null) {
             reusable // reuse (an accessibility change on overwrite is ignored -- set at creation)
         } else {
@@ -1302,7 +1445,7 @@ class PqSecureStoragePlugin : Plugin() {
                 return call.reject("Store failed", "E_ENCRYPT")
             }
         }
-        encryptAndStore(call, key, value, itemKey, newBio, done)
+        encryptAndStore(call, key, value, itemKey, newBio) { ok -> if (!ok) dropOrphan(); done() }
     }
 
     // a reused bio key is dead after a biometric enrollment change; detect it so setItem recreates
@@ -1315,7 +1458,8 @@ class PqSecureStoragePlugin : Plugin() {
         false // other errors (e.g. needs auth) mean the key is still usable
     }
 
-    private fun encryptAndStore(call: PluginCall, key: String, value: String, itemKey: SecretKey, bio: Boolean, done: () -> Unit) {
+    // [done] runs once on every path, with whether the item landed
+    private fun encryptAndStore(call: PluginCall, key: String, value: String, itemKey: SecretKey, bio: Boolean, done: (Boolean) -> Unit) {
         try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, itemKey)
@@ -1323,36 +1467,46 @@ class PqSecureStoragePlugin : Plugin() {
             if (!bio) {
                 cipher.updateAAD(key.toByteArray(Charsets.UTF_8))
                 val ct = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-                val committed = storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
-                done()
+                val tag = nameTag(key)
+                val stored = storedValue(key, iv, ct)
+                val committed = commitOrRevert(storeItems(), listOf(tag)) { it.putString(tag, stored) }
+                done(committed)
                 if (committed) call.resolve() else call.reject("Store failed", "E_ENCRYPT")
             } else {
                 // a biometric item's own key gates the WRITE too (encrypt needs the key), so the
                 // prompt here is the same gate that blocks a silent bridge caller from overwriting it
                 val hostActivity = activity as? FragmentActivity
-                    ?: run { done(); return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY") }
+                    ?: run { done(false); return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY") }
                 authenticateCipher(hostActivity, cipher, "Authenticate to save your secret", call,
-                    onError = { done() }) { boundCipher ->
+                    onError = { done(false) }) { boundCipher ->
                     boundCipher.updateAAD(key.toByteArray(Charsets.UTF_8))
                     val ct = boundCipher.doFinal(value.toByteArray(Charsets.UTF_8))
-                    val committed = storeItems().edit().putString(nameTag(key), storedValue(key, iv, ct)).commit()
-                    done()
+                    val tag = nameTag(key)
+                    val stored = storedValue(key, iv, ct)
+                    val committed = commitOrRevert(storeItems(), listOf(tag)) { it.putString(tag, stored) }
+                    done(committed)
                     if (committed) call.resolve() else call.reject("Store failed", "E_ENCRYPT")
                 }
             }
         } catch (e: Exception) {
             logd("setItem encrypt failed for key=$key", e)
-            done()
+            done(false)
             call.reject("Store failed", "E_ENCRYPT")
         }
     }
 
-    // decapsulate the frame with the (already unwrapped) private. Wipes privBytes + shared secret
+    // open the frame (v2, then v1) with the (already unwrapped) private. Wipes privBytes + shared secret
     // (best-effort: JVM copies in SecretKeySpec/GC still linger).
-    private fun decapsulate(privBytes: ByteArray, frame: ByteArray, ctLen: Int): ByteArray {
+    private fun openKemFrame(privBytes: ByteArray, frame: ByteArray, type: String, ctLen: Int): Frames.Open<ByteArray> {
         try {
             val priv = KeyFactory.getInstance("ML-KEM", bc).generatePrivate(PKCS8EncodedKeySpec(privBytes))
-            return MlKemCrypto.decapsulate(bc, priv, frame, ctLen)
+            return Frames.open(
+                frame,
+                forKem = true,
+                suiteOk = { it == Frames.kemSuiteOf(type) },
+                openV2 = { h, _, body -> MlKemCrypto.decapsulate(bc, priv, body, ctLen, h) },
+                openV1 = { MlKemCrypto.decapsulate(bc, priv, it, ctLen) },
+            )
         } finally {
             privBytes.fill(0)
         }
@@ -1367,8 +1521,11 @@ class PqSecureStoragePlugin : Plugin() {
         }
         val parts = stored.split(".")
         if (parts.size != 3) return call.reject("Store item corrupt", "E_TAMPERED")
-        val itemKey = (try { keystore().getKey(itemKeyAlias(key), null) as? SecretKey } catch (e: Exception) { null })
-            ?: return call.reject("Store key missing", "E_KEY_NOT_FOUND")
+        val itemKey = try { keystore().getKey(itemKeyAlias(key), null) as? SecretKey } catch (e: Exception) {
+            // any other error goes to guarded (E_DECRYPT): "key missing" would tell the host the item is lost
+            if (!Policy.deadKeyError(e)) throw e
+            return call.reject("Biometric enrollment changed; store key invalidated", "E_KEY_INVALIDATED")
+        } ?: return call.reject("Store key missing", "E_KEY_NOT_FOUND")
         try {
             val iv = Base64.decode(parts[1], Base64.DEFAULT)
             val ct = Base64.decode(parts[2], Base64.DEFAULT)
@@ -1400,9 +1557,15 @@ class PqSecureStoragePlugin : Plugin() {
     fun removeItem(call: PluginCall): Unit = guarded(call, "E_REMOVE") {
         val key = call.getString("key") ?: return call.reject("Missing key", "E_MISSING_PARAMS")
         val alias = itemKeyAlias(key)
-        val itemKey = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) { null }
+        // a dead key is deleted like an invalidated one. Any other error goes to guarded (E_REMOVE):
+        // read as "no key" it would delete a biometric item with no prompt
+        val itemKey = try { keystore().getKey(alias, null) as? SecretKey } catch (e: Exception) {
+            if (!Policy.deadKeyError(e)) throw e
+            null
+        }
         val del = {
-            val removed = storeItems().edit().remove(nameTag(key)).commit()
+            val tag = nameTag(key)
+            val removed = commitOrRevert(storeItems(), listOf(tag)) { it.remove(tag) }
             if (removed) {
                 try { keystore().deleteEntry(alias) } catch (e: Exception) { logd("removeItem: key delete failed", e) }
                 call.resolve()
@@ -1410,7 +1573,8 @@ class PqSecureStoragePlugin : Plugin() {
                 call.reject("Remove failed", "E_REMOVE")
             }
         }
-        if (itemKey == null || !isAuthRequired(itemKey)) { del(); return }
+        // a key with no stored item (left by a cancelled write) guards no data: no prompt for it
+        if (itemKey == null || !isAuthRequired(itemKey) || !storeItems().contains(nameTag(key))) { del(); return }
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         try {
@@ -1460,11 +1624,21 @@ class PqSecureStoragePlugin : Plugin() {
     fun clear(call: PluginCall): Unit = guarded(call, "E_CLEAR") {
         val ks = keystore()
         val itemAliases = ks.aliases().toList().filter { it.startsWith(itemAliasPrefix) }
-        val bioKeys = itemAliases.mapNotNull { a -> (ks.getKey(a, null) as? SecretKey)?.takeIf { isAuthRequired(it) } }
+        val bio = itemAliases.mapNotNull { a ->
+            val k = try { ks.getKey(a, null) as? SecretKey } catch (e: Exception) {
+                // a dead key guards nothing; any other error rejects E_CLEAR
+                if (!Policy.deadKeyError(e)) throw e
+                null
+            }
+            k?.takeIf { isAuthRequired(it) }?.let { a to it }
+        }
+        // reading every name costs a Keystore op per item, so only when there is a biometric key
+        val withItem = if (bio.isEmpty()) emptySet() else itemAliasesWithItem()
+        val bioKeys = Policy.promptCandidates(bio, withItem) { it.first }.map { it.second }
         // prompt once, bound to a biometric key that can still unlock. A key dead after an enrollment
         // change guards nothing, and must not stand in for live biometric items.
         val bioKey = Policy.pickLiveBioKey(bioKeys) { invalidated(it) }
-        if (bioKey == null) { doClearWipe(); call.resolve(); return }
+        if (bioKey == null) { finishClear(call); return }
         val hostActivity = activity as? FragmentActivity
             ?: return call.reject("Host activity is not a FragmentActivity", "E_NO_ACTIVITY")
         try {
@@ -1472,22 +1646,38 @@ class PqSecureStoragePlugin : Plugin() {
             cipher.init(Cipher.ENCRYPT_MODE, bioKey)
             authenticateCipher(hostActivity, cipher, "Authenticate to erase secure storage", call) { boundCipher ->
                 boundCipher.doFinal(ByteArray(0))
-                doClearWipe()
-                call.resolve()
+                finishClear(call)
             }
         } catch (e: KeyPermanentlyInvalidatedException) {
             logd("clear: key invalidated, wiping", e)
-            doClearWipe()
-            call.resolve()
+            finishClear(call)
         } catch (e: Exception) {
             logd("clear failed", e)
             call.reject("Clear failed", "E_CLEAR")
         }
     }
 
-    private fun doClearWipe() {
-        // wipe prefs, then delete every per-item key plus the name-hashing/encryption keys
-        storeItems().edit().clear().commit()
+    // Keystore aliases of the stored items, null when a stored name can't be read
+    private fun itemAliasesWithItem(): Set<String>? {
+        val out = HashSet<String>()
+        for ((_, v) in storeItems().all) {
+            val parts = (v as? String)?.split(".") ?: return null
+            if (parts.size != 3) return null
+            val name = try { decName(parts[0]) } catch (e: Exception) { return null }
+            out.add(itemKeyAlias(name))
+        }
+        return out
+    }
+
+    private fun finishClear(call: PluginCall) {
+        if (doClearWipe()) call.resolve() else call.reject("Clear failed", "E_CLEAR")
+    }
+
+    // wipe prefs, then delete every per-item key plus the name-hashing/encryption keys. A failed prefs
+    // write stops before the keys go: the entries would come back from the file with no key to open them
+    private fun doClearWipe(): Boolean {
+        val prefs = storeItems()
+        if (!commitOrRevert(prefs, prefs.all.keys) { it.clear() }) return false
         try {
             val ks = keystore()
             for (a in ks.aliases().toList().filter { it.startsWith(itemAliasPrefix) }) {
@@ -1499,5 +1689,6 @@ class PqSecureStoragePlugin : Plugin() {
         } catch (e: Exception) {
             logd("clear: keystore delete failed", e)
         }
+        return true
     }
 }

@@ -24,7 +24,8 @@ export interface PrefixMethods {
      * the shared instance and of other views, so a library can call
      * `PqSecureStorage.withPrefix('mylib_')` and use that without touching the host app's items:
      * its `keys()` and `clear()` only see items under the prefix. The crypto methods and the JSON
-     * helpers are available on the view.
+     * helpers are available on the view, but key aliases are not prefixed: they are shared by every
+     * caller.
      *
      * An empty or non-string prefix throws a `TypeError`: an empty one would mean the whole store,
      * and that is the shared instance itself.
@@ -34,33 +35,40 @@ export interface PrefixMethods {
 
 const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
 
+// the natives answer a missing key with E_MISSING_PARAMS. Joined to the prefix it would become the
+// name "undefined" and never reach that check, so check it here
+const missingKey = () => Promise.reject(Object.assign(new Error('Missing key'), { code: 'E_MISSING_PARAMS' }));
+
 // one prefixed view over `native`. `extra` carries what only the shared instance has.
 function scoped(
     native: PqSecureStoragePlugin,
     state: { prefix: string },
     extra: object,
 ): PqSecureStoragePlugin & JsonMethods {
-    const px = (key: string) => state.prefix + key;
+    const px = <T>(key: unknown, run: (key: string) => Promise<T>): Promise<T> =>
+        typeof key === 'string' ? run(state.prefix + key) : missingKey();
 
     // prefixed store the JSON layer sits on top of
     const store = {
         setItem: (o: { key: string; value: string; requireBiometric?: boolean; accessibility?: Accessibility }) =>
-            native.setItem({ ...o, key: px(o.key) }),
-        getItem: (o: { key: string }) => native.getItem({ key: px(o.key) }),
+            px(o?.key, (key) => native.setItem({ ...o, key })),
+        getItem: (o: { key: string }) => px(o?.key, (key) => native.getItem({ key })),
     };
 
     const overrides = {
         setItem: store.setItem,
         getItem: store.getItem,
-        removeItem: (o: { key: string }) => native.removeItem({ key: px(o.key) }),
-        hasItem: (o: { key: string }) => native.hasItem({ key: px(o.key) }),
+        removeItem: (o: { key: string }) => px(o?.key, (key) => native.removeItem({ key })),
+        hasItem: (o: { key: string }) => px(o?.key, (key) => native.hasItem({ key })),
         async keys(): Promise<{ keys: string[] }> {
             const { keys } = await native.keys();
             const p = state.prefix;
             return { keys: p ? keys.filter((k) => k.startsWith(p)).map((k) => k.slice(p.length)) : keys };
         },
         async clear(): Promise<void> {
-            if (!state.prefix) {
+            // read once: a setKeyPrefix('') during the awaits below must not widen the wipe
+            const p = state.prefix;
+            if (!p) {
                 await native.clear();
                 return;
             }
@@ -69,7 +77,7 @@ function scoped(
             // keep going after a failure so one cancel does not leave the rest.
             let failed: { reason: unknown } | undefined;
             for (const k of keys) {
-                if (!k.startsWith(state.prefix)) continue;
+                if (!k.startsWith(p)) continue;
                 try {
                     await native.removeItem({ key: k });
                 } catch (reason) {

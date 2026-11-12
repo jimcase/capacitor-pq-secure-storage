@@ -1,3 +1,4 @@
+import LocalAuthentication
 import XCTest
 @testable import CapacitorPqSecureStorage
 
@@ -77,5 +78,42 @@ final class InputPolicyTests: XCTestCase {
 
     func testTheReplacementPromptNamesTheDropWhenTheNewKeyIsSilent() {
         XCTAssertEqual(InputPolicy.replacementReason(newRequiresBiometric: false), "Replace your key with one that does not need Face ID or Touch ID")
+    }
+
+    // no hardware, or Face ID denied for the app in Settings
+    func testBiometryNotAvailableIsUnavailable() {
+        XCTAssertEqual(InputPolicy.authErrorCode(.biometryNotAvailable), "E_BIOMETRY_UNAVAILABLE")
+    }
+
+    func testNothingEnrolledIsUnavailable() {
+        XCTAssertEqual(InputPolicy.authErrorCode(.biometryNotEnrolled), "E_BIOMETRY_UNAVAILABLE")
+    }
+
+    func testALockoutIsUnavailable() {
+        XCTAssertEqual(InputPolicy.authErrorCode(.biometryLockout), "E_BIOMETRY_UNAVAILABLE")
+    }
+
+    func testNoPasscodeIsUnavailable() {
+        XCTAssertEqual(InputPolicy.authErrorCode(.passcodeNotSet), "E_BIOMETRY_UNAVAILABLE")
+    }
+
+    // the prompt could run and the user or the system ended it
+    func testACancelOrAFailedMatchStaysAuthFailed() {
+        let codes: [LAError.Code] = [.userCancel, .appCancel, .systemCancel, .authenticationFailed, .userFallback, .invalidContext, .notInteractive]
+        for code in codes {
+            XCTAssertEqual(InputPolicy.authErrorCode(code), "E_AUTH_FAILED", "\(code.rawValue)")
+        }
+    }
+
+    func testNoLAErrorIsAuthFailed() {
+        XCTAssertEqual(InputPolicy.authErrorCode(nil), "E_AUTH_FAILED")
+    }
+
+    // one Character can hold many code points, so the cap counts bytes like the recipient key one
+    func testTheCryptoInputCapCountsBytesNotCharacters() {
+        let marks = "A" + String(repeating: "\u{301}", count: 1000)
+        XCTAssertEqual(marks.count, 1)
+        XCTAssertFalse(InputPolicy.cryptoInputWithinLimit(marks, maxBase64: 100))
+        XCTAssertTrue(InputPolicy.cryptoInputWithinLimit(String(repeating: "A", count: 100), maxBase64: 100))
     }
 }

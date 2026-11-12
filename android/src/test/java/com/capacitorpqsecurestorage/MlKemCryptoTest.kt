@@ -83,11 +83,21 @@ class MlKemCryptoTest {
     private fun katPrivate(): PrivateKey =
         KeyFactory.getInstance("ML-KEM", bc).generatePrivate(PKCS8EncodedKeySpec(b64(MlKemKat.PRIVATE_PKCS8)))
 
-    private fun chacha(mode: Int, key: ByteArray, nonce: ByteArray, input: ByteArray): ByteArray =
+    private fun chacha(mode: Int, key: ByteArray, nonce: ByteArray, input: ByteArray, aad: ByteArray? = null): ByteArray =
         Cipher.getInstance("ChaCha20-Poly1305").run {
             init(mode, SecretKeySpec(key, "ChaCha20"), IvParameterSpec(nonce))
+            if (aad != null) updateAAD(aad)
             doFinal(input)
         }
+
+    private fun assertFails(what: String, block: () -> Unit) {
+        try {
+            block()
+            fail("expected $what to throw")
+        } catch (e: Exception) {
+            // expected
+        }
+    }
 
     // a ciphertext produced by noble: the frame an iOS, web or keripy peer would send
     @Test
@@ -117,6 +127,37 @@ class MlKemCryptoTest {
         val pub = MlKemCrypto.publicFromRaw(bc, b64(MlKemKat.PUBLIC_RAW), NISTObjectIdentifiers.id_alg_ml_kem_768)
         val frame = MlKemCrypto.encapAndSeal(bc, pub, msg)
         assertArrayEquals(msg, MlKemCrypto.decapsulate(bc, katPrivate(), frame, 1088))
+    }
+
+    @Test
+    fun aadBindsTheFrameToItsHeader() {
+        val pub = MlKemCrypto.publicFromRaw(bc, b64(MlKemKat.PUBLIC_RAW), NISTObjectIdentifiers.id_alg_ml_kem_768)
+        val frame = MlKemCrypto.encapAndSeal(bc, pub, msg, Frames.header(0x01))
+        assertArrayEquals(msg, MlKemCrypto.decapsulate(bc, katPrivate(), frame, 1088, Frames.header(0x01)))
+        assertFails("a frame opened without its aad") { MlKemCrypto.decapsulate(bc, katPrivate(), frame, 1088) }
+        assertFails("a frame opened with another suite header") {
+            MlKemCrypto.decapsulate(bc, katPrivate(), frame, 1088, Frames.header(0x02))
+        }
+    }
+
+    // a v2 body from noble or CryptoKit: ChaCha20-Poly1305 keyed with the raw K, header as aad
+    @Test
+    fun opensAV2FrameSealedByAnotherLibrary() {
+        val nonce = ByteArray(12) { it.toByte() }
+        val aead = chacha(Cipher.ENCRYPT_MODE, b64(MlKemKat.SHARED_SECRET), nonce, msg, Frames.header(0x01))
+        val body = b64(MlKemKat.CIPHER_TEXT) + nonce + aead
+        assertArrayEquals(msg, MlKemCrypto.decapsulate(bc, katPrivate(), body, 1088, Frames.header(0x01)))
+    }
+
+    @Test
+    fun aTruncatedV2BodyThrowsInsteadOfReturningGarbage() {
+        val pub = MlKemCrypto.publicFromRaw(bc, b64(MlKemKat.PUBLIC_RAW), NISTObjectIdentifiers.id_alg_ml_kem_768)
+        val body = MlKemCrypto.encapAndSeal(bc, pub, msg, Frames.header(0x01))
+        for (len in intArrayOf(body.size - 1, body.size - 16, 1100, 1090, 1000, 0)) {
+            assertFails("a body cut to $len bytes") {
+                MlKemCrypto.decapsulate(bc, katPrivate(), body.copyOfRange(0, len), 1088, Frames.header(0x01))
+            }
+        }
     }
 
     @Test

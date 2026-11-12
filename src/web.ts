@@ -8,7 +8,14 @@ import { randomBytes } from '@noble/post-quantum/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
 
-import type { PqSecureStoragePlugin, SignatureType, KemType, HardwareCapabilities } from './definitions.js';
+import type {
+    PqSecureStoragePlugin,
+    SignatureType,
+    KemType,
+    HardwareCapabilities,
+    FrameFormat,
+} from './definitions.js';
+import { FrameSuite, KEM_SUITE, formatOption, frameHeader, openFrame } from './frames.js';
 
 // Software fallback for platforms without hardware PQC (the web, mainly). Uses @noble in pure
 // JS and persists keys/values in a Storage (localStorage by default). NOT hardware-backed and
@@ -113,8 +120,16 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         }
     }
 
+    // the natives read string options with getString, so a missing one and one of another type are the
+    // same E_MISSING_PARAMS. Here a number would be used as is (sign would sign its digits)
+    private str(name: string, value: unknown): string {
+        if (typeof value !== 'string') this.fail('E_MISSING_PARAMS', `Missing ${name}`);
+        return value;
+    }
+
     // same charset as native; blocks the plugin's own namespace and reserved prefix
-    private safeAlias(alias: string): string {
+    private safeAlias(value: unknown): string {
+        const alias = this.str('keyAlias', value);
         if (!/^[A-Za-z0-9_-]{1,64}$/.test(alias) || alias.startsWith('__pq')) {
             this.fail('E_BAD_ALIAS', 'Invalid key alias');
         }
@@ -128,8 +143,15 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         }
     }
 
+    private formatArg(value: unknown): FrameFormat {
+        const f = formatOption(value);
+        if (f === null) this.fail('E_INVALID_ARGS', 'format must be 1 or 2');
+        return f;
+    }
+
     // reject an oversized input before decoding it (the base64 string bounds the decoded size)
-    private decodeCapped(b64: string): Uint8Array {
+    private decodeCapped(value: unknown): Uint8Array {
+        const b64 = this.str('data', value);
         if (b64.length > MAX_CRYPTO_INPUT * 2) this.fail('E_INPUT_TOO_LARGE', 'Input too large');
         const u = fromB64(b64);
         if (u.length > MAX_CRYPTO_INPUT) this.fail('E_INPUT_TOO_LARGE', 'Input too large');
@@ -141,7 +163,19 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         return v === null ? null : fromB64(v);
     }
     private put(k: string, v: Uint8Array): void {
-        this.store.setItem(k, toB64(v));
+        this.write(k, toB64(v));
+    }
+    // a full localStorage throws a DOMException with only a number code, map it to the native one
+    private write(k: string, v: string): void {
+        try {
+            this.store.setItem(k, v);
+        } catch (e) {
+            const name = (e as { name?: unknown } | null)?.name;
+            if (name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED') {
+                this.fail('E_STORE_FULL', 'Browser storage is full');
+            }
+            throw e;
+        }
     }
 
     // frame = nonce(12) || gcm(includes tag), with optional associated data
@@ -170,7 +204,7 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
 
     // one blob per keypair so the write is atomic (no half-written sk-without-pk on quota errors)
     private putKeypair(prefix: string, alias: string, sk: Uint8Array, pk: Uint8Array, type: string): void {
-        this.store.setItem(`${prefix}.${alias}`, JSON.stringify({ sk: toB64(sk), pk: toB64(pk), type }));
+        this.write(`${prefix}.${alias}`, JSON.stringify({ sk: toB64(sk), pk: toB64(pk), type }));
     }
     private getKeypair(prefix: string, alias: string): { sk: Uint8Array; pk: Uint8Array; type: string } | null {
         const raw = this.store.getItem(`${prefix}.${alias}`);
@@ -192,6 +226,7 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
             supportedVariants: ['PQC_MLDSA_65', 'PQC_MLDSA_87', 'ECDSA_256R1', 'ED25519'],
             supportedKem: ['PQC_MLKEM_768', 'PQC_MLKEM_1024'],
             kemInSecureEnclave: false,
+            atRestSuite: FrameSuite.AT_REST_AES_GCM,
         };
     }
 
@@ -237,17 +272,44 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         return { signature: toB64(sig) };
     }
 
-    async encryptAtRest(options: { keyAlias: string; data: string }): Promise<{ ciphertext: string }> {
+    async encryptAtRest(options: {
+        keyAlias: string;
+        data: string;
+        format?: FrameFormat;
+    }): Promise<{ ciphertext: string }> {
+        const fmt = this.formatArg(options.format);
         const key = this.getOrCreateAes(this.safeAlias(options.keyAlias));
         const input = this.decodeCapped(options.data);
-        return { ciphertext: toB64(this.guard('E_ENCRYPT', 'Encrypt failed', () => this.aesSeal(key, input))) };
+        return {
+            ciphertext: toB64(
+                this.guard('E_ENCRYPT', 'Encrypt failed', () => {
+                    if (fmt !== 2) return this.aesSeal(key, input);
+                    const header = frameHeader(FrameSuite.AT_REST_AES_GCM);
+                    return concat(header, this.aesSeal(key, input, header));
+                }),
+            ),
+        };
     }
 
-    async decryptAtRest(options: { keyAlias: string; data: string }): Promise<{ plaintext: string }> {
+    async decryptAtRest(options: {
+        keyAlias: string;
+        data: string;
+    }): Promise<{ plaintext: string; outdated: boolean }> {
         const key = this.get(`pqss.aes.${this.safeAlias(options.keyAlias)}`);
         if (!key) this.fail('E_KEY_NOT_FOUND', 'Key not found');
-        const input = this.decodeCapped(options.data);
-        return { plaintext: toB64(this.guard('E_DECRYPT', 'Decrypt failed', () => this.aesOpen(key, input))) };
+        const buf = this.decodeCapped(options.data);
+        const r = openFrame(
+            buf,
+            'encryptAtRest',
+            (s) => s === FrameSuite.AT_REST_AES_GCM,
+            (h, _s, body) => this.aesOpen(key, body, h),
+            (f) => this.aesOpen(key, f),
+        );
+        if (!r.ok) {
+            if (r.unsupported) this.fail('E_UNSUPPORTED', 'Unsupported frame');
+            this.fail('E_DECRYPT', 'Decrypt failed');
+        }
+        return { plaintext: toB64(r.value), outdated: r.readAs === 1 };
     }
 
     async generateKemKeyPair(options: {
@@ -277,9 +339,11 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         recipientPublicKey: string;
         type: KemType;
         data: string;
+        format?: FrameFormat;
     }): Promise<{ ciphertext: string }> {
+        const fmt = this.formatArg(options.format);
         const input = this.decodeCapped(options.data);
-        if (options.recipientPublicKey.length > MAX_RECIPIENT_KEY_B64) {
+        if (this.str('recipientPublicKey', options.recipientPublicKey).length > MAX_RECIPIENT_KEY_B64) {
             this.fail('E_INVALID_ARGS', 'Invalid public key');
         }
         const kem = kemOf(options.type);
@@ -288,13 +352,18 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
             ciphertext: this.guard('E_ENCRYPT', 'Encrypt failed', () => {
                 const { cipherText, sharedSecret } = kem.encapsulate(pk);
                 const nonce = randomBytes(12);
-                const aead = chacha20poly1305(sharedSecret, nonce).encrypt(input);
-                return toB64(concat(cipherText, nonce, aead));
+                const header = fmt === 2 ? frameHeader(KEM_SUITE[options.type]) : undefined;
+                const aead = chacha20poly1305(sharedSecret, nonce, header).encrypt(input);
+                return toB64(concat(header ?? new Uint8Array(0), cipherText, nonce, aead));
             }),
         };
     }
 
-    async decrypt(options: { keyAlias: string; type: KemType; data: string }): Promise<{ plaintext: string }> {
+    async decrypt(options: {
+        keyAlias: string;
+        type: KemType;
+        data: string;
+    }): Promise<{ plaintext: string; outdated: boolean }> {
         const kp = this.getKeypair('pqss.kem', this.safeAlias(options.keyAlias));
         if (!kp) this.fail('E_KEY_NOT_FOUND', 'Key not found');
         if (kp.type !== options.type) this.fail('E_TYPE_MISMATCH', 'Key type mismatch');
@@ -303,12 +372,22 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         const buf = this.decodeCapped(options.data);
         if (buf.length <= ctLen + 12) this.fail('E_BAD_CIPHERTEXT', 'Malformed ciphertext');
         const kem = kemOf(options.type);
-        const plain = this.guard('E_DECRYPT', 'Decrypt failed', () => {
-            const sharedSecret = kem.decapsulate(buf.subarray(0, ctLen), kp.sk);
-            const nonce = buf.subarray(ctLen, ctLen + 12);
-            return chacha20poly1305(sharedSecret, nonce).decrypt(buf.subarray(ctLen + 12));
-        });
-        return { plaintext: toB64(plain) };
+        const open = (f: Uint8Array, aad?: Uint8Array) => {
+            const sharedSecret = kem.decapsulate(f.subarray(0, ctLen), kp.sk);
+            return chacha20poly1305(sharedSecret, f.subarray(ctLen, ctLen + 12), aad).decrypt(f.subarray(ctLen + 12));
+        };
+        const r = openFrame(
+            buf,
+            'encryptTo',
+            (s) => s === KEM_SUITE[options.type],
+            (h, _s, body) => open(body, h),
+            (f) => open(f),
+        );
+        if (!r.ok) {
+            if (r.unsupported) this.fail('E_UNSUPPORTED', 'Unsupported frame');
+            this.fail('E_DECRYPT', 'Decrypt failed');
+        }
+        return { plaintext: toB64(r.value), outdated: r.readAs === 1 };
     }
 
     // requireBiometric/accessibility are accepted for API parity but ignored: the web fallback has
@@ -319,6 +398,8 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
         requireBiometric?: boolean;
         accessibility?: string;
     }): Promise<void> {
+        this.str('key', options.key);
+        this.str('value', options.value);
         this.checkBool('requireBiometric', options.requireBiometric);
         // same bounds as native so the fallback can't be flooded either
         if (options.key.length === 0 || options.key.length > 512 || options.value.length > 256 * 1024) {
@@ -332,6 +413,7 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
     }
 
     async getItem(options: { key: string }): Promise<{ value: string | null }> {
+        this.str('key', options.key);
         const frame = this.get(`pqss.store.${options.key}`);
         const key = this.get(STORE_KEY);
         if (!frame || !key) return { value: null };
@@ -340,10 +422,12 @@ export class PqSecureStorageWeb extends WebPlugin implements PqSecureStoragePlug
     }
 
     async removeItem(options: { key: string }): Promise<void> {
+        this.str('key', options.key);
         this.store.removeItem(`pqss.store.${options.key}`);
     }
 
     async hasItem(options: { key: string }): Promise<{ exists: boolean }> {
+        this.str('key', options.key);
         return { exists: this.store.getItem(`pqss.store.${options.key}`) !== null };
     }
 

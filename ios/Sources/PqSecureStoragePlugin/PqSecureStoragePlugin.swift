@@ -228,6 +228,7 @@ private enum PqSecureStorageError: Error {
     case authFailed
     case biometryUnavailable
     case badCiphertext
+    case keyMismatch
     case keychain(OSStatus)
 }
 
@@ -269,7 +270,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 "biometricGated": bio,
                 "supportedVariants": hw ? ["ECDSA_256R1", "ED25519", "PQC_MLDSA_65", "PQC_MLDSA_87"] : [],
                 "supportedKem": hw ? ["PQC_MLKEM_768", "PQC_MLKEM_1024"] : [],
-                "kemInSecureEnclave": hw
+                "kemInSecureEnclave": hw,
+                "atRestSuite": Int(Self.atRestSuite())
             ])
         } else {
             call.resolve([
@@ -278,7 +280,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 "biometricGated": false,
                 "supportedVariants": [],
                 "supportedKem": [],
-                "kemInSecureEnclave": false
+                "kemInSecureEnclave": false,
+                "atRestSuite": Int(Frames.atRestSepEcies)
             ])
         }
     }
@@ -295,6 +298,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let overwrite = Self.boolArg(call, "overwrite", default: false),
               let requireBiometric = Self.boolArg(call, "requireBiometric", default: true) else { return }
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
+        // before the ED25519 branch, so it covers the wrapped key too
+        guard !requireBiometric || Self.biometryUsable() else { return Self.rejectAuth(call, .biometryUnavailable) }
 
         if type == "ED25519" {
             return wrappedGenerate(alias: alias, type: type, overwrite: overwrite, requireBiometric: requireBiometric, call: call)
@@ -328,8 +333,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if existingBio {
             Self.authenticate(reason: InputPolicy.replacementReason(newRequiresBiometric: requireBiometric)) { result in
                 switch result {
-                case .failure:
-                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err):
+                    Self.rejectAuth(call, err)
                 case .success(let ctx):
                     // prove the biometric bound to the existing key when possible; if it's gone or
                     // invalidated the sign throws -- still regenerate, since the user authenticated.
@@ -378,7 +383,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let type = call.getString("type") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
-        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard InputPolicy.cryptoInputWithinLimit(dataStr, maxBase64: Self.maxCryptoInputB64) else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let raw = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
@@ -409,6 +414,8 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 call.resolve(["signature": signature.base64EncodedString()])
             } catch PqSecureStorageError.keyNotFound {
                 call.reject("Key not found", "E_KEY_NOT_FOUND")
+            } catch PqSecureStorageError.keyMismatch {
+                call.reject("Public key does not match the private key; regenerate with overwrite", "E_TAMPERED")
             } catch {
                 os_log("sign failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
                 call.reject("Signing failed", "E_SIGN")
@@ -432,7 +439,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if meta.requireBiometric {
             Self.authenticate(reason: reason) { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success(let context): doSign(context)
                 }
             }
@@ -448,20 +455,28 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let dataStr = call.getString("data") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
-        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard let format = Self.formatArg(call) else { return }
+        guard InputPolicy.cryptoInputWithinLimit(dataStr, maxBase64: Self.maxCryptoInputB64) else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let raw = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
+            if format == 2, #available(iOS 26.0, *), Self.writesMlkem(alias: alias) {
+                let header = Frames.header(suite: Frames.atRestSepMlkem)
+                let body = try Frames.sealGcm(raw, key: try Self.atRestKemKey(alias: alias, create: true), header: header)
+                return call.resolve(["ciphertext": (header + body).base64EncodedString()])
+            }
             let priv = try Self.atRestKey(alias: alias, create: true)
             guard let pub = SecKeyCopyPublicKey(priv) else { throw PqSecureStorageError.badCiphertext }
             var err: Unmanaged<CFError>?
             guard let ct = SecKeyCreateEncryptedData(pub, Self.atRestAlgo, raw as CFData, &err) as Data? else {
                 throw PqSecureStorageError.badCiphertext
             }
-            call.resolve(["ciphertext": ct.base64EncodedString()])
+            // 0x11 is today's ECIES output behind the header, SecKeyCreateEncryptedData takes no AAD
+            let frame = format == 2 ? Frames.header(suite: Frames.atRestSepEcies) + ct : ct
+            call.resolve(["ciphertext": frame.base64EncodedString()])
         } catch {
             os_log("encryptAtRest failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
             call.reject("Encrypt failed", "E_ENCRYPT")
@@ -473,24 +488,62 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let dataStr = call.getString("data") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
-        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard InputPolicy.cryptoInputWithinLimit(dataStr, maxBase64: Self.maxCryptoInputB64) else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let raw = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
         guard Self.validAlias(alias) else { return call.reject("Invalid key alias", "E_BAD_ALIAS") }
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
-        do {
-            let priv = try Self.atRestKey(alias: alias, create: false)
+        // keys load before Frames.open, it swallows errors. The ML-KEM one only for a 0x12 frame
+        let h = Frames.parse(raw)
+        var kem: SymmetricKey?
+        if #available(iOS 26.0, *), h?.version == Frames.version, h?.suite == Frames.atRestSepMlkem {
+            do {
+                kem = try Self.atRestKemKey(alias: alias, create: false)
+            } catch PqSecureStorageError.keyNotFound {
+                // only this key opens 0x12, and an iOS v1 frame never starts with the mark
+                return call.reject("Key not found", "E_KEY_NOT_FOUND")
+            } catch {
+                // a broken item or a SEP failure is not a missing key
+                os_log("decryptAtRest failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+                return call.reject("Decrypt failed", "E_DECRYPT")
+            }
+        }
+        let p256 = try? Self.atRestKey(alias: alias, create: false)
+        // an alias written only with format 2 has just the ML-KEM item, other frames still get the read rule
+        var hasKem = kem != nil
+        if !hasKem, p256 == nil, #available(iOS 26.0, *) {
+            hasKem = (try? Self.atRestKemItem(alias: alias, create: false)) != nil
+        }
+        guard hasKem || p256 != nil else { return call.reject("Key not found", "E_KEY_NOT_FOUND") }
+        let ecies: (Data) throws -> Data = { ct in
+            guard let priv = p256 else { throw PqSecureStorageError.keyNotFound }
             var err: Unmanaged<CFError>?
-            guard let plain = SecKeyCreateDecryptedData(priv, Self.atRestAlgo, raw as CFData, &err) as Data? else {
+            guard let plain = SecKeyCreateDecryptedData(priv, Self.atRestAlgo, ct as CFData, &err) as Data? else {
                 throw PqSecureStorageError.badCiphertext
             }
-            call.resolve(["plaintext": plain.base64EncodedString()])
-        } catch PqSecureStorageError.keyNotFound {
-            call.reject("Key not found", "E_KEY_NOT_FOUND")
-        } catch {
-            os_log("decryptAtRest failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
-            call.reject("Decrypt failed", "E_DECRYPT")
+            return plain
+        }
+        let opened = Frames.open(
+            raw, forKem: false,
+            suiteOk: { $0 == Frames.atRestSepEcies || ($0 == Frames.atRestSepMlkem && kem != nil) },
+            openV2: { head, suite, body in
+                guard suite == Frames.atRestSepMlkem, let kem = kem else { return try ecies(body) }
+                return try Frames.openGcm(body: body, key: kem, header: head)
+            },
+            openV1: ecies
+        )
+        switch opened {
+        case .ok(let plain, let readAs):
+            call.resolve(["plaintext": plain.base64EncodedString(),
+                          "outdated": Frames.atRestOutdated(readAs: readAs, suite: h?.suite) { Self.atRestSuite() }])
+        case .failed(let unsupported):
+            if unsupported {
+                call.reject("Unsupported frame", "E_UNSUPPORTED")
+            } else {
+                os_log("decryptAtRest failed", log: vcpLog, type: .error)
+                call.reject("Decrypt failed", "E_DECRYPT")
+            }
         }
     }
 
@@ -508,6 +561,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let overwrite = Self.boolArg(call, "overwrite", default: false),
               let requireBiometric = Self.boolArg(call, "requireBiometric", default: true) else { return }
         guard SecureEnclave.isAvailable else { return call.reject("Secure Enclave not available", "E_UNSUPPORTED") }
+        guard !requireBiometric || Self.biometryUsable() else { return Self.rejectAuth(call, .biometryUnavailable) }
 
         let exists = Self.kemAliasExists(alias)
         if !overwrite && exists {
@@ -529,7 +583,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if existingBio {
             Self.authenticate(reason: InputPolicy.replacementReason(newRequiresBiometric: requireBiometric)) { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success: doGenerate()
                 }
             }
@@ -560,11 +614,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let dataStr = call.getString("data") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
+        guard let format = Self.formatArg(call) else { return }
         guard InputPolicy.recipientKeyWithinLimit(pubStr) else { return call.reject("Invalid public key", "E_INVALID_ARGS") }
         guard let pub = InputPolicy.base64Data(pubStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
-        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard InputPolicy.cryptoInputWithinLimit(dataStr, maxBase64: Self.maxCryptoInputB64) else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let raw = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
@@ -575,11 +630,18 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard raw.count <= Self.maxCryptoInput else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         do {
             let (kemCt, sharedSecret) = try PQKemKey.encapsulate(type: type, recipientPublicKey: pub)
-            let sealed = try ChaChaPoly.seal(raw, using: sharedSecret)
-            // frame = kemCt || nonce(12) || aeadCt(+tag16); ChaChaPoly.combined = nonce||ct||tag
             var frame = Data()
-            frame.append(kemCt)
-            frame.append(sealed.combined)
+            if format == 2 {
+                let header = Frames.header(suite: Frames.kemSuite(for: type)!)
+                frame.append(header)
+                frame.append(kemCt)
+                frame.append(try Frames.sealChaCha(raw, key: sharedSecret, header: header))
+            } else {
+                let sealed = try ChaChaPoly.seal(raw, using: sharedSecret)
+                // frame = kemCt || nonce(12) || aeadCt(+tag16); ChaChaPoly.combined = nonce||ct||tag
+                frame.append(kemCt)
+                frame.append(sealed.combined)
+            }
             call.resolve(["ciphertext": frame.base64EncodedString()])
         } catch {
             os_log("encryptTo failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
@@ -593,7 +655,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let dataStr = call.getString("data") else {
             return call.reject("Missing required parameters", "E_MISSING_PARAMS")
         }
-        guard dataStr.count <= Self.maxCryptoInputB64 else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
+        guard InputPolicy.cryptoInputWithinLimit(dataStr, maxBase64: Self.maxCryptoInputB64) else { return call.reject("Input too large", "E_INPUT_TOO_LARGE") }
         guard let frame = InputPolicy.base64Data(dataStr) else {
             return call.reject("Invalid base64 input", "E_INVALID_ARGS")
         }
@@ -622,14 +684,37 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         let doDecrypt: (LAContext) -> Void = { context in
             do {
                 let key = try Self.loadKemKey(alias: alias, context: context)
-                let kemCt = frame.subdata(in: frame.startIndex..<(frame.startIndex + ctLen))
-                let aead = frame.subdata(in: (frame.startIndex + ctLen)..<frame.endIndex)
-                let sharedSecret = try key.decapsulate(kemCt)
-                let box = try ChaChaPoly.SealedBox(combined: aead)
-                let plain = try ChaChaPoly.open(box, using: sharedSecret)
-                call.resolve(["plaintext": plain.base64EncodedString()])
+                let opened = Frames.open(
+                    frame, forKem: true, suiteOk: { $0 == Frames.kemSuite(for: type) },
+                    openV2: { head, _, body in
+                        guard body.count > ctLen else { throw PqSecureStorageError.badCiphertext }
+                        let s = body.startIndex
+                        let sharedSecret = try key.decapsulate(body.subdata(in: s..<(s + ctLen)))
+                        return try Frames.openChaCha(body: body.subdata(in: (s + ctLen)..<body.endIndex), key: sharedSecret, header: head)
+                    },
+                    openV1: { whole in
+                        let kemCt = whole.subdata(in: whole.startIndex..<(whole.startIndex + ctLen))
+                        let aead = whole.subdata(in: (whole.startIndex + ctLen)..<whole.endIndex)
+                        let sharedSecret = try key.decapsulate(kemCt)
+                        let box = try ChaChaPoly.SealedBox(combined: aead)
+                        return try ChaChaPoly.open(box, using: sharedSecret)
+                    }
+                )
+                switch opened {
+                case .ok(let plain, let readAs):
+                    call.resolve(["plaintext": plain.base64EncodedString(), "outdated": readAs == 1])
+                case .failed(let unsupported):
+                    if unsupported {
+                        call.reject("Unsupported frame", "E_UNSUPPORTED")
+                    } else {
+                        os_log("decrypt failed", log: vcpLog, type: .error)
+                        call.reject("Decrypt failed", "E_DECRYPT")
+                    }
+                }
             } catch PqSecureStorageError.keyNotFound {
                 call.reject("Key not found", "E_KEY_NOT_FOUND")
+            } catch PqSecureStorageError.keyMismatch {
+                call.reject("Public key does not match the private key; regenerate with overwrite", "E_TAMPERED")
             } catch {
                 os_log("decrypt failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
                 call.reject("Decrypt failed", "E_DECRYPT")
@@ -639,7 +724,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if requireBiometric {
             Self.authenticate(reason: "Authenticate to decrypt with your PQ key") { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success(let context): doDecrypt(context)
                 }
             }
@@ -672,15 +757,45 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 completion(.success(context))
             } else {
                 os_log("biometric auth failed: %{private}@", log: vcpLog, type: .error, String(describing: evalError))
-                completion(.failure(.authFailed))
+                // a lockout can start during the prompt
+                let unavailable = InputPolicy.authErrorCode((evalError as? LAError)?.code) == "E_BIOMETRY_UNAVAILABLE"
+                completion(.failure(unavailable ? .biometryUnavailable : .authFailed))
             }
         }
+    }
+
+    private static func rejectAuth(_ call: CAPPluginCall, _ error: PqSecureStorageError) {
+        if case .biometryUnavailable = error {
+            call.reject("No usable biometric on this device", "E_BIOMETRY_UNAVAILABLE")
+        } else {
+            call.reject("Authentication failed", "E_AUTH_FAILED")
+        }
+    }
+
+    // the Keychain answers a prompt that could not run like a cancel, so ask LocalAuthentication why
+    private static func keychainAuthError() -> PqSecureStorageError {
+        var err: NSError?
+        _ = LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err)
+        return InputPolicy.authErrorCode((err as? LAError)?.code) == "E_BIOMETRY_UNAVAILABLE" ? .biometryUnavailable : .authFailed
+    }
+
+    private static func biometryUsable() -> Bool {
+        LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
     }
 
     // an option that is present but not a boolean is rejected, not silently replaced by its default
     private static func boolArg(_ call: CAPPluginCall, _ name: String, default def: Bool) -> Bool? {
         guard let v = InputPolicy.booleanOption(call.getValue(name), default: def) else {
             call.reject("\(name) must be a boolean", "E_INVALID_ARGS")
+            return nil
+        }
+        return v
+    }
+
+    // format is 1 or 2, absent means 1. Anything else is rejected, not read as 1
+    private static func formatArg(_ call: CAPPluginCall) -> Int? {
+        guard let v = Frames.formatOption(call.getValue("format")) else {
+            call.reject("format must be 1 or 2", "E_INVALID_ARGS")
             return nil
         }
         return v
@@ -754,9 +869,6 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     private static func privateAccount(for alias: String) -> String { "\(alias).private" }
     private static func publicAccount(for alias: String) -> String { "\(alias).pub" }
 
-    // HMAC key for the public-key integrity tag. Load-or-create, silent, device-only. Unlike
-    // Android (Keystore/hardware HMAC key), this key lives in the Keychain (readable in-process): the
-    // tag defends against offline/backup tampering of the stored public key, not an in-process attacker.
     // Serializes load-or-create of the shared internal keys. SecKeyCreateRandomKey does not dedupe by
     // tag, so two concurrent first calls would leave two keys under one tag and the tags would verify
     // or not depending on which one a lookup returns.
@@ -889,26 +1001,50 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     @available(iOS 26.0, *)
     private static func persist(key: PQKey, type: String, alias: String, requireBiometric: Bool) throws {
-        // write public first: aliasExists() checks the public account, so a failed private write
-        // leaves a consistent state (alias reports exists) that heals on retry, instead of an
-        // orphaned private that blocks the alias. dataRepresentation is SEP-wrapped ciphertext, so
-        // device-only/unlocked-only protection is enough.
-        let pubStatus = upsertKeychain(
-            account: publicAccount(for: alias),
-            data: key.publicKeyBytes,
-            attrs: [
-                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: try pubTag(type: type, requireBiometric: requireBiometric, pub: key.publicKeyBytes)),
-                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            ]
-        )
-        guard pubStatus == errSecSuccess else { throw PqSecureStorageError.keychain(pubStatus) }
+        let pub = key.publicKeyBytes
+        let tag = try pubTag(type: type, requireBiometric: requireBiometric, pub: pub)
+        try persistSep(pubAccount: publicAccount(for: alias), privBase: privateAccount(for: alias), pub: pub,
+                       priv: key.dataRepresentation) { ver in
+            encodeGeneric(type: type, requireBiometric: requireBiometric, tag: tag, wrapVersion: ver)
+        }
+    }
 
-        let privStatus = upsertKeychain(
-            account: privateAccount(for: alias),
-            data: key.dataRepresentation,
-            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
-        )
+    // The private goes first, under the next account version when a key is already there, then the
+    // public moves to that version, then the old private goes. A failed write or a crash in between
+    // leaves the old pair. Writing the public first could leave a new public over the old private:
+    // sign uses one key and getPublicKey serves the other. dataRepresentation is SEP-wrapped
+    // ciphertext, so device-only/unlocked-only protection is enough for it.
+    private static func persistSep(pubAccount: String, privBase: String, pub: Data, priv: Data, generic: (Int) -> Data) throws {
+        let oldVer = try sepPrivVersion(pubAccount: pubAccount)
+        let newVer = KeyGeneric.nextPrivVersion(existing: oldVer)
+        let newAcct = KeyGeneric.privAccount(base: privBase, version: newVer)
+        let accessible: [String: Any] = [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
+        let privStatus = upsertKeychain(account: newAcct, data: priv, attrs: accessible)
         guard privStatus == errSecSuccess else { throw PqSecureStorageError.keychain(privStatus) }
+        var pubAttrs = accessible
+        pubAttrs[kSecAttrGeneric as String] = generic(newVer)
+        let pubStatus = upsertKeychain(account: pubAccount, data: pub, attrs: pubAttrs)
+        guard pubStatus == errSecSuccess else {
+            if oldVer != nil { SecItemDelete(baseQuery(account: newAcct) as CFDictionary) }
+            throw PqSecureStorageError.keychain(pubStatus)
+        }
+        if let old = oldVer {
+            SecItemDelete(baseQuery(account: KeyGeneric.privAccount(base: privBase, version: old)) as CFDictionary)
+        }
+    }
+
+    // version of the private the public entry points at, nil when there is no public entry. Any other
+    // Keychain error throws: reading it as "no key" would write the new private over the live one.
+    private static func sepPrivVersion(pubAccount: String) throws -> Int? {
+        var query = baseQuery(account: pubAccount)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let item = out as? [String: Any] else { throw PqSecureStorageError.keychain(status) }
+        let generic = (item[kSecAttrGeneric as String] as? Data).flatMap { decodeGeneric($0) }
+        return generic?.wrapVersion ?? -1
     }
 
     private static func loadMetadata(alias: String) throws -> KeyMetadata {
@@ -926,14 +1062,14 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let decoded = decodeGeneric(typeData) else {
             throw PqSecureStorageError.keyNotFound
         }
-        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: -1)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: decoded.wrapVersion)
     }
 
     @available(iOS 26.0, *)
     private static func loadKey(alias: String, context: LAContext) throws -> PQKey {
         let meta = try loadMetadata(alias: alias)
 
-        var query = baseQuery(account: privateAccount(for: alias))
+        var query = baseQuery(account: KeyGeneric.privAccount(base: privateAccount(for: alias), version: meta.wrapVersion))
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -945,7 +1081,10 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
         // hands the evaluated `context` to the SEP so it can check the access-control policy
         // baked in at generation time (`.biometryCurrentSet`) without prompting again
-        return try PQKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
+        let key = try PQKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
+        // an overwrite cut in half by 7.2.0 or older can leave the new public over the old private
+        guard key.publicKeyBytes == meta.publicKey else { throw PqSecureStorageError.keyMismatch }
+        return key
     }
 
     // MARK: - Wrapped (software) signing keys (Ed25519)
@@ -1035,7 +1174,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if existingBio {
             Self.authenticate(reason: InputPolicy.replacementReason(newRequiresBiometric: requireBiometric)) { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success: doGenerate()
                 }
             }
@@ -1068,7 +1207,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 case errSecItemNotFound:
                     call.reject("Key not found", "E_KEY_NOT_FOUND")
                 case errSecUserCanceled, errSecAuthFailed:
-                    call.reject("Authentication failed", "E_AUTH_FAILED")
+                    Self.rejectAuth(call, Self.keychainAuthError())
                 default:
                     call.reject("Signing failed", "E_SIGN")
                 }
@@ -1135,6 +1274,90 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         return key
     }
 
+    // MARK: - At-rest key (per-alias Secure Enclave ML-KEM-768, iOS 26+)
+
+    // What encryptAtRest writes with format 2: 0x12, or 0x11 when an older SEP on iOS 26 can't do ML-KEM.
+    // Same steps as a real alias (create, rebuild, decapsulate): a key that is made but can't decapsulate
+    // would fail every write. Only a success is kept, a probe run while locked can fail and a kept 0x11
+    // makes apps migrate 0x12 frames down. CryptoKit SEP keys don't persist alone, nothing to delete.
+    // Own lock, never keyCreateLock.
+    private static let atRestProbeLock = NSLock()
+    private static var atRestMlkemOk = false
+
+    private static func atRestSuite() -> UInt8 {
+        atRestProbeLock.lock(); defer { atRestProbeLock.unlock() }
+        if !atRestMlkemOk, #available(iOS 26.0, *), SecureEnclave.isAvailable,
+           let access = SecAccessControlCreateWithFlags(
+               nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .privateKeyUsage, nil) {
+            do {
+                let k = try SecureEnclave.MLKEM768.PrivateKey(accessControl: access)
+                let enc = try k.publicKey.encapsulate()
+                let back = try SecureEnclave.MLKEM768.PrivateKey(dataRepresentation: k.dataRepresentation, authenticationContext: nil)
+                atRestMlkemOk = try back.decapsulate(enc.encapsulated) == enc.sharedSecret
+            } catch {
+                os_log("at-rest ml-kem probe failed: %{private}@", log: vcpLog, type: .error, String(describing: error))
+            }
+        }
+        return atRestMlkemOk ? Frames.atRestSepMlkem : Frames.atRestSepEcies
+    }
+
+    // an alias that has its ML-KEM item keeps 0x12 even when the probe fails this time, so a passing
+    // SEP failure never moves its data to the classical suite
+    @available(iOS 26.0, *)
+    private static func writesMlkem(alias: String) -> Bool {
+        if (try? atRestKemItem(alias: alias, create: false)) != nil { return true }
+        return atRestSuite() == Frames.atRestSepMlkem
+    }
+
+    // One generic item per alias, kemCt (1088) || dataRepresentation, so creating it is one write. The
+    // kemCt is one encapsulation to the key itself, made at creation. Its shared secret is the alias'
+    // AES key: one SEP decapsulation per call, never stored or cached.
+    private static func atRestKemAccount(_ alias: String) -> String { "\(alias).atrest.mlkem" }
+
+    @available(iOS 26.0, *)
+    private static func atRestKemKey(alias: String, create: Bool) throws -> SymmetricKey {
+        let ctLen = 1088
+        let item = try atRestKemItem(alias: alias, create: create)
+        guard item.count > ctLen else { throw PqSecureStorageError.badCiphertext }
+        let s = item.startIndex
+        let priv = try SecureEnclave.MLKEM768.PrivateKey(
+            dataRepresentation: item.subdata(in: (s + ctLen)..<item.endIndex), authenticationContext: nil)
+        return try priv.decapsulate(item.subdata(in: s..<(s + ctLen)))
+    }
+
+    @available(iOS 26.0, *)
+    private static func atRestKemItem(alias: String, create: Bool) throws -> Data {
+        keyCreateLock.lock(); defer { keyCreateLock.unlock() }
+        let account = atRestKemAccount(alias)
+        var query = baseQuery(account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &out)
+        if status == errSecSuccess, let item = out as? Data { return item }
+        guard create else { throw PqSecureStorageError.keyNotFound }
+        // only when there is really none: an item we can't read right now (locked) must not be replaced
+        guard status == errSecItemNotFound else { throw PqSecureStorageError.keychain(status) }
+        guard let access = SecAccessControlCreateWithFlags(
+            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .privateKeyUsage, nil
+        ) else { throw PqSecureStorageError.accessControlFailed }
+        let priv = try SecureEnclave.MLKEM768.PrivateKey(accessControl: access)
+        let item = try priv.publicKey.encapsulate().encapsulated + priv.dataRepresentation
+        var add = baseQuery(account: account)
+        add[kSecValueData as String] = item
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let st = SecItemAdd(add as CFDictionary, nil)
+        // never update: another process may have made it first and handed out frames under it
+        if st == errSecDuplicateItem {
+            out = nil
+            let again = SecItemCopyMatching(query as CFDictionary, &out)
+            guard again == errSecSuccess, let stored = out as? Data else { throw PqSecureStorageError.keychain(again) }
+            return stored
+        }
+        guard st == errSecSuccess else { throw PqSecureStorageError.keychain(st) }
+        return item
+    }
+
     // MARK: - ML-KEM key persistence (separate accounts from signing keys)
 
     private static func kemPrivateAccount(for alias: String) -> String { "\(alias).kem.private" }
@@ -1150,23 +1373,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
 
     @available(iOS 26.0, *)
     private static func persistKem(key: PQKemKey, type: String, alias: String, requireBiometric: Bool) throws {
-        // public first (see persist): keeps a failed private write healable instead of orphaning
-        let pubStatus = upsertKeychain(
-            account: kemPublicAccount(for: alias),
-            data: key.publicKeyBytes,
-            attrs: [
-                kSecAttrGeneric as String: encodeGeneric(type: type, requireBiometric: requireBiometric, tag: try pubTag(type: type, requireBiometric: requireBiometric, pub: key.publicKeyBytes)),
-                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            ]
-        )
-        guard pubStatus == errSecSuccess else { throw PqSecureStorageError.keychain(pubStatus) }
-
-        let privStatus = upsertKeychain(
-            account: kemPrivateAccount(for: alias),
-            data: key.dataRepresentation,
-            attrs: [kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
-        )
-        guard privStatus == errSecSuccess else { throw PqSecureStorageError.keychain(privStatus) }
+        let pub = key.publicKeyBytes
+        let tag = try pubTag(type: type, requireBiometric: requireBiometric, pub: pub)
+        try persistSep(pubAccount: kemPublicAccount(for: alias), privBase: kemPrivateAccount(for: alias), pub: pub,
+                       priv: key.dataRepresentation) { ver in
+            encodeGeneric(type: type, requireBiometric: requireBiometric, tag: tag, wrapVersion: ver)
+        }
     }
 
     private static func loadKemMetadata(alias: String) throws -> KeyMetadata {
@@ -1183,13 +1395,13 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
               let decoded = decodeGeneric(typeData) else {
             throw PqSecureStorageError.keyNotFound
         }
-        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: -1)
+        return KeyMetadata(type: decoded.type, publicKey: pubData, requireBiometric: decoded.requireBiometric, tag: decoded.tag, wrapVersion: decoded.wrapVersion)
     }
 
     @available(iOS 26.0, *)
     private static func loadKemKey(alias: String, context: LAContext) throws -> PQKemKey {
         let meta = try loadKemMetadata(alias: alias)
-        var query = baseQuery(account: kemPrivateAccount(for: alias))
+        var query = baseQuery(account: KeyGeneric.privAccount(base: kemPrivateAccount(for: alias), version: meta.wrapVersion))
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
@@ -1197,7 +1409,9 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         guard status == errSecSuccess, let blob = result as? Data else {
             throw PqSecureStorageError.keyNotFound
         }
-        return try PQKemKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
+        let key = try PQKemKey(type: meta.type, dataRepresentation: blob, authenticationContext: context)
+        guard key.publicKeyBytes == meta.publicKey else { throw PqSecureStorageError.keyMismatch }
+        return key
     }
 
     // MARK: secure storage (Keychain, silent write / gated read, ThisDeviceOnly)
@@ -1224,6 +1438,51 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         return SecItemCopyMatching(q as CFDictionary, nil)
     }
 
+    // index row of a store item, same account and encrypted name but no ACL, so keys() can list it
+    // with UISkip. A duplicate is a row left from before, just refresh its name in place (unless
+    // updateOnDuplicate is false, then the row stays as it is).
+    private static func addIndex(account: String, encName: Data, protection: CFString, updateOnDuplicate: Bool = true) -> OSStatus {
+        let match: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: StoreIndex.service,
+            kSecAttrAccount as String: account,
+        ]
+        var add = match
+        add[kSecAttrGeneric as String] = encName
+        add[kSecValueData as String] = Data([0])
+        add[kSecAttrAccessible as String] = protection
+        let status = SecItemAdd(add as CFDictionary, nil)
+        guard status == errSecDuplicateItem, updateOnDuplicate else { return status }
+        return SecItemUpdate(match as CFDictionary, [kSecAttrGeneric as String: encName] as CFDictionary)
+    }
+
+    private static func deleteIndex(account: String) {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: StoreIndex.service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(q as CFDictionary)
+    }
+
+    // clear() deletes the store and its name keys while getItem (global queue) and setItem / removeItem
+    // (bridge queue, or the LA reply queue after a prompt) write items and index rows. Without this, a
+    // row or an item could land under a name key the wipe just removed: a name keys() lists and nothing
+    // can remove, or an item no name reaches. Taken before keyCreateLock (symmetricKey), never after.
+    private static let storeLock = NSLock()
+    private static func withStoreLock<T>(_ body: () -> T) -> T {
+        storeLock.lock(); defer { storeLock.unlock() }
+        return body()
+    }
+
+    private static func clearIndex() {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: StoreIndex.service,
+        ]
+        SecItemDelete(q as CFDictionary)
+    }
+
     // every bio store item is biometryCurrentSet, so with no biometric enrolled none of them can be
     // live and a prompt can't run. Then a dead item is deleted without one or the name stays locked.
     private static func noBiometricEnrolled() -> Bool {
@@ -1244,6 +1503,9 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Invalid value", "E_MISSING_PARAMS"); return
         }
         guard let requireBiometric = Self.boolArg(call, "requireBiometric", default: false) else { return }
+        guard !requireBiometric || Self.biometryUsable() else {
+            Self.rejectAuth(call, .biometryUnavailable); return
+        }
         // the account is a keyed HMAC of the name (a Keychain dump reveals no names); encName carries
         // the encrypted real name so keys() can still enumerate them
         let account: String
@@ -1283,9 +1545,24 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         for (k, v) in accessAttr { addQuery[k] = v }
 
         let create: () -> Void = {
-            let status = SecItemAdd(addQuery as CFDictionary, nil)
+            // names again under the lock: a clear() since the probe drops the name keys, and an item
+            // stored under the old account would be out of reach of every name
+            let (status, indexed): (OSStatus, Bool) = Self.withStoreLock {
+                guard let acct = try? Self.nameTag(key), let enc = try? Self.encName(key) else { return (errSecParam, false) }
+                var match = matchQuery
+                match[kSecAttrAccount as String] = acct
+                var add = addQuery
+                add[kSecAttrAccount as String] = acct
+                add[kSecAttrGeneric as String] = enc
+                let status = SecItemAdd(add as CFDictionary, nil)
+                guard status == errSecSuccess else { return (status, false) }
+                // no index row means keys() can't see a bio item, so take the item back out
+                if Self.addIndex(account: acct, encName: enc, protection: protection) == errSecSuccess { return (status, true) }
+                SecItemDelete(match as CFDictionary)
+                return (status, false)
+            }
             if status == errSecSuccess {
-                call.resolve()
+                if indexed { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
             } else if status == errSecDuplicateItem {
                 // probe said not found but the row is there: a dead biometric item
                 call.reject("Item invalidated by a biometric change; removeItem first", "E_KEY_INVALIDATED")
@@ -1299,8 +1576,15 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         let update: (LAContext?) -> Void = { ctx in
             var q = matchQuery
             if let ctx = ctx { q[kSecUseAuthenticationContext as String] = ctx }
-            let status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-            if status == errSecSuccess { call.resolve() } else { call.reject("Store failed", "E_ENCRYPT") }
+            // a clear() during the prompt leaves nothing to update, so no row for a wiped item either
+            let status: OSStatus = Self.withStoreLock {
+                let status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+                // value is already stored, the index row is only a backfill here
+                if status == errSecSuccess { _ = Self.addIndex(account: account, encName: encodedName, protection: protection) }
+                return status
+            }
+            guard status == errSecSuccess else { call.reject("Store failed", "E_ENCRYPT"); return }
+            call.resolve()
         }
 
         // probe the existing item's tier WITHOUT prompting. Request DATA so the biometry ACL (which
@@ -1329,7 +1613,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 // same tier: authenticate, then update the value atomically
                 Self.authenticate(reason: "Authenticate to replace your secret") { result in
                     switch result {
-                    case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                    case .failure(let err): Self.rejectAuth(call, err)
                     case .success(let ctx): update(ctx)
                     }
                 }
@@ -1356,6 +1640,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrService as String: Self.ssService,
                 kSecAttrAccount as String: account,
                 kSecReturnData as String: true,
+                kSecReturnAttributes as String: true,
                 kSecMatchLimit as String: kSecMatchLimitOne,
                 kSecUseAuthenticationContext as String: context,
             ]
@@ -1363,7 +1648,21 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             let status = SecItemCopyMatching(query as CFDictionary, &out)
             switch status {
             case errSecSuccess:
-                if let data = out as? Data, let value = String(data: data, encoding: .utf8) {
+                let attrs = out as? [String: Any]
+                if let data = attrs?[kSecValueData as String] as? Data, let value = String(data: data, encoding: .utf8) {
+                    // bio items from before the index have no row, and this is the first time we have
+                    // the name with the item already unlocked. Row gets the item's class, an existing
+                    // row is left alone. Best effort, never changes the read. If a clear() ran since
+                    // the read the name key is new, so skip: that row could never be removed. The
+                    // check and the write share the lock with clear()'s wipe.
+                    Self.withStoreLock {
+                        if (try? Self.nameTag(key)) == account, let enc = try? Self.encName(key) {
+                            let cls = (attrs?[kSecAttrAccessible as String] as? String).map { $0 as CFString }
+                            _ = Self.addIndex(account: account, encName: enc,
+                                              protection: cls ?? kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                                              updateOnDuplicate: false)
+                        }
+                    }
                     call.resolve(["value": value])
                 } else {
                     call.reject("Decode failed", "E_DECRYPT")
@@ -1378,7 +1677,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                     call.resolve(["value": NSNull()])
                 }
             case errSecUserCanceled, errSecAuthFailed:
-                call.reject("Authentication failed", "E_AUTH_FAILED")
+                Self.rejectAuth(call, Self.keychainAuthError())
             default:
                 call.reject("Read failed", "E_DECRYPT")
             }
@@ -1410,13 +1709,22 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecAttrService as String: Self.ssService,
                 kSecAttrAccount as String: account,
             ]
-            let status = SecItemDelete(query as CFDictionary)
-            if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Remove failed", "E_REMOVE") }
+            // item first, then its row: an orphan row only lists a name that reads null. Locked so a
+            // setItem of the same name can't add its item and row in between and lose the row
+            let status: OSStatus = Self.withStoreLock {
+                let status = SecItemDelete(query as CFDictionary)
+                if status == errSecSuccess || status == errSecItemNotFound { Self.deleteIndex(account: account) }
+                return status
+            }
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                call.reject("Remove failed", "E_REMOVE"); return
+            }
+            call.resolve()
         }
         let confirmDel: () -> Void = {
             Self.authenticate(reason: "Authenticate to delete your secret") { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success: del()
                 }
             }
@@ -1427,7 +1735,9 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             // means absent; if the row is there, confirm first, unless no biometric is enrolled
             // (then the item is dead).
             switch Self.ssMetaStatus(account: account) {
-            case errSecItemNotFound: call.resolve()
+            case errSecItemNotFound:
+                Self.deleteIndex(account: account) // clean an orphan row
+                call.resolve()
             case errSecSuccess, errSecInteractionNotAllowed:
                 Self.noBiometricEnrolled() ? del() : confirmDel()
             default: call.reject("Remove failed", "E_REMOVE")
@@ -1467,29 +1777,26 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func keys(_ call: CAPPluginCall) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.ssService,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
-        ]
-        var out: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &out)
-        if status == errSecItemNotFound { return call.resolve(["keys": []]) }
-        guard status == errSecSuccess else {
+        // UISkip hides the bio items from the store listing, the index has no ACL so it lists them.
+        // The store listing still counts for silent items written before the index.
+        let list: (String) -> [[String: Any]]? = { service in
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecReturnAttributes as String: true,
+                kSecMatchLimit as String: kSecMatchLimitAll,
+                kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+            ]
+            var out: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &out)
+            if status == errSecItemNotFound { return [] }
+            guard status == errSecSuccess else { return nil }
+            return out as? [[String: Any]] ?? []
+        }
+        guard let index = list(StoreIndex.service), let store = list(Self.ssService) else {
             call.reject("List failed", "E_DECRYPT"); return
         }
-        var result: [String] = []
-        if let items = out as? [[String: Any]] {
-            for item in items {
-                // the account is the HMAC tag; the real name is the encrypted generic attr
-                if let enc = item[kSecAttrGeneric as String] as? Data, let name = try? Self.decName(enc) {
-                    result.append(name)
-                }
-            }
-        }
-        call.resolve(["keys": result])
+        call.resolve(["keys": StoreIndex.names(index: index, store: store, decrypt: { try? Self.decName($0) })])
     }
 
     @objc func clear(_ call: CAPPluginCall) {
@@ -1498,10 +1805,14 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: Self.ssService,
             ]
-            let status = SecItemDelete(query as CFDictionary)
-            // also drop the store's name keys (a later setItem regenerates them)
-            for acct in [Self.nameEncAccount, Self.nameTagAccount] {
-                SecItemDelete(Self.baseQuery(account: acct) as CFDictionary)
+            let status: OSStatus = Self.withStoreLock {
+                let status = SecItemDelete(query as CFDictionary)
+                Self.clearIndex()
+                // also drop the store's name keys (a later setItem regenerates them)
+                for acct in [Self.nameEncAccount, Self.nameTagAccount] {
+                    SecItemDelete(Self.baseQuery(account: acct) as CFDictionary)
+                }
+                return status
             }
             if status == errSecSuccess || status == errSecItemNotFound { call.resolve() } else { call.reject("Clear failed", "E_CLEAR") }
         }
@@ -1517,7 +1828,12 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         ]
         var listOut: CFTypeRef?
         let listStatus = SecItemCopyMatching(listQuery as CFDictionary, &listOut)
-        if listStatus == errSecItemNotFound { return call.resolve() }
+        // empty store: only the orphan index rows go (no secrets in them). Not wipe, that deletes the
+        // whole store service with no bio probe.
+        if listStatus == errSecItemNotFound {
+            Self.clearIndex()
+            return call.resolve()
+        }
         var hasBiometric = false
         var items: [[String: Any]] = []
         if listStatus == errSecInteractionNotAllowed {
@@ -1551,7 +1867,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
         if hasBiometric && !Self.noBiometricEnrolled() {
             Self.authenticate(reason: "Authenticate to erase secure storage") { result in
                 switch result {
-                case .failure: call.reject("Authentication failed", "E_AUTH_FAILED")
+                case .failure(let err): Self.rejectAuth(call, err)
                 case .success: wipe()
                 }
             }
