@@ -1,5 +1,8 @@
 package com.capacitorpqsecurestorage
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+
 // Decisions the plugin takes about keys, kept free of Android classes so plain JVM tests cover them.
 internal object Policy {
     // The key to reuse for a setItem, or null to create a fresh one. Only a key with a real item
@@ -37,10 +40,79 @@ internal object Policy {
         else -> null
     }
 
+    // Whether [make] works. [cleanup] runs either way, after [make], and a failure in it never
+    // changes the answer. So it tries to delete the probe key either way and a failed delete never
+    // turns a working Keystore into a "no".
+    fun probe(make: () -> Unit, cleanup: () -> Unit): Boolean =
+        try {
+            make()
+            true
+        } catch (e: Exception) {
+            false
+        } finally {
+            try {
+                cleanup()
+            } catch (e: Exception) {
+            }
+        }
+
     // a downgrade must not read like a normal rotation
     fun replacementPrompt(newRequiresBiometric: Boolean): String =
         if (newRequiresBiometric) "Authorize key replacement"
         else "Replace this key with one that does not need biometrics"
+
+    // the BiometricPrompt ints are compile time constants, so this still runs in plain JVM tests
+    fun promptErrorCode(errorCode: Int): String = when (errorCode) {
+        BiometricPrompt.ERROR_HW_UNAVAILABLE,
+        BiometricPrompt.ERROR_HW_NOT_PRESENT,
+        BiometricPrompt.ERROR_NO_BIOMETRICS,
+        BiometricPrompt.ERROR_LOCKOUT,
+        BiometricPrompt.ERROR_LOCKOUT_PERMANENT,
+        BiometricPrompt.ERROR_SECURITY_UPDATE_REQUIRED,
+        BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL -> "E_BIOMETRY_UNAVAILABLE"
+        else -> "E_AUTH_FAILED"
+    }
+
+    fun biometryUsable(canAuthenticate: Int): Boolean = canAuthenticate == BiometricManager.BIOMETRIC_SUCCESS
+
+    // biometric 1.1.0 drops a prompt asked once the activity state is saved (from onStop) with only a
+    // log line, no throw and no callback. The caller has to refuse it before, or its latch never frees.
+    fun promptCanStart(stateSaved: Boolean, finishing: Boolean): Boolean = !stateSaved && !finishing
+
+    // A failed keygen makes Android delete its alias, and on a replace that alias still holds the old
+    // key. So a replace makes the same key under a throwaway alias first and only touches the real one
+    // when that worked. A failure that hits only the second keygen still loses the old key.
+    fun <T> replaceKey(replacing: Boolean, trial: () -> Unit, cleanup: () -> Unit, real: () -> T): T {
+        if (replacing) {
+            try {
+                trial()
+            } finally {
+                try {
+                    cleanup()
+                } catch (e: Exception) {
+                }
+            }
+        }
+        return real()
+    }
+
+    // user aliases can't start with __pq, so this never hits a real key
+    fun trialAlias(alias: String): String = "__pq_trial_$alias"
+
+    // KeyStore.getKey gives null only for a missing key. AndroidKeyStoreSpi turns a key killed by an
+    // enrollment change into a bare UnrecoverableKeyException with this message, and every other
+    // keystore2 error into one with the KeyStoreException as cause. Only the first may pass as "no
+    // key to protect", the others say nothing about the key.
+    private const val DEAD_KEY_MESSAGE = "User changed or deleted their auth credentials"
+
+    // Item keys clear() may bind its prompt to: only keys with a stored item. An orphan key left by
+    // a cancelled write protects no data. A null [withItem] (a stored name could not be read) keeps
+    // every key, so an unreadable item never loses its prompt.
+    fun <T, A> promptCandidates(keys: List<T>, withItem: Set<A>?, aliasOf: (T) -> A): List<T> =
+        if (withItem == null) keys else keys.filter { aliasOf(it) in withItem }
+
+    fun deadKeyError(e: Exception): Boolean =
+        e is java.security.UnrecoverableKeyException && e.cause == null && e.message == DEAD_KEY_MESSAGE
 
     const val MAX_STORE_ITEMS = 512
     const val MAX_STORE_TOTAL_CHARS = 16 * 1024 * 1024

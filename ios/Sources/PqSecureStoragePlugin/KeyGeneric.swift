@@ -23,6 +23,18 @@ enum KeyGeneric {
 
     // -1 is an entry from before versioning: its private sits under the plain account
     static func wrapPrivAccount(alias: String, version: Int) -> String {
-        version < 0 ? "\(alias).sigwrap.priv" : "\(alias).sigwrap.priv.\(version)"
+        privAccount(base: "\(alias).sigwrap.priv", version: version)
+    }
+
+    // secure enclave keys use the same rule: base is "<alias>.private" or "<alias>.kem.private"
+    static func privAccount(base: String, version: Int) -> String {
+        version < 0 ? base : "\(base).\(version)"
+    }
+
+    // a first key keeps the plain account (nothing to lose, and older versions still find it). A
+    // replace goes to the next version so the old private stays until the public has moved.
+    static func nextPrivVersion(existing: Int?) -> Int {
+        guard let v = existing else { return -1 }
+        return v + 1
     }
 }

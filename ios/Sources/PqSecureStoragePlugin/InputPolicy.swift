@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 
 // Argument checks the plugin makes before it touches the Keychain or the Secure Enclave. They sit
 // here, free of Capacitor, so unit tests can run them.
@@ -30,12 +31,27 @@ enum InputPolicy {
         b64.utf8.count <= maxRecipientKeyBase64
     }
 
+    // same for the data of the crypto calls. String.count counts Characters, and one Character can
+    // hold many code points, so a string past the cap in bytes passed it
+    static func cryptoInputWithinLimit(_ b64: String, maxBase64: Int) -> Bool {
+        b64.utf8.count <= maxBase64
+    }
+
     // an empty reason makes evaluatePolicy throw an ObjC exception swift can't catch (app dies),
     // so a blank one gets the default
     static func promptReason(_ raw: String?, default def: String) -> String {
         guard let raw = raw else { return def }
         let text = String(raw.prefix(200)).trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? def : text
+    }
+
+    static func authErrorCode(_ code: LAError.Code?) -> String {
+        switch code {
+        case .biometryNotAvailable?, .biometryNotEnrolled?, .biometryLockout?, .passcodeNotSet?:
+            return "E_BIOMETRY_UNAVAILABLE"
+        default:
+            return "E_AUTH_FAILED"
+        }
     }
 
     // a downgrade must not read like a normal rotation

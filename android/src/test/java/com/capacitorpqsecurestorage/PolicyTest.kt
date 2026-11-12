@@ -1,5 +1,7 @@
 package com.capacitorpqsecurestorage
 
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -132,4 +134,133 @@ class PolicyTest {
 
     @Test fun replacementPromptIsTheUsualOneWhenTheNewKeyStaysBiometric() { assertEquals("Authorize key replacement", Policy.replacementPrompt(true)) }
     @Test fun replacementPromptNamesTheDropWhenTheNewKeyIsSilent() { assertEquals("Replace this key with one that does not need biometrics", Policy.replacementPrompt(false)) }
+
+    @Test
+    fun aProbeThatWorksIsTrueAndCleansUp() {
+        var cleaned = false
+        assertTrue(Policy.probe(make = {}, cleanup = { cleaned = true }))
+        assertTrue(cleaned)
+    }
+
+    @Test
+    fun aProbeThatThrowsIsFalseAndStillCleansUp() {
+        var cleaned = false
+        assertFalse(Policy.probe(make = { throw IllegalStateException("keymint") }, cleanup = { cleaned = true }))
+        assertTrue(cleaned)
+    }
+
+    @Test
+    fun aProbeCleansUpAfterMakeWhetherItWorksOrNot() {
+        val calls = mutableListOf<String>()
+        Policy.probe(make = { calls.add("make") }, cleanup = { calls.add("cleanup") })
+        Policy.probe(make = { calls.add("make"); throw IllegalStateException("keymint") }, cleanup = { calls.add("cleanup") })
+        assertEquals(listOf("make", "cleanup", "make", "cleanup"), calls)
+    }
+
+    @Test
+    fun aCleanupThatThrowsDoesNotChangeTheAnswer() {
+        assertTrue(Policy.probe(make = {}, cleanup = { throw IllegalStateException("gone") }))
+        assertFalse(Policy.probe(make = { throw IllegalStateException("x") }, cleanup = { throw IllegalStateException("gone") }))
+    }
+
+    @Test fun aPromptWhileTheSensorIsBusyIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_HW_UNAVAILABLE)) }
+    @Test fun aPromptWithNoSensorIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_HW_NOT_PRESENT)) }
+    @Test fun aPromptWithNothingEnrolledIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_NO_BIOMETRICS)) }
+    @Test fun aLockoutIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_LOCKOUT)) }
+    @Test fun aPermanentLockoutIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_LOCKOUT_PERMANENT)) }
+    @Test fun aSensorThatWaitsForASecurityUpdateIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_SECURITY_UPDATE_REQUIRED)) }
+    @Test fun aDeviceWithNoPinOrPasswordIsUnavailable() { assertEquals("E_BIOMETRY_UNAVAILABLE", Policy.promptErrorCode(BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL)) }
+
+    // the user or the system ended a prompt that could run: the host must not read it as no biometric
+    @Test
+    fun aCancelledPromptStaysAuthFailed() {
+        for (code in listOf(BiometricPrompt.ERROR_USER_CANCELED, BiometricPrompt.ERROR_NEGATIVE_BUTTON, BiometricPrompt.ERROR_CANCELED)) {
+            assertEquals("code $code", "E_AUTH_FAILED", Policy.promptErrorCode(code))
+        }
+    }
+
+    @Test
+    fun otherPromptErrorsStayAuthFailed() {
+        for (code in listOf(BiometricPrompt.ERROR_TIMEOUT, BiometricPrompt.ERROR_UNABLE_TO_PROCESS, BiometricPrompt.ERROR_NO_SPACE,
+                BiometricPrompt.ERROR_VENDOR)) {
+            assertEquals("code $code", "E_AUTH_FAILED", Policy.promptErrorCode(code))
+        }
+    }
+
+    @Test fun anUnknownPromptErrorIsAuthFailed() { assertEquals("E_AUTH_FAILED", Policy.promptErrorCode(999)); assertEquals("E_AUTH_FAILED", Policy.promptErrorCode(-1)) }
+
+    @Test fun aBiometricIsUsableOnlyOnSuccess() { assertTrue(Policy.biometryUsable(BiometricManager.BIOMETRIC_SUCCESS)) }
+
+    @Test
+    fun noBiometricIsUsableOnAnyOtherAnswer() {
+        for (r in listOf(BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED, BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE,
+                BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE, BiometricManager.BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED,
+                BiometricManager.BIOMETRIC_ERROR_UNSUPPORTED, BiometricManager.BIOMETRIC_STATUS_UNKNOWN)) {
+            assertFalse("answer $r", Policy.biometryUsable(r))
+        }
+    }
+
+    // biometric 1.1.0 drops a prompt asked after onStop with no callback at all
+    @Test fun aPromptCanStartInTheForeground() { assertTrue(Policy.promptCanStart(stateSaved = false, finishing = false)) }
+    @Test fun aPromptCannotStartOnceTheActivityIsStopped() { assertFalse(Policy.promptCanStart(stateSaved = true, finishing = false)) }
+    @Test fun aPromptCannotStartOnAFinishingActivity() { assertFalse(Policy.promptCanStart(stateSaved = false, finishing = true)) }
+
+    // android deletes the alias of a failed keygen, and on a replace that alias still holds the old key
+    @Test
+    fun aReplaceThatFailsTheTrialNeverTouchesTheRealAlias() {
+        val calls = mutableListOf<String>()
+        try {
+            Policy.replaceKey(true, trial = { calls.add("trial"); throw IllegalStateException("keymint") },
+                cleanup = { calls.add("cleanup") }, real = { calls.add("real") })
+            fail("should throw")
+        } catch (e: IllegalStateException) {
+        }
+        assertEquals(listOf("trial", "cleanup"), calls)
+    }
+
+    @Test
+    fun aReplaceRunsTheTrialThenCleansUpThenTheRealKeygen() {
+        val calls = mutableListOf<String>()
+        assertEquals("k", Policy.replaceKey(true, trial = { calls.add("trial") }, cleanup = { calls.add("cleanup") },
+            real = { calls.add("real"); "k" }))
+        assertEquals(listOf("trial", "cleanup", "real"), calls)
+    }
+
+    @Test
+    fun aNewAliasSkipsTheTrial() {
+        val calls = mutableListOf<String>()
+        Policy.replaceKey(false, trial = { calls.add("trial") }, cleanup = { calls.add("cleanup") }, real = { calls.add("real") })
+        assertEquals(listOf("real"), calls)
+    }
+
+    @Test fun theTrialAliasIsReservedAndPerAlias() { assertEquals("__pq_trial_id", Policy.trialAlias("id")) }
+
+    // AndroidKeyStoreSpi.engineGetKey: a dead key comes back as a bare exception with this message
+    @Test
+    fun aKeyKilledByAnEnrollmentChangeIsDead() {
+        assertTrue(Policy.deadKeyError(java.security.UnrecoverableKeyException("User changed or deleted their auth credentials")))
+    }
+
+    @Test
+    fun anyOtherKeystoreErrorIsNotADeadKey() {
+        val withCause = java.security.UnrecoverableKeyException("Failed to obtain information about key")
+        withCause.initCause(IllegalStateException("keystore2"))
+        assertFalse(Policy.deadKeyError(withCause))
+        val sameTextWithCause = java.security.UnrecoverableKeyException("User changed or deleted their auth credentials")
+        sameTextWithCause.initCause(IllegalStateException("x"))
+        assertFalse(Policy.deadKeyError(sameTextWithCause))
+        assertFalse(Policy.deadKeyError(java.security.UnrecoverableKeyException("Key algorithm unknown")))
+        assertFalse(Policy.deadKeyError(IllegalStateException("binder")))
+    }
+
+    // an orphan key from a cancelled write protects no data, so clear() must not prompt for it
+    @Test
+    fun clearOnlyPromptsForKeysWithAnItem() {
+        assertEquals(listOf("a"), Policy.promptCandidates(listOf("a", "orphan"), setOf("a", "silent")) { it })
+    }
+
+    @Test
+    fun clearKeepsEveryKeyWhenANameCannotBeRead() {
+        assertEquals(listOf("a", "orphan"), Policy.promptCandidates(listOf("a", "orphan"), null) { it })
+    }
 }

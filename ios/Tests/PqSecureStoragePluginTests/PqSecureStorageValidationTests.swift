@@ -1,4 +1,5 @@
 import Capacitor
+import CryptoKit
 import LocalAuthentication
 import XCTest
 @testable import CapacitorPqSecureStorage
@@ -7,7 +8,7 @@ import XCTest
 // any Secure Enclave key operation, biometric or Keychain write are covered here (argument checks,
 // early rejections): the simulator cannot do those.
 final class PqSecureStorageValidationTests: XCTestCase {
-    private let storeKeys = ["audit-nonbool", "audit-wide"]
+    private let storeKeys = ["audit-nonbool", "audit-wide", "audit-bio"]
 
     override func tearDown() {
         for k in storeKeys {
@@ -58,6 +59,41 @@ final class PqSecureStorageValidationTests: XCTestCase {
         XCTAssertEqual(code, "E_INVALID_ARGS")
     }
 
+    // the test host has no Face ID enrolled unless someone turned it on in the simulator
+    func testSetItemWithRequireBiometricRejectsWhenNoBiometricCanBeUsed() throws {
+        try XCTSkipIf(LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil), "a biometric is usable on this simulator")
+        let code = reject(options: ["key": "audit-bio", "value": "v", "requireBiometric": true]) { $0.setItem($1) }
+        XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE")
+    }
+
+    // the simulator reports a Secure Enclave, so keygen gets past that guard to the biometry check
+    private func skipUnlessKeygenReachesTheBiometryCheck() throws {
+        guard #available(iOS 26.0, *) else { throw XCTSkip("needs iOS 26") }
+        try XCTSkipUnless(SecureEnclave.isAvailable, "no Secure Enclave on this host")
+        try XCTSkipIf(LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil), "a biometric is usable on this simulator")
+    }
+
+    func testGenerateKeyPairWithRequireBiometricRejectsWhenNoBiometricCanBeUsed() throws {
+        try skipUnlessKeygenReachesTheBiometryCheck()
+        for type in ["PQC_MLDSA_65", "PQC_MLDSA_87", "ECDSA_256R1", "ED25519"] {
+            let code = reject(options: ["keyAlias": "audit-bio", "type": type, "requireBiometric": true]) { $0.generateKeyPair($1) }
+            XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE", type)
+        }
+        // requireBiometric defaults to true
+        let code = reject(options: ["keyAlias": "audit-bio", "type": "PQC_MLDSA_65"]) { $0.generateKeyPair($1) }
+        XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE")
+    }
+
+    func testGenerateKemKeyPairWithRequireBiometricRejectsWhenNoBiometricCanBeUsed() throws {
+        try skipUnlessKeygenReachesTheBiometryCheck()
+        for type in ["PQC_MLKEM_768", "PQC_MLKEM_1024"] {
+            let code = reject(options: ["keyAlias": "audit-bio", "type": type, "requireBiometric": true]) { $0.generateKemKeyPair($1) }
+            XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE", type)
+        }
+        let code = reject(options: ["keyAlias": "audit-bio", "type": "PQC_MLKEM_768"]) { $0.generateKemKeyPair($1) }
+        XCTAssertEqual(code, "E_BIOMETRY_UNAVAILABLE")
+    }
+
     func testGenerateKeyPairRejectsAnOverwriteThatIsNotABoolean() {
         let code = reject(options: ["keyAlias": "audit-a", "type": "PQC_MLDSA_65", "overwrite": "yes"]) { $0.generateKeyPair($1) }
         XCTAssertEqual(code, "E_INVALID_ARGS")
@@ -82,6 +118,66 @@ final class PqSecureStorageValidationTests: XCTestCase {
     func testEncryptToRejectsAnUndecodableRecipientKeyAsInvalidArgs() {
         let code = reject(options: ["recipientPublicKey": "***", "type": "PQC_MLKEM_768", "data": "AA=="]) { $0.encryptTo($1) }
         XCTAssertEqual(code, "E_INVALID_ARGS")
+    }
+
+    func testEncryptToRejectsABadFormatBeforeTouchingTheKey() {
+        for bad in ["2", 1.5, 3, true] as [Any] {
+            let code = reject(options: ["recipientPublicKey": "AA==", "type": "PQC_MLKEM_768", "data": "AA==", "format": bad]) { $0.encryptTo($1) }
+            XCTAssertEqual(code, "E_INVALID_ARGS")
+        }
+    }
+
+    func testDecryptRejectsANewerFrameVersionAsUnsupportedOnlyAfterTheKeyCheck() {
+        // no Keychain here so the alias is missing: E_KEY_NOT_FOUND comes first, which proves the order
+        let frame = Data([0x50, 0x51, 0x03, 0x01]) + Data(repeating: 0, count: 1200)
+        let code = reject(options: ["keyAlias": "none", "type": "PQC_MLKEM_768", "data": frame.base64EncodedString()]) { $0.decrypt($1) }
+        XCTAssertEqual(code, "E_KEY_NOT_FOUND")
+    }
+
+    func testEncryptAtRestRejectsABadFormatBeforeTouchingTheKey() {
+        for bad in ["2", 1.5, 3, true] as [Any] {
+            let code = reject(options: ["keyAlias": "audit-a", "data": "AA==", "format": bad]) { $0.encryptAtRest($1) }
+            XCTAssertEqual(code, "E_INVALID_ARGS")
+        }
+    }
+
+    func testDecryptAtRestWithoutAnyKeyIsKeyNotFound() {
+        // no Keychain here so the alias has no key at all: E_KEY_NOT_FOUND, not a failed open, so keys load first
+        let frame = Frames.header(suite: Frames.atRestSepMlkem) + Data(repeating: 0, count: 56)
+        let code = reject(options: ["keyAlias": "none", "data": frame.base64EncodedString()]) { $0.decryptAtRest($1) }
+        XCTAssertEqual(code, "E_KEY_NOT_FOUND")
+    }
+
+    func testCapabilitiesReportAnAtRestSuite() {
+        let caps = resolved(options: [:]) { $0.getHardwareCapabilities($1) }
+        let suite = caps?["atRestSuite"] as? Int
+        if #available(iOS 26.0, *) {
+            XCTAssertTrue(suite == 0x11 || suite == 0x12)
+        } else {
+            XCTAssertEqual(suite, 0x11)
+        }
+    }
+
+    @available(iOS 26.0, *)
+    func testEncryptToWritesAV2FrameOnlyWhenAsked() throws {
+        let priv = try MLKEM768.PrivateKey(seedRepresentation: Data(repeating: 7, count: 64), publicKey: nil)
+        let opts: [String: Any] = [
+            "recipientPublicKey": priv.publicKey.rawRepresentation.base64EncodedString(),
+            "type": "PQC_MLKEM_768", "data": Data("hola".utf8).base64EncodedString(),
+        ]
+        let v1 = Data(base64Encoded: resolved(options: opts) { $0.encryptTo($1) }?["ciphertext"] as? String ?? "")
+        let v1n = Data(base64Encoded: resolved(options: opts.merging(["format": NSNull()]) { $1 }) { $0.encryptTo($1) }?["ciphertext"] as? String ?? "")
+        let v2 = Data(base64Encoded: resolved(options: opts.merging(["format": 2]) { $1 }) { $0.encryptTo($1) }?["ciphertext"] as? String ?? "")
+        XCTAssertEqual(v1?.count, 1088 + 12 + 4 + 16)
+        XCTAssertEqual(v1n?.count, v1?.count)
+        XCTAssertEqual(v2?.count, 4 + 1088 + 12 + 4 + 16)
+        let f1 = try XCTUnwrap(v1)
+        let key1 = try priv.decapsulate(f1.prefix(1088))
+        XCTAssertEqual(try ChaChaPoly.open(try ChaChaPoly.SealedBox(combined: f1.dropFirst(1088)), using: key1), Data("hola".utf8))
+        let f2 = try XCTUnwrap(v2)
+        XCTAssertEqual(f2.prefix(4), Frames.header(suite: Frames.kemMlkem768))
+        let key2 = try priv.decapsulate(f2.dropFirst(4).prefix(1088))
+        XCTAssertEqual(try Frames.openChaCha(body: Data(f2.dropFirst(4 + 1088)), key: key2, header: Frames.header(suite: Frames.kemMlkem768)), Data("hola".utf8))
     }
 
     // biometric gating needs an enrolled biometric, not just a Secure Enclave

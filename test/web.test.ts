@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { ml_dsa65 } from '@noble/post-quantum/ml-dsa.js';
 import { p256 } from '@noble/curves/nist.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
+import { ml_kem768 } from '@noble/post-quantum/ml-kem.js';
+import { randomBytes } from '@noble/post-quantum/utils.js';
+import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
+import { gcm } from '@noble/ciphers/aes.js';
 import { PqSecureStorageWeb } from '../src/web';
+import { frameHeader } from '../src/frames';
 
 class MemoryStorage implements Storage {
     private m = new Map<string, string>();
@@ -31,6 +36,9 @@ const web = () => new PqSecureStorageWeb(new MemoryStorage());
 const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
 const utf8 = (b: string) => Buffer.from(b, 'base64').toString('utf8');
 const bytes = (b: string) => new Uint8Array(Buffer.from(b, 'base64'));
+const toB64 = (u: Uint8Array) => Buffer.from(u).toString('base64');
+const concat = (...p: Uint8Array[]) => new Uint8Array(Buffer.concat(p));
+const utf8Bytes = (s: string) => new Uint8Array(Buffer.from(s, 'utf8'));
 
 describe('web software fallback', () => {
     it('reports software capabilities (not secure enclave)', async () => {
@@ -174,6 +182,282 @@ describe('web software fallback', () => {
         await expect(pq.encryptTo({ recipientPublicKey: huge, type: 'PQC_MLKEM_768', data: b64('x') })).rejects.toThrow(
             /invalid public key/i,
         );
+    });
+
+    it('writes a v2 ML-KEM frame with the header and reads it back as current', async () => {
+        const pq = web();
+        const { publicKey } = await pq.generateKemKeyPair({ keyAlias: 'k2', type: 'PQC_MLKEM_768' });
+        const { ciphertext } = await pq.encryptTo({
+            recipientPublicKey: publicKey,
+            type: 'PQC_MLKEM_768',
+            data: b64('hi'),
+            format: 2,
+        });
+        expect([...bytes(ciphertext).subarray(0, 4)]).toEqual([0x50, 0x51, 0x02, 0x01]);
+        expect(bytes(ciphertext).length).toBe(4 + 1088 + 12 + 2 + 16);
+        const r = await pq.decrypt({ keyAlias: 'k2', type: 'PQC_MLKEM_768', data: ciphertext });
+        expect(utf8(r.plaintext)).toBe('hi');
+        expect(r.outdated).toBe(false);
+    });
+
+    it('writes the 1024 suite byte and round-trips', async () => {
+        const pq = web();
+        const { publicKey } = await pq.generateKemKeyPair({ keyAlias: 'k', type: 'PQC_MLKEM_1024' });
+        const { ciphertext } = await pq.encryptTo({
+            recipientPublicKey: publicKey,
+            type: 'PQC_MLKEM_1024',
+            data: b64('hi'),
+            format: 2,
+        });
+        expect([...bytes(ciphertext).subarray(0, 4)]).toEqual([0x50, 0x51, 0x02, 0x02]);
+        const r = await pq.decrypt({ keyAlias: 'k', type: 'PQC_MLKEM_1024', data: ciphertext });
+        expect(utf8(r.plaintext)).toBe('hi');
+        expect(r.outdated).toBe(false);
+    });
+
+    it('authenticates the v2 header as AAD', async () => {
+        const kp = ml_kem768.keygen();
+        const { ciphertext } = await web().encryptTo({
+            recipientPublicKey: toB64(kp.publicKey),
+            type: 'PQC_MLKEM_768',
+            data: b64('layout'),
+            format: 2,
+        });
+        const frame = bytes(ciphertext);
+        const body = frame.subarray(4);
+        const ss = ml_kem768.decapsulate(body.subarray(0, 1088), kp.secretKey);
+        const nonce = body.subarray(1088, 1100);
+        const sealed = body.subarray(1100);
+        expect(new TextDecoder().decode(chacha20poly1305(ss, nonce, frame.subarray(0, 4)).decrypt(sealed))).toBe(
+            'layout',
+        );
+        expect(() => chacha20poly1305(ss, nonce).decrypt(sealed)).toThrow();
+    });
+
+    it('reads a v1 ML-KEM frame unchanged and reports it outdated', async () => {
+        const pq = web();
+        const { publicKey } = await pq.generateKemKeyPair({ keyAlias: 'k1', type: 'PQC_MLKEM_768' });
+        const { ciphertext } = await pq.encryptTo({
+            recipientPublicKey: publicKey,
+            type: 'PQC_MLKEM_768',
+            data: b64('hi'),
+        });
+        expect(bytes(ciphertext).length).toBe(1088 + 12 + 2 + 16);
+        const r = await pq.decrypt({ keyAlias: 'k1', type: 'PQC_MLKEM_768', data: ciphertext });
+        expect(utf8(r.plaintext)).toBe('hi');
+        expect(r.outdated).toBe(true);
+    });
+
+    it('treats format 1, null and undefined as the plain frame', async () => {
+        const pq = web();
+        const { publicKey } = await pq.generateKemKeyPair({ keyAlias: 'k', type: 'PQC_MLKEM_768' });
+        for (const format of [1, null, undefined]) {
+            const { ciphertext } = await pq.encryptTo({
+                recipientPublicKey: publicKey,
+                type: 'PQC_MLKEM_768',
+                data: b64('hi'),
+                format: format as never,
+            });
+            expect(bytes(ciphertext).length).toBe(1088 + 12 + 2 + 16);
+        }
+    });
+
+    it('round-trips an empty payload in a v2 frame', async () => {
+        const pq = web();
+        const { publicKey } = await pq.generateKemKeyPair({ keyAlias: 'e', type: 'PQC_MLKEM_768' });
+        const { ciphertext } = await pq.encryptTo({
+            recipientPublicKey: publicKey,
+            type: 'PQC_MLKEM_768',
+            data: '',
+            format: 2,
+        });
+        expect(bytes(ciphertext).length).toBe(4 + 1088 + 12 + 16);
+        const r = await pq.decrypt({ keyAlias: 'e', type: 'PQC_MLKEM_768', data: ciphertext });
+        expect(r.plaintext).toBe('');
+        expect(r.outdated).toBe(false);
+    });
+
+    it('refuses a v2 frame whose suite does not match the key type', async () => {
+        const pq = web();
+        await pq.generateKemKeyPair({ keyAlias: 'a', type: 'PQC_MLKEM_768' });
+        const { publicKey } = await pq.generateKemKeyPair({ keyAlias: 'b', type: 'PQC_MLKEM_1024' });
+        const { ciphertext } = await pq.encryptTo({
+            recipientPublicKey: publicKey,
+            type: 'PQC_MLKEM_1024',
+            data: b64('hi'),
+            format: 2,
+        });
+        await expect(pq.decrypt({ keyAlias: 'a', type: 'PQC_MLKEM_768', data: ciphertext })).rejects.toMatchObject({
+            code: 'E_DECRYPT',
+            message: 'Decrypt failed',
+        });
+    });
+
+    it('refuses an at-rest v2 frame given to decrypt', async () => {
+        const pq = web();
+        await pq.generateKemKeyPair({ keyAlias: 'a', type: 'PQC_MLKEM_768' });
+        const frame = concat(frameHeader(0x10), randomBytes(1200));
+        await expect(pq.decrypt({ keyAlias: 'a', type: 'PQC_MLKEM_768', data: toB64(frame) })).rejects.toMatchObject({
+            code: 'E_DECRYPT',
+            message: 'Decrypt failed',
+        });
+    });
+
+    it('rejects a frame from a newer plugin version or an unknown suite with E_UNSUPPORTED', async () => {
+        const pq = web();
+        await pq.generateKemKeyPair({ keyAlias: 'a', type: 'PQC_MLKEM_768' });
+        for (const head of [
+            [0x50, 0x51, 0x03, 0x01],
+            [0x50, 0x51, 0x02, 0x0e],
+        ]) {
+            const frame = concat(new Uint8Array(head), randomBytes(1200));
+            await expect(
+                pq.decrypt({ keyAlias: 'a', type: 'PQC_MLKEM_768', data: toB64(frame) }),
+            ).rejects.toMatchObject({ code: 'E_UNSUPPORTED', message: 'Unsupported frame' });
+        }
+    });
+
+    it('rejects a bad format before decoding', async () => {
+        const pq = web();
+        for (const format of ['2', 1.5, 3, true]) {
+            await expect(
+                pq.encryptTo({
+                    recipientPublicKey: 'x',
+                    type: 'PQC_MLKEM_768',
+                    data: 'x',
+                    format: format as never,
+                }),
+            ).rejects.toMatchObject({ code: 'E_INVALID_ARGS', message: 'format must be 1 or 2' });
+        }
+    });
+
+    it('a truncated v2 frame gives E_DECRYPT, not a thrown slice error', async () => {
+        const pq = web();
+        await pq.generateKemKeyPair({ keyAlias: 'a', type: 'PQC_MLKEM_768' });
+        const frame = concat(frameHeader(0x01), randomBytes(1100));
+        await expect(pq.decrypt({ keyAlias: 'a', type: 'PQC_MLKEM_768', data: toB64(frame) })).rejects.toMatchObject({
+            code: 'E_DECRYPT',
+            message: 'Decrypt failed',
+        });
+    });
+
+    it('reports atRestSuite 0x10', async () => {
+        expect((await web().getHardwareCapabilities()).atRestSuite).toBe(0x10);
+    });
+
+    it('writes a v2 at-rest frame and reads it back as current', async () => {
+        const pq = web();
+        const { ciphertext } = await pq.encryptAtRest({ keyAlias: 'a', data: b64('rest'), format: 2 });
+        expect([...bytes(ciphertext).subarray(0, 4)]).toEqual([0x50, 0x51, 0x02, 0x10]);
+        expect(bytes(ciphertext).length).toBe(4 + 12 + 4 + 16);
+        const r = await pq.decryptAtRest({ keyAlias: 'a', data: ciphertext });
+        expect(utf8(r.plaintext)).toBe('rest');
+        expect(r.outdated).toBe(false);
+    });
+
+    it('authenticates the v2 at-rest header as AAD', async () => {
+        const storage = new MemoryStorage();
+        const pq = new PqSecureStorageWeb(storage);
+        const { ciphertext } = await pq.encryptAtRest({ keyAlias: 'a', data: b64('layout'), format: 2 });
+        const key = bytes(storage.getItem('pqss.aes.a') as string);
+        const frame = bytes(ciphertext);
+        const nonce = frame.subarray(4, 16);
+        const sealed = frame.subarray(16);
+        expect(new TextDecoder().decode(gcm(key, nonce, frame.subarray(0, 4)).decrypt(sealed))).toBe('layout');
+        expect(() => gcm(key, nonce).decrypt(sealed)).toThrow();
+    });
+
+    it('reads a v1 at-rest frame unchanged and reports it outdated', async () => {
+        const pq = web();
+        const { ciphertext } = await pq.encryptAtRest({ keyAlias: 'a', data: b64('rest') });
+        expect(bytes(ciphertext).length).toBe(12 + 4 + 16);
+        const r = await pq.decryptAtRest({ keyAlias: 'a', data: ciphertext });
+        expect(utf8(r.plaintext)).toBe('rest');
+        expect(r.outdated).toBe(true);
+    });
+
+    it('treats format 1, null and undefined as the plain at-rest frame', async () => {
+        const pq = web();
+        for (const format of [1, null, undefined]) {
+            const { ciphertext } = await pq.encryptAtRest({
+                keyAlias: 'a',
+                data: b64('rest'),
+                format: format as never,
+            });
+            expect(bytes(ciphertext).length).toBe(12 + 4 + 16);
+        }
+    });
+
+    it('round-trips an empty payload at rest in v2', async () => {
+        const pq = web();
+        const { ciphertext } = await pq.encryptAtRest({ keyAlias: 'e', data: '', format: 2 });
+        expect(bytes(ciphertext).length).toBe(4 + 12 + 16);
+        const r = await pq.decryptAtRest({ keyAlias: 'e', data: ciphertext });
+        expect(r.plaintext).toBe('');
+        expect(r.outdated).toBe(false);
+    });
+
+    it('refuses a KEM v2 frame given to decryptAtRest', async () => {
+        const pq = web();
+        await pq.encryptAtRest({ keyAlias: 'a', data: b64('x') });
+        const frame = concat(frameHeader(0x01), randomBytes(1200));
+        await expect(pq.decryptAtRest({ keyAlias: 'a', data: toB64(frame) })).rejects.toMatchObject({
+            code: 'E_DECRYPT',
+            message: 'Decrypt failed',
+        });
+    });
+
+    it('refuses the iOS at-rest suites on the web', async () => {
+        const pq = web();
+        await pq.encryptAtRest({ keyAlias: 'a', data: b64('x') });
+        for (const suite of [0x11, 0x12]) {
+            const frame = concat(frameHeader(suite), randomBytes(60));
+            await expect(pq.decryptAtRest({ keyAlias: 'a', data: toB64(frame) })).rejects.toMatchObject({
+                code: 'E_DECRYPT',
+                message: 'Decrypt failed',
+            });
+        }
+    });
+
+    it('a tampered suite byte on a v2 at-rest frame does not open', async () => {
+        const pq = web();
+        const { ciphertext } = await pq.encryptAtRest({ keyAlias: 'a', data: b64('rest'), format: 2 });
+        const suite = bytes(ciphertext);
+        suite[3] = 0x11;
+        await expect(pq.decryptAtRest({ keyAlias: 'a', data: toB64(suite) })).rejects.toMatchObject({
+            code: 'E_DECRYPT',
+            message: 'Decrypt failed',
+        });
+        const version = bytes(ciphertext);
+        version[2] = 0x03;
+        await expect(pq.decryptAtRest({ keyAlias: 'a', data: toB64(version) })).rejects.toMatchObject({
+            code: 'E_UNSUPPORTED',
+            message: 'Unsupported frame',
+        });
+    });
+
+    it('does not open a v2 at-rest frame sealed without the header as AAD', async () => {
+        const storage = new MemoryStorage();
+        const pq = new PqSecureStorageWeb(storage);
+        await pq.encryptAtRest({ keyAlias: 'a', data: b64('x') });
+        const key = bytes(storage.getItem('pqss.aes.a') as string);
+        const nonce = randomBytes(12);
+        const frame = concat(frameHeader(0x10), nonce, gcm(key, nonce).encrypt(utf8Bytes('rest')));
+        await expect(pq.decryptAtRest({ keyAlias: 'a', data: toB64(frame) })).rejects.toMatchObject({
+            code: 'E_DECRYPT',
+            message: 'Decrypt failed',
+        });
+    });
+
+    it('rejects a bad format on encryptAtRest before decoding or creating the key', async () => {
+        const storage = new MemoryStorage();
+        const pq = new PqSecureStorageWeb(storage);
+        for (const format of ['2', 1.5, 3, true]) {
+            await expect(
+                pq.encryptAtRest({ keyAlias: 'a', data: '***', format: format as never }),
+            ).rejects.toMatchObject({ code: 'E_INVALID_ARGS', message: 'format must be 1 or 2' });
+        }
+        expect(storage.getItem('pqss.aes.a')).toBeNull();
     });
 });
 
@@ -322,5 +606,45 @@ describe('web error codes', () => {
 
     it('keeps the plain message on the error', async () => {
         await expect(web().getPublicKey({ keyAlias: 'nope' })).rejects.toThrow('Key not found');
+    });
+});
+
+describe('web storage and argument types', () => {
+    // a full localStorage throws a DOMException with a number code, not one of ours
+    class FullStorage extends MemoryStorage {
+        setItem() {
+            throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+        }
+    }
+
+    it('answers E_STORE_FULL when the browser storage is full', async () => {
+        const pq = new PqSecureStorageWeb(new FullStorage());
+        await expect(pq.setItem({ key: 'k', value: 'v' })).rejects.toMatchObject({ code: 'E_STORE_FULL' });
+        await expect(pq.generateKeyPair({ keyAlias: 'a', type: 'ED25519' })).rejects.toMatchObject({
+            code: 'E_STORE_FULL',
+        });
+        await expect(pq.generateKemKeyPair({ keyAlias: 'a', type: 'PQC_MLKEM_768' })).rejects.toMatchObject({
+            code: 'E_STORE_FULL',
+        });
+        await expect(pq.encryptAtRest({ keyAlias: 'a', data: b64('x') })).rejects.toMatchObject({
+            code: 'E_STORE_FULL',
+        });
+    });
+
+    it('rejects an argument of the wrong type with E_MISSING_PARAMS like the natives', async () => {
+        const pq = web();
+        await pq.generateKeyPair({ keyAlias: 's', type: 'ED25519' });
+        const n = 1234 as unknown as string;
+        await expect(pq.sign({ keyAlias: 's', data: n, type: 'ED25519' })).rejects.toMatchObject({
+            code: 'E_MISSING_PARAMS',
+        });
+        await expect(pq.getPublicKey({ keyAlias: n })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        await expect(pq.setItem({ key: n, value: 'v' })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        await expect(pq.setItem({ key: 'k', value: n })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        await expect(pq.getItem({ key: n })).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        await expect(
+            pq.encryptTo({ recipientPublicKey: n, type: 'PQC_MLKEM_768', data: b64('x') }),
+        ).rejects.toMatchObject({ code: 'E_MISSING_PARAMS' });
+        expect((await pq.keys()).keys).toEqual([]);
     });
 });

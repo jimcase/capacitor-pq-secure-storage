@@ -6,6 +6,146 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Security
+
+Fixes from the third security audit, of the 8.3.0 candidate (16 findings, none critical or high).
+
+- Android: a biometric call made while the app was in the background (for example from the app
+  state listener) never settled. androidx.biometric drops a prompt asked after `onStop` with only a
+  log line, so the one-prompt latch stayed set and every later biometric call answered `E_BUSY`
+  until the app restarted. Such a call now rejects `E_AUTH_FAILED` at once.
+- Android: an `overwrite` of an ML-DSA or ECDSA key whose new keygen failed deleted the old key,
+  because Android deletes the alias of a failed keygen. An ML-DSA type now rejects `E_KEYGEN` before
+  any prompt when the Keystore cannot make ML-DSA keys, and an overwrite first makes the new key under
+  a throwaway alias. A failure in the last step only can still lose the old key; read `getPublicKey`
+  after `E_KEYGEN` on an overwrite.
+- iOS: an `overwrite` of a Secure Enclave key (ML-DSA, ECDSA, ML-KEM) wrote the new public key
+  before the new private key, so a failure in between left `getPublicKey` showing the new key while
+  `sign` and `decrypt` used the old one. The private key now goes first under a versioned account,
+  as for wrapped Ed25519 since 8.2.0. A key left in that state by an older version rejects `sign`
+  and `decrypt` with `E_TAMPERED`.
+- Android: a Keystore error while looking up a key was read as "no key". `removeItem` then deleted a
+  biometric item with no prompt, a silent `setItem` replaced a biometric item, and an Ed25519
+  overwrite skipped its biometric gate. Only a key killed by an enrollment change is treated as gone
+  now, any other error rejects.
+- `withPrefix` and the shared instance turned a key that is not a string into a name: an undefined
+  key was stored under `"undefined"`, where the native plugin would have rejected it. Such a key now
+  rejects `E_MISSING_PARAMS`. `clear()` on the shared instance with a prefix read the prefix again for
+  every item, so a `setKeyPrefix('')` during it wiped the rest of the store. It keeps the prefix it
+  started with.
+
+### Fixed
+
+- Android: a cancelled or busy biometric `setItem` on a new name left its Keystore key behind. Then
+  `clear()` asked for a biometric on a store with only silent items, and `removeItem` of that name
+  prompted for nothing. The key is now deleted, `removeItem` deletes a key with no stored item
+  without a prompt, and `clear()` binds its prompt only to keys that have an item.
+- Android: a hardware keygen on an alias whose wrapped Ed25519 key was waiting for its creation
+  prompt went through, and the alias then held two keys that no overwrite could replace. That keygen
+  now rejects `E_BUSY`, and the Ed25519 key is not saved if a hardware key appeared meanwhile.
+- Android: a prefs write that failed rejected the call but kept the new state in memory, so the same
+  process served the new key or value and a later write could save it for good. The old values are
+  now put back. `clear()` rejects `E_CLEAR` before it deletes any key when its prefs write fails.
+- iOS: `clear()` could race the name index writes of `getItem` and `setItem` and leave a name that
+  `keys()` lists and nothing removes, or an item that no name reaches. They now share a lock.
+- iOS: a `0x12` frame that opened is never reported `outdated`, and `format: 2` keeps writing `0x12`
+  for an alias that already has its ML-KEM key. A Secure Enclave check that failed once could make an
+  app write that data again with the classical `0x11` suite.
+- iOS: the input caps of the crypto calls count bytes, not characters.
+- Web fallback: a full browser storage rejects `E_STORE_FULL` (was a `DOMException`), and a string
+  argument of another type rejects `E_MISSING_PARAMS` (a number `data` was signed as its digits).
+- `FrameSuite`, `FRAME_SUITES` and `KEM_SUITE` are frozen. The web fallback reads `FrameSuite` on every
+  call, so changing it changed the frames it wrote.
+
+### Added
+
+- `format?: 1 | 2` on `encryptTo` and `encryptAtRest`. `2` puts a 4-byte header (`50 51`, version
+  `02`, suite) in front of the frame, so the algorithm is written in the blob and a later release can
+  change it without breaking stored data. Without `format` (or with `1`) the output has the same layout
+  and size as in 8.2.0. Any other value rejects `E_INVALID_ARGS`.
+- Five frame suites: `0x01` and `0x02` for `encryptTo` (ML-KEM-768 and 1024), `0x10` AES-256-GCM,
+  `0x11` Secure Enclave ECIES and `0x12` Secure Enclave ML-KEM for `encryptAtRest`. The header is the
+  associated data of every suite that has an AEAD, which is all but `0x11`. `FrameSuite`,
+  `FRAME_SUITES` and `parseFrameHeader` are exported to inspect a frame.
+- `decrypt` and `decryptAtRest` read v1 and v2 frames and you do not say which. A frame from a newer
+  version of the plugin (unknown header version or suite) rejects `E_UNSUPPORTED`.
+- `outdated` in the result of `decrypt` and `decryptAtRest`: `true` when the frame was read as v1, and
+  for at rest also when its suite is not `atRestSuite`. Read, see `true`, encrypt again with
+  `format: 2` and store it.
+- `atRestSuite` in `getHardwareCapabilities`: the suite `encryptAtRest({ format: 2 })` writes on this
+  device. `0x10` on Android and the web. On iOS `0x12`, or `0x11` below iOS 26 and when the Secure
+  Enclave cannot make an ML-KEM-768 key. On iOS the plugin checks it once per process when the check
+  succeeds, and a failed check runs again on the next call.
+- Encryption at rest under a Secure Enclave ML-KEM-768 key on iOS 26+ (`format: 2`, suite `0x12`). The
+  alias key comes from one encapsulation saved in the Keychain (about 2.5 KB per alias) and one
+  decapsulation in the Secure Enclave per call. No biometric prompt.
+- Error code `E_BIOMETRY_UNAVAILABLE`: the call needs a biometric and the device cannot give one now.
+  That is no biometric hardware, none enrolled (Android counts only a strong, Class 3 biometric, so a
+  weak face unlock is not enough), biometrics turned off or not allowed for the app (Face ID denied
+  in Settings), no passcode, the sensor temporarily unavailable, or a lockout after too many failed
+  tries. A host can now tell it from a cancel or a failed match, which stay `E_AUTH_FAILED`. The web
+  fallback never raises it.
+
+### Changed
+
+- `decrypt` and `decryptAtRest` return one more field, `outdated`, and `getHardwareCapabilities` one
+  more, `atRestSuite`. Existing fields and frames are unchanged, but typed mocks or implementations of
+  `PqSecureStoragePlugin` or `HardwareCapabilities` stop compiling until they add `outdated` to the
+  decrypt results and `atRestSuite` to the capabilities.
+- No rollback for `format: 2` data: 8.2.0 and earlier cannot read frames made with it. Frames without
+  a header keep working in both directions.
+- Error codes, Android: `generateKeyPair` (hardware and Ed25519 keys) and `generateKemKeyPair` with
+  `requireBiometric: true` reject `E_BIOMETRY_UNAVAILABLE` before they touch the Keystore when no
+  strong biometric can be used (was `E_KEYGEN`), and so does `setItem({ requireBiometric: true })`
+  (was `E_ENCRYPT`). Every biometric prompt runs the same check before it shows, and a prompt that
+  ends with no sensor, nothing enrolled, the sensor unavailable, a lockout, a pending security update
+  or no device PIN or password rejects `E_BIOMETRY_UNAVAILABLE` (was `E_AUTH_FAILED`). A cancel, the
+  Cancel button, a timeout and a prompt that fails to start stay `E_AUTH_FAILED`.
+- Error codes, iOS: `generateKeyPair` (Ed25519 included) and `generateKemKeyPair` with
+  `requireBiometric: true`, and `setItem({ requireBiometric: true })`, reject `E_BIOMETRY_UNAVAILABLE`
+  before any Keychain or Secure Enclave call when no biometric can be used (was `E_AUTH_FAILED` at an
+  overwrite prompt, and `E_KEYGEN` for the keys, wrapped Ed25519 included, or `E_ENCRYPT` for
+  `setItem` when the Keychain refused the creation, which is not yet confirmed on a device, see D11). For `setItem` the check comes before the probe of the existing item, so a biometric item
+  killed by an enrollment change answers it too when no biometric is left (was `E_KEY_INVALIDATED`
+  or `E_AUTH_FAILED`). The prompt before `sign`, `decrypt`, a key overwrite, replacing a biometric
+  item, `removeItem` and `clear()` rejects `E_BIOMETRY_UNAVAILABLE` when no biometric can be used or
+  the prompt ends in a lockout (was `E_AUTH_FAILED`). `getItem` and Ed25519 `sign`, where the
+  Keychain shows the prompt, answer `E_BIOMETRY_UNAVAILABLE` for a failed or cancelled read when no
+  biometric can be used at that moment (was `E_AUTH_FAILED`). `removeItem` and `clear()` still
+  delete dead items with no prompt when no biometric is enrolled.
+- The biometry check runs first: with `requireBiometric: true` and no usable biometric,
+  `E_BIOMETRY_UNAVAILABLE` comes before `E_ALIAS_EXISTS`, `E_STORE_FULL`, `E_TIER_MISMATCH` and
+  `E_BUSY`. Only the argument and platform checks (`E_MISSING_PARAMS`, `E_INVALID_ARGS`,
+  `E_BAD_ALIAS`, `E_UNSUPPORTED`) come before it.
+- If your code reads `E_AUTH_FAILED` as "no biometric", handle `E_BIOMETRY_UNAVAILABLE` too.
+- Error codes from the audit fixes: Android `getItem` answers `E_DECRYPT` when the Keystore fails to
+  look up the item key (was `E_KEY_NOT_FOUND`) and `E_KEY_INVALIDATED` when it reports the key dead.
+  iOS `sign` and `decrypt` answer `E_TAMPERED` for a key whose public and private no longer match.
+  The web fallback answers `E_STORE_FULL` and `E_MISSING_PARAMS` (see Fixed).
+- No rollback for a replaced iOS Secure Enclave key: 8.2.0 and earlier look for the old private
+  account and answer `E_KEY_NOT_FOUND` for a key replaced with `overwrite` on this version. Keys
+  created and never replaced keep working both ways.
+- `FRAME_SUITES` and `KEM_SUITE` are typed `Readonly` now that they are frozen.
+
+### Fixed
+
+- iOS `keys()` did not list biometric items, so `withPrefix(...).clear()` left them in the store.
+  Each item now has an index row in the Keychain (service `pq.securestorage.index`, no access
+  control, the same keyed-hash account and encrypted name as the item), and `keys()` lists the rows
+  and the store together, with no prompt. `setItem` writes the row after the item (a failed row on
+  create undoes the item and rejects `E_ENCRYPT`), `getItem` adds a missing row, `removeItem`
+  deletes it and `clear()` deletes all of them. A silent item saved by an earlier version is listed
+  at once, a biometric one after one `getItem` or `setItem` on it. A plain `clear()` removes
+  everything as before.
+- Android reported ML-DSA on a phone whose Keystore cannot make the keys (`supportsPqc` true, both
+  ML-DSA types in `supportedVariants`, then `generateKeyPair` rejected `E_KEYGEN`). `supportsPqc` and
+  the ML-DSA entries of `supportedVariants` now come from making and deleting a throwaway ML-DSA-65
+  key (no biometric, no unlock requirement) the first time `getHardwareCapabilities` is called after
+  the plugin loads, and the plugin keeps the answer in memory until it is reloaded. That first call
+  does one more key generation in the Keystore. `generateKeyPair` is the same.
+- Android `supportedVariants` and `supportedKem` reached JavaScript as a string such as
+  `"[ECDSA_256R1, ED25519]"`. They are arrays now, as on iOS and the web.
+
 ## [8.2.0] - 2026-10-31
 
 Fixes from the second security audit of 8.1.0 (14 findings, none critical). Same code as 7.2.0, only
