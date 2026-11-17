@@ -44,4 +44,17 @@ final class StoreIndexTests: XCTestCase {
     func testTheIndexServiceName() {
         XCTAssertEqual(StoreIndex.service, "pq.securestorage.index")
     }
+
+    func testAnItemTheMetadataReadCannotSeeIsAbsent() {
+        XCTAssertEqual(StoreIndex.afterNotFound(metaExists: false, retried: false), .absent)
+        XCTAssertEqual(StoreIndex.afterNotFound(metaExists: false, retried: true), .absent)
+    }
+
+    func testARowTheDataReadMissedGetsOneMoreRead() {
+        XCTAssertEqual(StoreIndex.afterNotFound(metaExists: true, retried: false), .retry)
+    }
+
+    func testARowStillThereAfterTheSecondReadIsInvalidated() {
+        XCTAssertEqual(StoreIndex.afterNotFound(metaExists: true, retried: true), .invalidated)
+    }
 }
