@@ -48,6 +48,9 @@ Fixes from the third security audit, of the 8.3.0 candidate (16 findings, none c
   now put back. `clear()` rejects `E_CLEAR` before it deletes any key when its prefs write fails.
 - iOS: `clear()` could race the name index writes of `getItem` and `setItem` and leave a name that
   `keys()` lists and nothing removes, or an item that no name reaches. They now share a lock.
+- iOS: `getItem` answered `E_KEY_INVALIDATED` for a healthy item when a `setItem` of the same name
+  landed between its two Keychain reads (8.2.0 does it too, found on an iPhone). A name that looks
+  dead after the first read is now read once more before it is called invalidated.
 - iOS: a `0x12` frame that opened is never reported `outdated`, and `format: 2` keeps writing `0x12`
   for an alias that already has its ML-KEM key. A Secure Enclave check that failed once could make an
   app write that data again with the classical `0x11` suite.

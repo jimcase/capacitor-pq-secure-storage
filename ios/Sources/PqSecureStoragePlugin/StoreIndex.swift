@@ -21,4 +21,13 @@ enum StoreIndex {
         }
         return out
     }
+
+    enum NotFoundVerdict { case absent, retry, invalidated }
+
+    // getItem got NotFound for the data and then looked at the attributes. A row there is a dead item
+    // unless a setItem of the same name landed in between, so read the data once more first.
+    static func afterNotFound(metaExists: Bool, retried: Bool) -> NotFoundVerdict {
+        if !metaExists { return .absent }
+        return retried ? .invalidated : .retry
+    }
 }

@@ -1426,6 +1426,11 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
     private static let ssService = "pq.securestorage"
 
     // metadata-only read of a store item, no prompt. Used to tell a missing row from an unreadable one.
+    private static func ssRowThere(account: String) -> Bool {
+        let status = ssMetaStatus(account: account)
+        return status == errSecSuccess || status == errSecInteractionNotAllowed
+    }
+
     private static func ssMetaStatus(account: String) -> OSStatus {
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -1645,7 +1650,16 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
                 kSecUseAuthenticationContext as String: context,
             ]
             var out: CFTypeRef?
-            let status = SecItemCopyMatching(query as CFDictionary, &out)
+            var status = SecItemCopyMatching(query as CFDictionary, &out)
+            var rowThere = false
+            if status == errSecItemNotFound {
+                rowThere = Self.ssRowThere(account: account)
+                if StoreIndex.afterNotFound(metaExists: rowThere, retried: false) == .retry {
+                    out = nil
+                    status = SecItemCopyMatching(query as CFDictionary, &out)
+                    if status == errSecItemNotFound { rowThere = Self.ssRowThere(account: account) }
+                }
+            }
             switch status {
             case errSecSuccess:
                 let attrs = out as? [String: Any]
@@ -1670,8 +1684,7 @@ public class PqSecureStoragePlugin: CAPPlugin, CAPBridgedPlugin {
             case errSecItemNotFound:
                 // after an enrollment change some OS versions answer NotFound for a data read of the
                 // dead item. A metadata read still sees the row, so tell the two apart.
-                let metaStatus = Self.ssMetaStatus(account: account)
-                if metaStatus == errSecSuccess || metaStatus == errSecInteractionNotAllowed {
+                if StoreIndex.afterNotFound(metaExists: rowThere, retried: true) == .invalidated {
                     call.reject("Biometric enrollment changed; item invalidated", "E_KEY_INVALIDATED")
                 } else {
                     call.resolve(["value": NSNull()])
