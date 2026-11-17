@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [7.3.0] - 2026-11-17
+
+Frame format v2, `E_BIOMETRY_UNAVAILABLE`, the device fixes and the fixes from the third security
+audit. Same code as 8.3.0, only the build tooling differs.
+
 ### Security
 
 Fixes from the third security audit, of the 7.3.0 candidate (16 findings, none critical or high).
