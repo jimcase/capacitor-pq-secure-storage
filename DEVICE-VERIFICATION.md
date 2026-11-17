@@ -456,6 +456,10 @@ they need the Keystore, the Keychain or a real prompt.
 - [ ] **H12.** [manual] iOS 26, P-14: the first `decryptAtRest` of a process on a `0x12` frame gives
   `outdated: false`. `encryptAtRest` with `format: 2` on an alias that has its ML-KEM item writes
   `0x12` even if `atRestSuite` reads 17 in that process.
+- [ ] **H13.** [manual] iOS, `getItem` racing the first `setItem` of a name: for 300 new names, run
+  three `getItem` and one `setItem` of the same name at the same time. No `getItem` may answer
+  `E_KEY_INVALIDATED` (it says null or the value). Before the fix it answered it for 22 to 44 of 900
+  reads on the candidate and 105 of 900 on 7.2.0.
 
 ## Troubleshooting
 
@@ -514,7 +518,10 @@ fails. Earlier: D2, D4 and D5 passed on an iPhone 15 Pro / iOS 26 on 2026-07-14 
 | X1, X2, X3 | Partial: web and each phone pass both ways; direct iOS to Android not run; Android prompts are strong biometric only, iOS not looked at |
 | X4 | Pass on both phones, web to phone and phone to web, ML-KEM 768 and 1024 |
 | C5, C6, D13, D14, E21 (`E_BIOMETRY_UNAVAILABLE`) | Not run yet |
-| H1 to H12 (third audit fixes) | Not run yet |
+| H8, H9, H12 (third audit fixes, iOS) | Pass on the iPhone 16 / iOS 27.0.1 on 2026-11-17. Overwrites of ML-DSA, ECDSA, Ed25519 and ML-KEM keys twice, with the private moving to the next account. A private put back by hand gives `E_TAMPERED` on `sign` and `decrypt` and an overwrite heals it. 40 rounds of `getItem`, `setItem` and `clear()` at once leave no ghost name and no hidden item. A `0x12` frame read first in a new process is not `outdated` |
+| E6 on the candidate, upgrade and rollback | Pass: an item made on 7.2.0 enters `keys()` after one `getItem`, keys, items and a v1 frame of 7.2.0 still open, and a key never replaced still signs on 7.2.0. A replaced ML-DSA, ECDSA or ML-KEM key answers `E_KEY_NOT_FOUND` on 7.2.0, and a name removed on 7.2.0 comes back as a ghost that `removeItem` cleans |
+| H13 (`getItem` racing `setItem`) | Found on the iPhone and fixed: 22 to 44 of 900 reads answered `E_KEY_INVALIDATED` for a healthy item (105 on 7.2.0), none in three runs after the fix |
+| H1 to H7, H10, H11 | Not run yet |
 
 So the Secure Enclave paths, suite `0x12` and the Android TEE paths are confirmed on a phone.
 ML-DSA on Android is not: the one Android 17 phone tested lists it but cannot make the keys. Suite
